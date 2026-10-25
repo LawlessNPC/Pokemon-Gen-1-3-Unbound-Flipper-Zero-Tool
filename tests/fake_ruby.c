@@ -230,8 +230,11 @@ static void link_main1(FakeRuby* g) {
     g->should_advance = false;
 }
 
+/* InitBlockSend: refused only while a block is active. Otherwise it replaces gLinkCallback,
+ * whatever was running (standby, close, held keys...). The gLinkCallback != NULL check belongs
+ * to the master's SendBlockRequest, not to the receiver of 0x2222/0xCCCC (§A4). */
 static bool init_block_send(FakeRuby* g, const uint8_t* src, uint16_t size) {
-    if(g->callback != FakeRubyCbNone || g->block_send_active) return false;
+    if(g->block_send_active) return false;
     g->block_send_active = true;
     g->block_send_size = size;
     g->block_send_pos = 0;
@@ -459,6 +462,8 @@ static void run_linkup_task(FakeRuby* g) {
             set_error(g, "standby timeout");
             break;
         }
+        /* IsLinkTaskFinished: gLinkCallback == NULL. A stray block that replaced the standby
+         * callback also ends this wait once it is sent, as on Ruby. */
         if(g->callback != FakeRubyCbNone) break;
         g->callback = FakeRubyCbSendHeldKeys; /* StartSendingKeysToLink */
         g->phase = FakeRubyRoom;

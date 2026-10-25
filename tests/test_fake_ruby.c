@@ -163,11 +163,68 @@ TEST(test_fake_block_pacing) {
     ASSERT_STR_EQ(name, "FLIPPER");
 }
 
+/* Scripted master: player blocks, then 0xCCCC 0002 and cards, until G has sent its 0x2FFE and
+ * sits in LinkCB_StandbyForAll (a non-NULL gLinkCallback) waiting for ours. */
+static bool master_to_standby(Gen3Link* l, FakeRuby* g) {
+    MlinkRx rx;
+    Gen3LinkPlayer lp;
+    uint8_t block[GEN3_TRAINER_CARD_BLOCK_SIZE];
+    const uint16_t req_players[GEN3_CMD_LEN] = {0x2222, 0x1133};
+    const uint16_t req_cards[GEN3_CMD_LEN] = {0xCCCC, 0x0002};
+    if(!master_connect(l, g)) return false;
+    make_player(&lp, "FLIPPER", 22222);
+    gen3_link_player_block_build(&lp, block);
+    if(!gen3_link_send(l, req_players)) return false;
+    if(!gen3_block_send(l, block, GEN3_LINK_PLAYER_BLOCK_SIZE, 0)) return false;
+    for(int i = 0; i < 30; i++) master_frame(l, g, 0, &rx);
+    gen3_trainer_card_build(&lp, block);
+    if(!gen3_link_send(l, req_cards)) return false;
+    if(!gen3_block_send(l, block, GEN3_TRAINER_CARD_BLOCK_SIZE, 0)) return false;
+    for(int i = 0; i < 200; i++) {
+        master_frame(l, g, 0, &rx);
+        if(rx.word[1] == 0x2FFE) return fake_ruby_error(g) == NULL;
+    }
+    return false;
+}
+
+/* Sends one stray request while G waits in standby; true if G starts a block with `header`. */
+static bool stray_request_starts_block(uint16_t w0, uint16_t w1, const uint16_t header[3]) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkRx rx;
+    const uint16_t req[GEN3_CMD_LEN] = {w0, w1};
+    fake_init(&g);
+    if(!master_to_standby(&l, &g)) return false;
+    if(fake_ruby_phase(&g) != FakeRubyWalkIn) return false;
+    if(!gen3_link_send(&l, req)) return false;
+    for(int i = 0; i < 4; i++) { /* request on the wire, then G's reply 2 bursts later */
+        master_frame(&l, &g, 0, &rx);
+        if(rx.word[1] == header[0] && rx.word[2] == header[1] && rx.word[3] == header[2]) {
+            return fake_ruby_error(&g) == NULL;
+        }
+    }
+    return false;
+}
+
+TEST(test_fake_stray_card_request_starts_block) {
+    /* InitBlockSend replaces LinkCB_StandbyForAll: G sends its card again (§A4, A7) */
+    const uint16_t header[3] = {0xBBBB, 0x0064, 0x0081};
+    ASSERT_TRUE(stray_request_starts_block(0xCCCC, 0x0002, header));
+}
+
+TEST(test_fake_stray_link_type_starts_block) {
+    /* a duplicate 0x2222 makes G send a second LinkPlayerBlock (§A4) */
+    const uint16_t header[3] = {0xBBBB, 0x003C, 0x0081};
+    ASSERT_TRUE(stray_request_starts_block(0x2222, 0x1133, header));
+}
+
 int main(void) {
     RUN(test_fake_handshake_timeline);
     RUN(test_fake_checksum_checked);
     RUN(test_fake_lag);
     RUN(test_fake_bad_magic);
     RUN(test_fake_block_pacing);
+    RUN(test_fake_stray_card_request_starts_block);
+    RUN(test_fake_stray_link_type_starts_block);
     TEST_EXIT();
 }
