@@ -1,0 +1,173 @@
+#include "test.h"
+#include "fake_ruby.h"
+#include <stdbool.h>
+#include <src/gen3/gen3_block.h>
+#include <src/gen3/gen3_link.h>
+#include <src/gen3/gen3_text.h>
+
+/* Self-checks of the fake Ruby child: it must be as strict as the real one (§A2-A4). */
+
+static void make_player(Gen3LinkPlayer* lp, const char* name, uint32_t trainer_id) {
+    memset(lp, 0, sizeof(*lp));
+    lp->version = GEN3_VERSION_RUBY;
+    lp->trainer_id = trainer_id;
+    gen3_text_encode(name, lp->name, sizeof(lp->name), 7);
+    lp->link_type = GEN3_LINKTYPE_TRADE_SETUP;
+    lp->language = GEN3_LANGUAGE_ENGLISH;
+}
+
+static void fake_init(FakeRuby* g) {
+    Gen3LinkPlayer me;
+    make_player(&me, "RUBY", (54321u << 16) | 12345u);
+    fake_ruby_init(g, &me);
+}
+
+static uint16_t one_transfer(FakeRuby* g, uint16_t w) {
+    MlinkTx tx;
+    MlinkRx rx;
+    memset(&tx, 0, sizeof(tx));
+    tx.count = 1;
+    tx.word[0] = w;
+    fake_ruby_frame(g, &tx, &rx);
+    return rx.word[0];
+}
+
+/* One master frame through gen3_link; xor0 flips bits of transfer #1 (the checksum slot). */
+static void master_frame(Gen3Link* l, FakeRuby* g, uint16_t xor0, MlinkRx* rx) {
+    MlinkTx tx;
+    uint16_t cmd[GEN3_CMD_LEN];
+    gen3_link_tx(l, &tx);
+    tx.word[0] ^= xor0;
+    fake_ruby_frame(g, &tx, rx);
+    gen3_link_rx(l, rx, cmd);
+}
+
+static bool master_connect(Gen3Link* l, FakeRuby* g) {
+    MlinkRx rx;
+    gen3_link_init(l);
+    fake_ruby_open_link(g);
+    for(int i = 0; i < 20 && !gen3_link_connected(l); i++) master_frame(l, g, 0, &rx);
+    return gen3_link_connected(l);
+}
+
+TEST(test_fake_handshake_timeline) {
+    FakeRuby g;
+    fake_init(&g);
+    ASSERT_EQ(one_transfer(&g, 0xB9A0), 0xFFFF); /* link closed */
+    fake_ruby_open_link(&g);
+    ASSERT_EQ(fake_ruby_phase(&g), FakeRubyHandshake);
+    ASSERT_EQ(one_transfer(&g, 0xB9A0), 0x0000); /* OpenLink enabled serial; frame 1 disables it */
+    for(int i = 0; i < 5; i++) ASSERT_EQ(one_transfer(&g, 0xB9A0), 0xFFFF);
+    ASSERT_EQ(one_transfer(&g, 0xB9A0), 0x0000); /* first transfer after EnableSerial (§A3) */
+    ASSERT_EQ(one_transfer(&g, 0xB9A0), 0xB9A0);
+    ASSERT_EQ(fake_ruby_phase(&g), FakeRubyHandshake);
+    ASSERT_EQ(one_transfer(&g, 0x8FFF), 0xB9A0); /* count 2 twice and slot 0 = 8FFF: success */
+    ASSERT_EQ(fake_ruby_phase(&g), FakeRubyLinkup);
+
+    MlinkTx tx;
+    MlinkRx rx;
+    memset(&tx, 0, sizeof(tx));
+    tx.count = MLINK_BURST_LEN;
+    tx.word[0] = 0x1234; /* first burst: checksum not checked */
+    fake_ruby_frame(&g, &tx, &rx);
+    ASSERT_EQ(rx.word[0], 0xB9A0); /* stale handshake word */
+    for(int t = 1; t < MLINK_BURST_LEN; t++) ASSERT_EQ(rx.word[t], 0);
+    ASSERT_TRUE(fake_ruby_error(&g) == NULL);
+}
+
+TEST(test_fake_checksum_checked) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkRx rx;
+    fake_init(&g);
+    ASSERT_TRUE(master_connect(&l, &g));
+    master_frame(&l, &g, 0x0001, &rx); /* first burst: not checked */
+    master_frame(&l, &g, 0, &rx);
+    master_frame(&l, &g, 0, &rx);
+    ASSERT_TRUE(fake_ruby_error(&g) == NULL);
+    ASSERT_EQ(rx.word[0], 0); /* its checksum of the previous all-zero burst */
+    master_frame(&l, &g, 0x0100, &rx);
+    ASSERT_TRUE(fake_ruby_error(&g) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&g), "checksum");
+    master_frame(&l, &g, 0, &rx);
+    for(int t = 0; t < MLINK_BURST_LEN; t++) ASSERT_EQ(rx.word[t], 0xFFFF);
+}
+
+TEST(test_fake_lag) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkRx rx;
+    MlinkTx none;
+    fake_init(&g);
+    ASSERT_TRUE(master_connect(&l, &g));
+    master_frame(&l, &g, 0, &rx);
+    memset(&none, 0, sizeof(none)); /* a frame without transfers */
+    for(int i = 0; i < 10; i++) fake_ruby_frame(&g, &none, &rx);
+    ASSERT_TRUE(fake_ruby_error(&g) == NULL);
+    fake_ruby_frame(&g, &none, &rx);
+    ASSERT_TRUE(fake_ruby_error(&g) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&g), "lag");
+}
+
+TEST(test_fake_bad_magic) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkRx rx;
+    Gen3LinkPlayer lp;
+    uint8_t block[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    const uint16_t req[GEN3_CMD_LEN] = {0x2222, 0x1133};
+    fake_init(&g);
+    ASSERT_TRUE(master_connect(&l, &g));
+    make_player(&lp, "FLIPPER", 22222);
+    gen3_link_player_block_build(&lp, block);
+    block[0x2C + 4] ^= 0x20; /* "GameFreak" -> "Gamefreak" in magic2 */
+    ASSERT_TRUE(gen3_link_send(&l, req));
+    ASSERT_TRUE(gen3_block_send(&l, block, sizeof(block), 0));
+    for(int i = 0; i < 20; i++) master_frame(&l, &g, 0, &rx);
+    ASSERT_TRUE(fake_ruby_error(&g) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&g), "magic");
+}
+
+TEST(test_fake_block_pacing) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkRx rx;
+    Gen3LinkPlayer lp;
+    uint8_t block[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    uint16_t g_cmd[12][GEN3_CMD_LEN];
+    const uint16_t req[GEN3_CMD_LEN] = {0x2222, 0x1133};
+    fake_init(&g);
+    ASSERT_TRUE(master_connect(&l, &g));
+    make_player(&lp, "FLIPPER", 22222);
+    gen3_link_player_block_build(&lp, block);
+    ASSERT_TRUE(gen3_link_send(&l, req));
+    ASSERT_TRUE(gen3_block_send(&l, block, sizeof(block), 0));
+    for(int i = 0; i < 12; i++) {
+        master_frame(&l, &g, 0, &rx);
+        memcpy(g_cmd[i], &rx.word[1], sizeof(g_cmd[i]));
+    }
+    ASSERT_TRUE(fake_ruby_error(&g) == NULL);
+    /* burst 0 carries 2222; G answers in burst 2, then two idle bursts, then 5 chunks (§A4) */
+    ASSERT_EQ(g_cmd[0][0], 0);
+    ASSERT_EQ(g_cmd[1][0], 0);
+    const uint16_t header[GEN3_CMD_LEN] = {0xBBBB, 0x003C, 0x0081, 0, 0, 0, 0, 0};
+    ASSERT_MEM_EQ(g_cmd[2], header, sizeof(header));
+    ASSERT_EQ(g_cmd[3][0], 0);
+    ASSERT_EQ(g_cmd[4][0], 0);
+    for(int i = 5; i < 10; i++) ASSERT_EQ(g_cmd[i][0], 0x8888);
+    ASSERT_EQ(g_cmd[10][0], 0);
+    ASSERT_EQ(g_cmd[5][1], 0x6147); /* "Ga", little-endian */
+
+    char name[16];
+    gen3_text_decode(fake_ruby_partner(&g)->name, 11, name, sizeof(name));
+    ASSERT_STR_EQ(name, "FLIPPER");
+}
+
+int main(void) {
+    RUN(test_fake_handshake_timeline);
+    RUN(test_fake_checksum_checked);
+    RUN(test_fake_lag);
+    RUN(test_fake_bad_magic);
+    RUN(test_fake_block_pacing);
+    TEST_EXIT();
+}
