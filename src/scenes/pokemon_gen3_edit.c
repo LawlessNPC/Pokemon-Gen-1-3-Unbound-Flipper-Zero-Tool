@@ -43,6 +43,7 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
     uint16_t national = gen3_edit_national(ed);
     const Gen3SpeciesInfo* info = gen3_species(national);
     uint32_t ot_id = gen3_pkm_get(p, Gen3FieldOtId);
+    uint16_t item;
     Gen3Traits traits;
     char buf[32];
     char name_buf[GEN3_NICKNAME_LEN + 1];
@@ -100,6 +101,19 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
         gen3_item_name((uint16_t)gen3_pkm_get(p, Gen3FieldBall)));
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Ball);
 
+    item = (uint16_t)gen3_pkm_get(p, Gen3FieldHeldItem);
+    snprintf(buf, sizeof(buf), "Held Item:   %s", item ? gen3_item_name(item) : "No Item");
+    gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3ItemLetter);
+
+    gen3_edit_add(pokemon_fap, "Select Moves", PokemonSceneGen3Moves);
+
+    snprintf(
+        buf,
+        sizeof(buf),
+        "Pokerus:       %s",
+        gen3_pokerus_status((uint8_t)gen3_pkm_get(p, Gen3FieldPokerus)));
+    gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Pokerus);
+
     gen3_pkm_ot_name(p, name_buf, sizeof(name_buf));
     snprintf(buf, sizeof(buf), "OT Name:    %s", name_buf);
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3OtName);
@@ -148,8 +162,11 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
         alias = PokemonSceneGen3Preset;
         break;
     case PokemonSceneGen3Species:
-        /* Its own scene, so there is no alias state to set */
-        scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Species);
+    case PokemonSceneGen3Moves:
+    case PokemonSceneGen3ItemLetter:
+    case PokemonSceneGen3Pokerus:
+        /* Their own scenes, so there is no alias state to set */
+        scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
         return true;
     case PokemonSceneGen3Preset:
     case PokemonSceneGen3Nature:

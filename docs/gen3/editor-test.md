@@ -38,6 +38,18 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 6. **Unown.** Pick UNOWN → an `Unown Form` row appears. Set `?` → the row shows `?`.
 7. **Stress.** Switch #251 <-> #252 <-> #001 20 times → no crash.
 
+## C. Moves, item, Pokerus
+
+1. **Moves.** Set the species to TREECKO and the level to 30 → `Select Moves` shows `Move 1: QUICK ATTACK`, `Move 2: PURSUIT`, `Move 3: SCREECH`, `Move 4: MEGA DRAIN`, then `Default moves`.
+2. **Remove a move.** Move 1 → `No Move` → PURSUIT moves up to Move 1, and Move 4 shows `No Move`.
+3. **No duplicates.** Move 4 → letter `P` does not list PURSUIT while it is known.
+4. **Same move.** Move 1 → its own letter → the move it already has → nothing changes.
+5. **Default moves.** `Default moves` restores QUICK ATTACK, PURSUIT, SCREECH and MEGA DRAIN.
+6. **Last move.** Remove moves until one is left → on that slot the letter screen has no `No Move`.
+7. **Held item.** `Held Item` → `L` → LEFTOVERS → the row shows `LEFTOVERS`. `Held Item` → `No Item` → the row shows `No Item`.
+8. **Item filters.** Letter `E` has no ENIGMA BERRY, and `M` has no MACH BIKE (nor any Mail).
+9. **Pokerus.** Strain `A`, days `3` → the row shows `Infected`. Days `0` → `Cured`. Strain `None` → `Clean`, and Days is hidden. Back and reopen → the strain and days are as left.
+
 ## Results
 
 | Step | Pass / fail | What the Flipper showed |
@@ -62,3 +74,12 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 | B5 Nickname kept | | |
 | B6 Unown | | |
 | B7 Stress | | |
+| C1 Moves | | |
+| C2 Remove a move | | |
+| C3 No duplicates | | |
+| C4 Same move | | |
+| C5 Default moves | | |
+| C6 Last move | | |
+| C7 Held item | | |
+| C8 Item filters | | |
+| C9 Pokerus | | |
