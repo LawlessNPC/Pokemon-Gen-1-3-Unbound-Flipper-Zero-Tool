@@ -33,36 +33,13 @@ uint16_t gen3_internal_from_national(uint16_t national) {
     return info ? info->internal : 0;
 }
 
-const char* gen3_move_name(uint16_t move) {
-    if(move >= GEN3_MOVE_COUNT) return gen3_unknown_name;
-    return gen3_move_name_tab[move];
-}
-
 uint8_t gen3_move_pp(uint16_t move) {
     if(move >= GEN3_MOVE_COUNT) return 0;
     return gen3_move_pp_tab[move];
 }
 
-uint16_t gen3_move_by_name(size_t i) {
-    if(i >= GEN3_MOVE_COUNT - 1) return 0;
-    return gen3_move_by_name_tab[i];
-}
-
-const char* gen3_item_name(uint16_t item) {
-    if(item >= GEN3_ITEM_COUNT || gen3_item_name_tab[item][0] == '\0') return gen3_unknown_name;
-    return gen3_item_name_tab[item];
-}
-
 bool gen3_item_holdable(uint16_t item) {
-    for(size_t i = 0; i < GEN3_HOLDABLE_COUNT; i++) {
-        if(gen3_holdable_by_name_tab[i] == item) return true;
-    }
-    return false;
-}
-
-uint16_t gen3_holdable_by_name(size_t i) {
-    if(i >= GEN3_HOLDABLE_COUNT) return 0;
-    return gen3_holdable_by_name_tab[i];
+    return item < GEN3_ITEM_COUNT && (gen3_item_holdable_tab[item >> 3] >> (item & 7)) & 1;
 }
 
 const char* gen3_ability_name(uint8_t ability) {
@@ -80,23 +57,33 @@ const char* gen3_type_name(uint8_t type) {
     return gen3_type_name_tab[type];
 }
 
-/* files/gen3_bulk.bin, written by tools/gen3_tables.py. Little-endian: a 16-byte header, then the
- * payload: species names, learnset starts (in entries), learnset entries. */
-#define BULK_NAME_SIZE   (GEN3_SPECIES_NAME_LEN + 1)
-#define BULK_NAMES_OFF   16
-#define BULK_STARTS_OFF  (BULK_NAMES_OFF + BULK_NAME_SIZE * (GEN3_NATIONAL_COUNT + 1))
-#define BULK_ENTRIES_OFF (BULK_STARTS_OFF + 2 * (GEN3_NATIONAL_COUNT + 2))
-#define BULK_SIZE        (BULK_ENTRIES_OFF + 2 * GEN3_LEARNSET_COUNT)
-#define BULK_CHUNK       64
+/* files/gen3_bulk.bin (version 2), written by tools/gen3_tables.py. Little-endian: a 16-byte
+ * header, then the payload: species names, learnset starts (in entries), learnset entries, move
+ * names, move ids 1..354 sorted by name, item names (all NUL for an id without a name), holdable
+ * item ids sorted by name. Names are NUL-padded to their LEN + 1. */
+#define BULK_NAME_SIZE       (GEN3_SPECIES_NAME_LEN + 1)
+#define BULK_MOVE_NAME_SIZE  (GEN3_MOVE_NAME_LEN + 1)
+#define BULK_ITEM_NAME_SIZE  (GEN3_ITEM_NAME_LEN + 1)
+#define BULK_NAMES_OFF       16
+#define BULK_STARTS_OFF      (BULK_NAMES_OFF + BULK_NAME_SIZE * (GEN3_NATIONAL_COUNT + 1))
+#define BULK_ENTRIES_OFF     (BULK_STARTS_OFF + 2 * (GEN3_NATIONAL_COUNT + 2))
+#define BULK_MOVE_NAMES_OFF  (BULK_ENTRIES_OFF + 2 * GEN3_LEARNSET_COUNT)
+#define BULK_MOVE_SORTED_OFF (BULK_MOVE_NAMES_OFF + BULK_MOVE_NAME_SIZE * GEN3_MOVE_COUNT)
+#define BULK_ITEM_NAMES_OFF  (BULK_MOVE_SORTED_OFF + 2 * (GEN3_MOVE_COUNT - 1))
+#define BULK_HOLDABLE_OFF    (BULK_ITEM_NAMES_OFF + BULK_ITEM_NAME_SIZE * GEN3_ITEM_COUNT)
+#define BULK_SIZE            (BULK_HOLDABLE_OFF + 2 * GEN3_HOLDABLE_COUNT)
+#define BULK_CHUNK           64
 
-/* The header up to its CRC: magic "G3BK", u16 version 1, u16 species count 387 (index 0 unused),
+_Static_assert(BULK_SIZE == 24383, "gen3_bulk.bin v2 size");
+
+/* The header up to its CRC: magic "G3BK", u16 version 2, u16 species count 387 (index 0 unused),
  * u32 learnset entries 3947. The u32 CRC-32 of the payload follows. */
 static const uint8_t bulk_header[12] = {
     'G',
     '3',
     'B',
     'K',
-    1,
+    2,
     0,
     (GEN3_NATIONAL_COUNT + 1) & 0xFF,
     (GEN3_NATIONAL_COUNT + 1) >> 8,
@@ -192,4 +179,45 @@ size_t gen3_learnset_get(uint16_t national, uint16_t* out, size_t max) {
     if(count == 0 || !bulk_read(BULK_ENTRIES_OFF + 2 * start, raw, 2 * count)) return 0;
     for(size_t i = 0; i < count; i++) out[i] = (uint16_t)bulk_le16(raw + 2 * i);
     return count;
+}
+
+bool gen3_move_name_get(uint16_t move, char out[GEN3_MOVE_NAME_LEN + 1]) {
+    bool ok =
+        move < GEN3_MOVE_COUNT &&
+        bulk_read(BULK_MOVE_NAMES_OFF + BULK_MOVE_NAME_SIZE * move, out, BULK_MOVE_NAME_SIZE);
+    out[ok ? GEN3_MOVE_NAME_LEN : 0] = '\0';
+    return ok;
+}
+
+bool gen3_item_name_get(uint16_t item, char out[GEN3_ITEM_NAME_LEN + 1]) {
+    bool ok =
+        item < GEN3_ITEM_COUNT &&
+        bulk_read(BULK_ITEM_NAMES_OFF + BULK_ITEM_NAME_SIZE * item, out, BULK_ITEM_NAME_SIZE);
+    out[ok ? GEN3_ITEM_NAME_LEN : 0] = '\0';
+    if(ok && out[0] == '\0') memcpy(out, gen3_unknown_name, sizeof(gen3_unknown_name));
+    return ok;
+}
+
+uint16_t gen3_move_by_name_get(size_t i) {
+    uint8_t id[2];
+    if(i >= GEN3_MOVE_COUNT - 1 || !bulk_read(BULK_MOVE_SORTED_OFF + 2 * (uint32_t)i, id, 2))
+        return 0;
+    uint16_t move = (uint16_t)bulk_le16(id);
+    if(move == 0 || move >= GEN3_MOVE_COUNT) {
+        bulk_failed();
+        return 0;
+    }
+    return move;
+}
+
+uint16_t gen3_holdable_by_name_get(size_t i) {
+    uint8_t id[2];
+    if(i >= GEN3_HOLDABLE_COUNT || !bulk_read(BULK_HOLDABLE_OFF + 2 * (uint32_t)i, id, 2))
+        return 0;
+    uint16_t item = (uint16_t)bulk_le16(id);
+    if(!gen3_item_holdable(item)) {
+        bulk_failed();
+        return 0;
+    }
+    return item;
 }

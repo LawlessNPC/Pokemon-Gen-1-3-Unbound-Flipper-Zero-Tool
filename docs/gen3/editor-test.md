@@ -71,7 +71,7 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 
 ## E. Data file
 
-The species names and learnsets are not in the app's memory. They are in `gen3_bulk.bin`, which ships inside the `.fap`. The Flipper unpacks the app's files to `apps_assets/pokemon/` when the app starts and that folder is missing or out of date. Reinstalling the same `.fap` doesn't unpack them again while `apps_assets/pokemon/.assets.signature` still matches, so the remedy is to delete the folder.
+The species, move and item names and the learnsets are not in the app's memory. They are in `gen3_bulk.bin`, which ships inside the `.fap`. The Flipper unpacks the app's files to `apps_assets/pokemon/` when the app starts and that folder is missing or out of date. Reinstalling the same `.fap` doesn't unpack them again while `apps_assets/pokemon/.assets.signature` still matches, so the remedy is to delete the folder.
 
 1. **Data missing.**
    - Exit the app. In qFlipper, rename `apps_assets/pokemon/gen3_bulk.bin` to `gen3_bulk.bak`.

@@ -8,9 +8,10 @@
  * in the Pokemon bytes and in gen3_internal_to_national_tab. Names keep the game's spelling,
  * mapped to ASCII: e-acute -> 'E', female '\200', male '\201'.
  *
- * Species names and learnsets are read rarely, so they live in files/gen3_bulk.bin on the SD card
- * rather than in RAM. Both come from tools/gen3_tables.py. The bulk accessors read through the
- * installed Gen3BulkRead source; call them from the UI thread only. */
+ * Species, move and item names, the name-sorted move and holdable lists, and learnsets are read
+ * rarely, so they live in files/gen3_bulk.bin on the SD card rather than in RAM. All come from
+ * tools/gen3_tables.py. The bulk accessors read through the installed Gen3BulkRead source; call
+ * them from the UI thread only, never from the link ISR. */
 
 #define GEN3_NATIONAL_COUNT      386 /* National Dex 1..386 */
 #define GEN3_INTERNAL_COUNT      412 /* game species ids 0..411 (412 is the egg, excluded) */
@@ -22,6 +23,8 @@
 #define GEN3_LEARNSET_COUNT      3947 /* all species' learnset entries */
 #define GEN3_LEARNSET_MAX        17 /* the most entries one species has */
 #define GEN3_SPECIES_NAME_LEN    10
+#define GEN3_MOVE_NAME_LEN       12 /* longest move name; buffers hold GEN3_MOVE_NAME_LEN + 1 */
+#define GEN3_ITEM_NAME_LEN       14 /* longest item name; buffers hold GEN3_ITEM_NAME_LEN + 1 */
 #define GEN3_HOLDABLE_COUNT      231 /* no key items, HMs, Enigma Berry or mail */
 #define GEN3_ITEM_MAIL_FIRST     121 /* ITEM_ORANGE_MAIL */
 #define GEN3_ITEM_MAIL_LAST      132 /* ITEM_RETRO_MAIL */
@@ -62,12 +65,9 @@ bool gen3_species_two_abilities(uint16_t national);
 bool gen3_species_gender_fixed(uint16_t national);
 uint16_t gen3_national_from_internal(uint16_t internal); /* 0 = not a real species */
 uint16_t gen3_internal_from_national(uint16_t national); /* 0 unless 1..386 */
-const char* gen3_move_name(uint16_t move); /* "???" if >= GEN3_MOVE_COUNT; move 0 is "-" */
 uint8_t gen3_move_pp(uint16_t move); /* base PP; 0 if out of range */
-uint16_t gen3_move_by_name(size_t i); /* i < GEN3_MOVE_COUNT - 1: ids 1..354 sorted by name */
-const char* gen3_item_name(uint16_t item); /* "???" if unused or >= GEN3_ITEM_COUNT */
+/* No key items, HMs, Enigma Berry or mail. From flash: safe in the link ISR. */
 bool gen3_item_holdable(uint16_t item);
-uint16_t gen3_holdable_by_name(size_t i); /* i < GEN3_HOLDABLE_COUNT, sorted by name */
 const char* gen3_ability_name(uint8_t ability); /* "???" if out of range */
 const char* gen3_nature_name(uint8_t nature); /* "???" if >= 25 */
 const char* gen3_type_name(uint8_t type); /* "???" if >= 18 */
@@ -89,15 +89,26 @@ bool gen3_species_name_get(uint16_t national, char out[GEN3_SPECIES_NAME_LEN + 1
 /* Fills up to max packed (level << 9) | move entries in level order; returns the count (0 if not
  * ready, out of range or unreadable). GEN3_LEARNSET_MAX entries always hold a whole learnset. */
 size_t gen3_learnset_get(uint16_t national, uint16_t* out, size_t max);
+/* Copies the move's name + NUL (move 0 is "-"). false (out = "") if not ready, move >=
+ * GEN3_MOVE_COUNT (no read: the source stays open) or unreadable. */
+bool gen3_move_name_get(uint16_t move, char out[GEN3_MOVE_NAME_LEN + 1]);
+/* Copies the item's name + NUL; an id without a name (0, 52, ...) reads true as "???". false
+ * (out = "") if not ready, item >= GEN3_ITEM_COUNT (no read) or unreadable. */
+bool gen3_item_name_get(uint16_t item, char out[GEN3_ITEM_NAME_LEN + 1]);
+/* i < GEN3_MOVE_COUNT - 1: move ids 1..354 sorted by name. 0 if i is out of range (no read),
+ * not ready or unreadable. An id read outside 1..354 closes the source and gives 0. */
+uint16_t gen3_move_by_name_get(size_t i);
+/* i < GEN3_HOLDABLE_COUNT: holdable item ids sorted by name. 0 if i is out of range (no read),
+ * not ready or unreadable. An id read that gen3_item_holdable rejects closes the source and
+ * gives 0. */
+uint16_t gen3_holdable_by_name_get(size_t i);
 
 /* Generated arrays (gen3_data_gen.c). Use the functions above. */
 extern const Gen3SpeciesInfo gen3_species_info_tab[GEN3_NATIONAL_COUNT + 1];
 extern const uint16_t gen3_internal_to_national_tab[GEN3_INTERNAL_COUNT];
-extern const char gen3_move_name_tab[GEN3_MOVE_COUNT][13];
 extern const uint8_t gen3_move_pp_tab[GEN3_MOVE_COUNT];
-extern const uint16_t gen3_move_by_name_tab[GEN3_MOVE_COUNT - 1];
-extern const char gen3_item_name_tab[GEN3_ITEM_COUNT][15]; /* "" for unused ids */
-extern const uint16_t gen3_holdable_by_name_tab[GEN3_HOLDABLE_COUNT];
+/* Generated (gen3_data_gen.c): bit (item & 7) of byte (item >> 3) is set for a holdable item. */
+extern const uint8_t gen3_item_holdable_tab[(GEN3_ITEM_COUNT + 7) / 8];
 extern const char gen3_ability_name_tab[GEN3_ABILITY_COUNT][13];
 extern const char gen3_nature_name_tab[GEN3_NATURE_COUNT][8];
 extern const char gen3_type_name_tab[GEN3_TYPE_COUNT][7];

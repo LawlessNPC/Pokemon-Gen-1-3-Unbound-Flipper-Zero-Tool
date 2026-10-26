@@ -11,6 +11,24 @@ static const char* species_name(uint16_t national) {
     return name;
 }
 
+/* The move or item name from the bulk file, "" if refused. Two buffers each, so a test can
+ * compare neighbours. */
+static const char* move_name(uint16_t move) {
+    static char names[2][GEN3_MOVE_NAME_LEN + 1];
+    static int k;
+    k ^= 1;
+    gen3_move_name_get(move, names[k]);
+    return names[k];
+}
+
+static const char* item_name(uint16_t item) {
+    static char names[2][GEN3_ITEM_NAME_LEN + 1];
+    static int k;
+    k ^= 1;
+    gen3_item_name_get(item, names[k]);
+    return names[k];
+}
+
 static int species_matches(
     uint16_t national,
     const uint8_t base[6],
@@ -118,40 +136,65 @@ TEST(test_data_names) {
 }
 
 TEST(test_data_moves) {
-    ASSERT_STR_EQ(gen3_move_name(1), "POUND");
+    char name[GEN3_MOVE_NAME_LEN + 1];
+    ASSERT_TRUE(gen3_move_name_get(1, name));
+    ASSERT_STR_EQ(name, "POUND");
     ASSERT_EQ(gen3_move_pp(1), 35);
-    ASSERT_STR_EQ(gen3_move_name(9), "THUNDERPUNCH");
-    ASSERT_STR_EQ(gen3_move_name(237), "HIDDEN POWER");
+    ASSERT_TRUE(gen3_move_name_get(9, name));
+    ASSERT_STR_EQ(name, "THUNDERPUNCH");
+    ASSERT_TRUE(gen3_move_name_get(237, name));
+    ASSERT_STR_EQ(name, "HIDDEN POWER");
     ASSERT_EQ(gen3_move_pp(237), 15);
-    ASSERT_STR_EQ(gen3_move_name(354), "PSYCHO BOOST");
+    ASSERT_TRUE(gen3_move_name_get(354, name));
+    ASSERT_STR_EQ(name, "PSYCHO BOOST");
     ASSERT_EQ(gen3_move_pp(354), 5);
-    ASSERT_STR_EQ(gen3_move_name(0), "-");
-    ASSERT_STR_EQ(gen3_move_name(GEN3_MOVE_COUNT), "???");
+    ASSERT_TRUE(gen3_move_name_get(0, name));
+    ASSERT_STR_EQ(name, "-");
+    ASSERT_TRUE(!gen3_move_name_get(GEN3_MOVE_COUNT, name));
+    ASSERT_STR_EQ(name, "");
     ASSERT_EQ(gen3_move_pp(GEN3_MOVE_COUNT), 0);
 
-    ASSERT_EQ(gen3_move_by_name(0), 71);
-    ASSERT_STR_EQ(gen3_move_name(71), "ABSORB");
-    ASSERT_EQ(gen3_move_by_name(1), 51);
-    ASSERT_STR_EQ(gen3_move_name(51), "ACID");
-    ASSERT_EQ(gen3_move_by_name(353), 192);
-    ASSERT_STR_EQ(gen3_move_name(192), "ZAP CANNON");
-    for(size_t i = 0; i + 1 < GEN3_MOVE_COUNT - 1; i++) {
-        const char* a = gen3_move_name(gen3_move_by_name(i));
-        const char* b = gen3_move_name(gen3_move_by_name(i + 1));
-        ASSERT_TRUE(strcmp(a, b) < 0);
+    ASSERT_EQ(gen3_move_by_name_get(0), 71);
+    ASSERT_STR_EQ(move_name(71), "ABSORB");
+    ASSERT_EQ(gen3_move_by_name_get(1), 51);
+    ASSERT_STR_EQ(move_name(51), "ACID");
+    ASSERT_EQ(gen3_move_by_name_get(353), 192);
+    ASSERT_STR_EQ(move_name(192), "ZAP CANNON");
+    ASSERT_EQ(gen3_move_by_name_get(GEN3_MOVE_COUNT - 1), 0);
+
+    /* Sorted by name, and every move 1..354 exactly once */
+    static uint8_t seen[GEN3_MOVE_COUNT];
+    memset(seen, 0, sizeof(seen));
+    for(size_t i = 0; i < GEN3_MOVE_COUNT - 1; i++) {
+        uint16_t move = gen3_move_by_name_get(i);
+        ASSERT_TRUE(move >= 1 && move < GEN3_MOVE_COUNT);
+        ASSERT_EQ(seen[move], 0);
+        seen[move] = 1;
+        ASSERT_TRUE(move_name(move)[0] != '\0');
+        if(i + 1 < GEN3_MOVE_COUNT - 1) {
+            const char* a = move_name(move);
+            const char* b = move_name(gen3_move_by_name_get(i + 1));
+            ASSERT_TRUE(strcmp(a, b) < 0);
+        }
     }
+    ASSERT_TRUE(gen3_bulk_ready());
 }
 
 TEST(test_data_items) {
-    ASSERT_STR_EQ(gen3_item_name(1), "MASTER BALL");
-    ASSERT_STR_EQ(gen3_item_name(4), "POKE BALL");
-    ASSERT_STR_EQ(gen3_item_name(12), "PREMIER BALL");
-    ASSERT_STR_EQ(gen3_item_name(175), "ENIGMA BERRY");
-    ASSERT_STR_EQ(gen3_item_name(200), "LEFTOVERS");
-    ASSERT_STR_EQ(gen3_item_name(273), "POKEBLOCK CASE");
-    ASSERT_STR_EQ(gen3_item_name(0), "???");
-    ASSERT_STR_EQ(gen3_item_name(52), "???");
-    ASSERT_STR_EQ(gen3_item_name(GEN3_ITEM_COUNT), "???");
+    char name[GEN3_ITEM_NAME_LEN + 1];
+    ASSERT_STR_EQ(item_name(1), "MASTER BALL");
+    ASSERT_STR_EQ(item_name(4), "POKE BALL");
+    ASSERT_STR_EQ(item_name(12), "PREMIER BALL");
+    ASSERT_STR_EQ(item_name(175), "ENIGMA BERRY");
+    ASSERT_STR_EQ(item_name(200), "LEFTOVERS");
+    ASSERT_STR_EQ(item_name(273), "POKEBLOCK CASE");
+    /* An id without a name reads fine, as "???" */
+    ASSERT_TRUE(gen3_item_name_get(0, name));
+    ASSERT_STR_EQ(name, "???");
+    ASSERT_TRUE(gen3_item_name_get(52, name));
+    ASSERT_STR_EQ(name, "???");
+    ASSERT_TRUE(!gen3_item_name_get(GEN3_ITEM_COUNT, name));
+    ASSERT_STR_EQ(name, "");
 
     ASSERT_TRUE(gen3_item_holdable(4));
     ASSERT_TRUE(gen3_item_holdable(200));
@@ -164,24 +207,30 @@ TEST(test_data_items) {
     ASSERT_TRUE(!gen3_item_holdable(376));
     ASSERT_TRUE(!gen3_item_holdable(GEN3_ITEM_COUNT));
     /* Mail has no mail record behind it (mail index 0xFF); READ/TAKE would write out of bounds. */
-    ASSERT_STR_EQ(gen3_item_name(121), "ORANGE MAIL");
-    ASSERT_STR_EQ(gen3_item_name(132), "RETRO MAIL");
+    ASSERT_STR_EQ(item_name(121), "ORANGE MAIL");
+    ASSERT_STR_EQ(item_name(132), "RETRO MAIL");
     for(uint16_t mail = 121; mail <= 132; mail++) ASSERT_TRUE(!gen3_item_holdable(mail));
     ASSERT_TRUE(gen3_item_holdable(133)); /* Cheri Berry, right after the mail */
 
     ASSERT_EQ(GEN3_HOLDABLE_COUNT, 231);
-    ASSERT_EQ(gen3_holdable_by_name(0), 146);
-    ASSERT_STR_EQ(gen3_item_name(146), "AGUAV BERRY");
-    ASSERT_EQ(gen3_holdable_by_name(230), 70);
-    ASSERT_STR_EQ(gen3_item_name(70), "ZINC");
+    ASSERT_EQ(gen3_holdable_by_name_get(0), 146);
+    ASSERT_STR_EQ(item_name(146), "AGUAV BERRY");
+    ASSERT_EQ(gen3_holdable_by_name_get(230), 70);
+    ASSERT_STR_EQ(item_name(70), "ZINC");
+    ASSERT_EQ(gen3_holdable_by_name_get(GEN3_HOLDABLE_COUNT), 0);
+    size_t holdable = 0;
+    for(uint16_t item = 0; item < GEN3_ITEM_COUNT + 8; item++)
+        if(gen3_item_holdable(item)) holdable++;
+    ASSERT_EQ(holdable, GEN3_HOLDABLE_COUNT);
     for(size_t i = 0; i < GEN3_HOLDABLE_COUNT; i++) {
-        ASSERT_TRUE(gen3_item_holdable(gen3_holdable_by_name(i)));
+        ASSERT_TRUE(gen3_item_holdable(gen3_holdable_by_name_get(i)));
         if(i + 1 < GEN3_HOLDABLE_COUNT) {
-            const char* a = gen3_item_name(gen3_holdable_by_name(i));
-            const char* b = gen3_item_name(gen3_holdable_by_name(i + 1));
+            const char* a = item_name(gen3_holdable_by_name_get(i));
+            const char* b = item_name(gen3_holdable_by_name_get(i + 1));
             ASSERT_TRUE(strcmp(a, b) < 0);
         }
     }
+    ASSERT_TRUE(gen3_bulk_ready());
 }
 
 TEST(test_data_small_lists) {

@@ -488,9 +488,10 @@ static bool step(Gen3Editor* ed) {
         break;
     case 6: {
         fz_what = "set_item";
+        /* A failed read of the holdable list gives item 0, which is valid too */
         uint16_t item = (uint16_t)(fz_below(2) ?
                                        fz_below(GEN3_ITEM_COUNT + 30) :
-                                       gen3_holdable_by_name(fz_below(GEN3_HOLDABLE_COUNT)));
+                                       gen3_holdable_by_name_get(fz_below(GEN3_HOLDABLE_COUNT)));
         gen3_edit_set_item(ed, item);
         keep = item != 0 && !gen3_item_holdable(item);
         if(!keep) CHECK(gen3_pkm_get(&ed->pkm, Gen3FieldHeldItem) == item, "set_item item");
@@ -578,8 +579,8 @@ TEST(test_fuzz_invariant) {
         /* Mostly with the data: a closed source is opened again soon */
         if(!gen3_bulk_ready() && fz_below(4) == 0) ASSERT_TRUE(fuzz_reopen());
     }
-    /* Every path was taken (with this seed: 3542 unchanged, 10 no-shiny refusals, 4 shiny lost,
-     * 898 closed by a failed read, 350 + 366 imports, 781 loads) */
+    /* Every path was taken (with this seed: 3537 unchanged, 9 no-shiny refusals, 3 shiny lost,
+     * 906 closed by a failed read, 351 + 373 imports, 753 loads) */
     ASSERT_TRUE(stats.unchanged > 0);
     ASSERT_TRUE(stats.no_shiny > 0);
     ASSERT_TRUE(stats.shiny_lost > 0);

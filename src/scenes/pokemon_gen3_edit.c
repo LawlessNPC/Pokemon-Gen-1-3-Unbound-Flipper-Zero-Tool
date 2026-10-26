@@ -48,8 +48,9 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
     uint32_t ot_id = gen3_pkm_get(p, Gen3FieldOtId);
     uint16_t item;
     Gen3Traits traits;
-    char buf[32];
+    char buf[36]; /* the widest row: "Ball:", 15 spaces and a 14-character item name */
     char name_buf[GEN3_NICKNAME_LEN + 1];
+    char item_name[GEN3_ITEM_NAME_LEN + 1];
 
     gen3_traits_of(p, &traits);
 
@@ -98,15 +99,14 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
         gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Unown);
     }
 
-    snprintf(
-        buf,
-        sizeof(buf),
-        "Ball:               %s",
-        gen3_item_name((uint16_t)gen3_pkm_get(p, Gen3FieldBall)));
+    /* Item names come from the bulk file: "" if unreadable, as the Pokemon row */
+    gen3_item_name_get((uint16_t)gen3_pkm_get(p, Gen3FieldBall), item_name);
+    snprintf(buf, sizeof(buf), "Ball:               %s", item_name);
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Ball);
 
     item = (uint16_t)gen3_pkm_get(p, Gen3FieldHeldItem);
-    snprintf(buf, sizeof(buf), "Held Item:   %s", item ? gen3_item_name(item) : "No Item");
+    if(item) gen3_item_name_get(item, item_name);
+    snprintf(buf, sizeof(buf), "Held Item:   %s", item ? item_name : "No Item");
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3ItemLetter);
 
     gen3_edit_add(pokemon_fap, "Select Moves", PokemonSceneGen3Moves);

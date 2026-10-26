@@ -11,14 +11,15 @@
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* Gen III move slots. Gen3Moves: the scene state is the slot (0-3) and the highlight (row 4 is
- * "Default moves"). Gen3MoveLetter: the scene state is the chosen letter. */
+ * "Default moves"). Gen3MoveLetter: the scene state is the chosen letter. Move names come from the
+ * bulk file: a list that can't be read sends GEN3_EVENT_DATA_MISSING, a Move row shows "". */
 
 #define GEN3_MOVES_DEFAULT_ROW 4
 
 static const Gen3NameList gen3_move_list = {
     GEN3_MOVE_COUNT - 1,
-    gen3_move_by_name,
-    gen3_move_name,
+    gen3_move_by_name_get,
+    gen3_move_name_get,
 };
 
 static uint16_t gen3_move_in_slot(const Gen3Editor* ed, uint32_t slot) {
@@ -40,6 +41,11 @@ static bool gen3_move_on_event(void* context, SceneManagerEvent event) {
 
     if(event.type != SceneManagerEventTypeCustom) return false;
 
+    /* A list that couldn't be read; not a scene to open */
+    if(event.event == GEN3_EVENT_DATA_MISSING) {
+        gen3_menu_show_data_missing(pokemon_fap);
+        return true;
+    }
     if(event.event & PokemonSceneSearch)
         scene_manager_search_and_switch_to_previous_scene(
             pokemon_fap->scene_manager, event.event & ~(uint32_t)PokemonSceneSearch);
@@ -64,16 +70,14 @@ void pokemon_scene_gen3_moves_on_enter(void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
     const Gen3Editor* ed = pokemon_fap->gen3_editor;
     char buf[32];
+    char name[GEN3_MOVE_NAME_LEN + 1];
 
     submenu_reset(pokemon_fap->submenu);
     for(uint32_t i = 0; i < 4; i++) {
         uint16_t move = gen3_move_in_slot(ed, i);
-        snprintf(
-            buf,
-            sizeof(buf),
-            "Move %u:   %s",
-            (unsigned)(i + 1),
-            move ? gen3_move_name(move) : "No Move");
+        /* "" if the name can't be read, as the editor's Pokemon row */
+        if(move) gen3_move_name_get(move, name);
+        snprintf(buf, sizeof(buf), "Move %u:   %s", (unsigned)(i + 1), move ? name : "No Move");
         submenu_add_item(pokemon_fap->submenu, buf, i, gen3_moves_callback, pokemon_fap);
     }
     submenu_add_item(
@@ -147,7 +151,10 @@ void pokemon_scene_gen3_move_letter_on_enter(void* context) {
             gen3_move_letter_callback,
             pokemon_fap);
 
+    /* About 708 reads from the bulk file: an id and a name for each move */
     size_t n = gen3_letters(&gen3_move_list, letters, sizeof(letters));
+    if(n == 0)
+        view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_EVENT_DATA_MISSING);
     for(size_t i = 0; i < n; i++) {
         label[0] = letters[i];
         submenu_add_item(
@@ -188,23 +195,26 @@ void pokemon_scene_gen3_move_set_on_enter(void* context) {
     char letter = (char)scene_manager_get_scene_state(
         pokemon_fap->scene_manager, PokemonSceneGen3MoveLetter);
     static uint16_t ids[GEN3_LETTER_IDS_MAX];
+    char name[GEN3_MOVE_NAME_LEN + 1];
+    /* Every letter shown has a move, so 0 means the list couldn't be read */
     size_t n = gen3_letter_ids(&gen3_move_list, letter, ids, GEN3_LETTER_IDS_MAX);
+    bool ok = n > 0;
 
     submenu_reset(pokemon_fap->submenu);
-    for(size_t i = 0; i < n; i++) {
+    for(size_t i = 0; ok && i < n; i++) {
         bool elsewhere = false;
 
         /* Moves in another slot are left out */
         for(uint32_t s = 0; s < 4; s++)
             if(s != slot && gen3_move_in_slot(ed, s) == ids[i]) elsewhere = true;
-        if(!elsewhere)
+        if(elsewhere) continue;
+        ok = gen3_move_name_get(ids[i], name);
+        if(ok)
             submenu_add_item(
-                pokemon_fap->submenu,
-                gen3_move_name(ids[i]),
-                ids[i],
-                gen3_move_set_callback,
-                pokemon_fap);
+                pokemon_fap->submenu, name, ids[i], gen3_move_set_callback, pokemon_fap);
     }
+    if(!ok)
+        view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_EVENT_DATA_MISSING);
     submenu_set_selected_item(pokemon_fap->submenu, gen3_move_in_slot(ed, slot));
 
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);

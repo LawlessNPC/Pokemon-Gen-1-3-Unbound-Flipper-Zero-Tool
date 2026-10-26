@@ -800,9 +800,11 @@ TEST(test_edit_ot_id_shiny_lost) {
 
 TEST(test_edit_ball_item_pokerus) {
     Gen3Editor ed;
+    char name[GEN3_ITEM_NAME_LEN + 1];
     gen3_edit_init(&ed, 7);
     ASSERT_EQ(GEN3_EDIT_BALL_MAX, 12);
-    ASSERT_STR_EQ(gen3_item_name(GEN3_EDIT_BALL_MAX), "PREMIER BALL");
+    ASSERT_TRUE(gen3_item_name_get(GEN3_EDIT_BALL_MAX, name));
+    ASSERT_STR_EQ(name, "PREMIER BALL");
     gen3_edit_set_ball(&ed, GEN3_EDIT_BALL_MAX);
     ASSERT_EQ(G(Ball), GEN3_EDIT_BALL_MAX);
     gen3_edit_set_ball(&ed, 0);

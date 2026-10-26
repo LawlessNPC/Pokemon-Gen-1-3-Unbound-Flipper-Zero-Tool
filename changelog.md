@@ -8,7 +8,7 @@
 **Gen III Pokemon editor and .pk3 load/save (experimental)**
 - Add `Edit Pokemon` to the Gen III menu: species, nickname, level, EV/IV preset, nature, ability, shininess, gender, Unown form, moves, held item, Pokerus, ball and OT
 - Add `Load .pk3` and `Save .pk3` for PKHeX `.pk3` files in `apps_data/pokemon/gen3/`
-- `files/gen3_bulk.bin` (species names and learnsets) ships as an app asset; if the editor says `Data missing`, delete `apps_assets/pokemon` on the SD card and reopen
+- `files/gen3_bulk.bin` (species, move and item names, and learnsets) ships as an app asset; if the editor says `Data missing`, delete `apps_assets/pokemon` on the SD card and reopen
 - See `docs/gen3/editor-test.md`
 
 ## Version 2.3

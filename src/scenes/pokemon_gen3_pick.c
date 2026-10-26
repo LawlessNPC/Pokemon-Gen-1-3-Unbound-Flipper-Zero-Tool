@@ -102,6 +102,8 @@ void pokemon_scene_gen3_pick_on_enter(void* context) {
     Gen3Traits traits;
     uint32_t selected;
     char label[24];
+    /* The Ball list reads item names into label */
+    _Static_assert(sizeof(label) >= GEN3_ITEM_NAME_LEN + 1, "label too small for an item name");
 
     gen3_traits_of(&ed->pkm, &traits);
     submenu_reset(pokemon_fap->submenu);
@@ -136,8 +138,15 @@ void pokemon_scene_gen3_pick_on_enter(void* context) {
         selected = traits.gender;
         break;
     case PokemonSceneGen3Ball:
-        for(uint8_t ball = 1; ball <= GEN3_EDIT_BALL_MAX; ball++)
-            gen3_pick_add(pokemon_fap, gen3_item_name(ball), ball);
+        /* Ball names are item names, from the bulk file */
+        for(uint8_t ball = 1; ball <= GEN3_EDIT_BALL_MAX; ball++) {
+            if(!gen3_item_name_get(ball, label)) {
+                view_dispatcher_send_custom_event(
+                    pokemon_fap->view_dispatcher, GEN3_EVENT_DATA_MISSING);
+                break;
+            }
+            gen3_pick_add(pokemon_fap, label, ball);
+        }
         selected = gen3_pkm_get(&ed->pkm, Gen3FieldBall);
         break;
     case PokemonSceneGen3Unown:
@@ -170,6 +179,10 @@ bool pokemon_scene_gen3_pick_on_event(void* context, SceneManagerEvent event) {
         } else if(event.event == GEN3_EVENT_NO_SHINY) {
             gen3_menu_show_notice(
                 pokemon_fap, "No shiny PID", "for this letter,\nnature and OT ID.");
+            consumed = true;
+        } else if(event.event == GEN3_EVENT_DATA_MISSING) {
+            /* The Ball list couldn't be read */
+            gen3_menu_show_data_missing(pokemon_fap);
             consumed = true;
         }
     }

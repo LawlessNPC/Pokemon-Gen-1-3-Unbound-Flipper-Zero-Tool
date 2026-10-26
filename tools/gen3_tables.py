@@ -9,16 +9,24 @@ Only game facts (ids, base stats, learnsets, names, PP) are extracted. On any fa
 check the script names the first failure, exits 1 and writes nothing.
 
 gen3_data_gen.c holds the tables the app keeps in RAM. gen3_bulk.bin holds the bulk tables
-it reads rarely, from the SD card: species names and learnsets. Its layout, little-endian:
+it reads rarely, from the SD card: species, move and item names, the name-sorted move and
+holdable item lists, and learnsets. Its layout (version 2, 24383 bytes), little-endian:
 
-    0   4         magic "G3BK"
-    4   2         version 1
-    6   2         species_count 387 (index 0 unused)
-    8   4         learnset_entries 3947
-    12  4         CRC-32 (IEEE) of the bytes from 16 to the end
-    16  11 * 387  species names, NUL-padded, index = National Dex
-    ..  2 * 388   learnset start offsets, in entries
-    ..  2 * 3947  learnset entries (level << 9) | move
+    0      4         magic "G3BK"
+    4      2         version 2
+    6      2         species_count 387 (index 0 unused)
+    8      4         learnset_entries 3947
+    12     4         CRC-32 (IEEE) of the bytes from 16 to the end
+    16     11 * 387  species names, NUL-padded, index = National Dex
+    4273   2 * 388   learnset start offsets, in entries
+    5049   2 * 3947  learnset entries (level << 9) | move
+    12943  13 * 355  move names, NUL-padded, index = move id (move 0 is "-")
+    17558  2 * 354   move ids 1..354, sorted by name
+    18266  15 * 377  item names, NUL-padded, index = item id (all NUL for an id without a name)
+    23921  2 * 231   holdable item ids, sorted by name
+    24383            end of file
+
+Bytes 16..12942 are the whole payload of version 1.
 """
 
 import binascii
@@ -53,9 +61,12 @@ GENDER_CONSTANTS = {"MON_MALE": 0, "MON_FEMALE": 254, "MON_GENDERLESS": 255}
 UNUSED_ITEM_NAME = "????????"
 
 BULK_MAGIC = b"G3BK"
-BULK_VERSION = 1
+BULK_VERSION = 2
 BULK_HEADER_SIZE = 16
+BULK_PAYLOAD_SIZE = 24367  # so the file is 24383 bytes
 BULK_NAME_SIZE = NAME_MAX["species"] + 1
+BULK_MOVE_NAME_SIZE = NAME_MAX["move"] + 1
+BULK_ITEM_NAME_SIZE = NAME_MAX["item"] + 1
 
 IDENT_RE = re.compile(r"[A-Za-z_]\w*")
 STRING_RE = re.compile(r'_\(\s*"((?:[^"\\\n]|\\.)*)"\s*\)')
@@ -684,9 +695,7 @@ def extract(clone):
             fail(f"src/mail_data.c: mail item {item} has no name in {where}")
     if len(holdable) != HOLDABLE_COUNT:
         fail(f"expected {HOLDABLE_COUNT} holdable items, got {len(holdable)}")
-    id_to_item_label = {v: k[len("ITEM_") :] for k, v in item_ids.items() if k.startswith("ITEM_")}
     d["items"] = items
-    d["item_label"] = id_to_item_label
     d["holdable"] = sorted(holdable, key=lambda i: (name_bytes(items[i]), i))
     d["move_by_name"] = sorted(range(1, MOVE_COUNT), key=lambda m: (name_bytes(move_names[m]), m))
 
@@ -753,9 +762,11 @@ def render(d):
         f"{PINNED_COMMIT}. Do not edit. Game facts only. */",
         "#include <src/gen3/gen3_data.h>",
         "",
-        "/* Species names and learnsets are in files/gen3_bulk.bin, written by the same run. */",
+        "/* Species, move and item names, the name-sorted move and holdable lists and learnsets",
+        " * are in files/gen3_bulk.bin, written by the same run. */",
         f'_Static_assert(GEN3_LEARNSET_COUNT == {LEARNSET_COUNT}, "rerun tools/gen3_tables.py");',
         f'_Static_assert(GEN3_LEARNSET_MAX == {LEARNSET_MAX}, "rerun tools/gen3_tables.py");',
+        f'_Static_assert(GEN3_HOLDABLE_COUNT == {HOLDABLE_COUNT}, "rerun tools/gen3_tables.py");',
     ]
 
     def table(decl, rows):
@@ -789,18 +800,17 @@ def render(d):
     table("const uint16_t gen3_internal_to_national_tab[GEN3_INTERNAL_COUNT]", rows)
 
     move_label = d["move_label"]
-    rows = [(c_string(d["move_names"][m]), f"{m} {move_label[m]}") for m in range(MOVE_COUNT)]
-    table("const char gen3_move_name_tab[GEN3_MOVE_COUNT][13]", rows)
     rows = [(str(d["move_pp"][m]), f"{m} {move_label[m]}") for m in range(MOVE_COUNT)]
     table("const uint8_t gen3_move_pp_tab[GEN3_MOVE_COUNT]", rows)
-    rows = [(str(m), f"{i} {move_label[m]}") for i, m in enumerate(d["move_by_name"])]
-    table("const uint16_t gen3_move_by_name_tab[GEN3_MOVE_COUNT - 1]", rows)
 
-    item_label = d["item_label"]
-    rows = [(c_string(d["items"][i]), f"{i} {item_label[i]}") for i in range(ITEM_COUNT)]
-    table("const char gen3_item_name_tab[GEN3_ITEM_COUNT][15]", rows)
-    rows = [(str(item), f"{i} {item_label[item]}") for i, item in enumerate(d["holdable"])]
-    table("const uint16_t gen3_holdable_by_name_tab[GEN3_HOLDABLE_COUNT]", rows)
+    # Bit (item & 7) of byte (item >> 3) is set for a holdable item.
+    bitmap = bytearray((ITEM_COUNT + 7) // 8)
+    for item in d["holdable"]:
+        bitmap[item >> 3] |= 1 << (item & 7)
+    if sum(bin(b).count("1") for b in bitmap) != HOLDABLE_COUNT:
+        fail(f"holdable bitmap does not have {HOLDABLE_COUNT} bits set")
+    rows = [(f"0x{b:02X}", f"items {8 * k}..{8 * k + 7}") for k, b in enumerate(bitmap)]
+    table("const uint8_t gen3_item_holdable_tab[(GEN3_ITEM_COUNT + 7) / 8]", rows)
 
     small_lists = (
         ("gen3_ability_name_tab[GEN3_ABILITY_COUNT][13]", "abilities", "ability_label"),
@@ -824,30 +834,43 @@ def u16_block(values, count, what):
     return struct.pack(f"<{count}H", *values)
 
 
+def name_block(names, size, what):
+    """NUL-padded names of size bytes each; every name must leave room for a NUL."""
+    out = bytearray()
+    for name in names:
+        raw = name_bytes(name)
+        if len(raw) >= size or b"\0" in raw:
+            fail(f"gen3_bulk.bin: {what} name {raw!r} does not fit in {size} bytes")
+        out += raw.ljust(size, b"\0")
+    return bytes(out)
+
+
+def id_block(ids, count, valid, what):
+    """count distinct ids, each in valid, as u16s."""
+    if len(ids) != count or len(set(ids)) != count or any(i not in valid for i in ids):
+        fail(f"gen3_bulk.bin: {what} are not {count} distinct ids in {valid}")
+    return u16_block(ids, count, what)
+
+
 def render_bulk(d):
     """files/gen3_bulk.bin, in the layout of the module docstring."""
-    names = bytearray()
-    for n in range(NATIONAL_COUNT + 1):
-        raw = name_bytes(d["species_names"][n]) if n else b""
-        if len(raw) >= BULK_NAME_SIZE or b"\0" in raw:
-            fail(f"gen3_bulk.bin: species name {raw!r} does not fit in {BULK_NAME_SIZE} bytes")
-        names += raw.ljust(BULK_NAME_SIZE, b"\0")
-    if len(names) != BULK_NAME_SIZE * (NATIONAL_COUNT + 1):
-        fail(f"gen3_bulk.bin: species names are {len(names)} bytes")
-
+    species_names = [d["species_names"][n] if n else "" for n in range(NATIONAL_COUNT + 1)]
     starts = [0, 0]
     entries = []
     for n in range(1, NATIONAL_COUNT + 1):
         entries += [(level << 9) | move for level, move in d["learnsets"][n]]
         starts.append(len(entries))
     payload = (
-        bytes(names)
+        name_block(species_names, BULK_NAME_SIZE, "species")
         + u16_block(starts, NATIONAL_COUNT + 2, "learnset starts")
         + u16_block(entries, LEARNSET_COUNT, "learnset entries")
+        + name_block([d["move_names"][m] for m in range(MOVE_COUNT)], BULK_MOVE_NAME_SIZE, "move")
+        + id_block(d["move_by_name"], MOVE_COUNT - 1, range(1, MOVE_COUNT), "moves by name")
+        + name_block([d["items"][i] for i in range(ITEM_COUNT)], BULK_ITEM_NAME_SIZE, "item")
+        + id_block(d["holdable"], HOLDABLE_COUNT, range(1, ITEM_COUNT), "holdable items")
     )
-    size = BULK_NAME_SIZE * (NATIONAL_COUNT + 1) + 2 * (NATIONAL_COUNT + 2) + 2 * LEARNSET_COUNT
-    if len(payload) != size:
-        fail(f"gen3_bulk.bin: payload is {len(payload)} bytes, expected {size}")
+    if len(payload) != BULK_PAYLOAD_SIZE:
+        fail(f"gen3_bulk.bin: payload is {len(payload)} bytes, expected {BULK_PAYLOAD_SIZE}")
     crc = binascii.crc32(payload) & 0xFFFFFFFF
     header = BULK_MAGIC + struct.pack(
         "<HHII", BULK_VERSION, NATIONAL_COUNT + 1, LEARNSET_COUNT, crc
