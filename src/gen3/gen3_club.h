@@ -261,7 +261,8 @@ bool gen3_club_set_editing(Gen3Club* club, bool on, uint32_t trades_seen);
  * - Menu: the offer is stale, so the GBA gets EEBB and comes back to the room through 0x1111.
  * - Elsewhere, a pending trade and its link save included, the club goes on until Room or Menu.
  * Once the GBA's link is lost for good (Waiting with no relink due: its exit's close, a power-off
- * or a pulled cable), left is set and leaving cleared. */
+ * or a pulled cable), left is set and leaving cleared. left is sticky: from then on the club never
+ * sits, so a GBA that walks back into the Cable Club can't start a trade. */
 void gen3_club_request_leave(Gen3Club* club);
 /* National Dex for the GBA (D10, §B4.5): while on, the Flipper's 0x1144 block carries lp_field_2
  * 0x8000. Off after init; the club never changes it. */

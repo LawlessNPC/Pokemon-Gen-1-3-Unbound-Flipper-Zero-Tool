@@ -1722,9 +1722,10 @@ TEST(test_trade_pending_survives_menu_close) {
 }
 
 TEST(test_trade_sync2_answer_framing_error) {
-    /* T6 carry-over: a stop-bit error on the GBA's word in the burst that carried the club's
-     * sync-2 answer makes the burst suspect both ways: the answer stays unconfirmed, and a link
-     * lost the next frame counts as RolledBack (the cost: one frame of delay) */
+    /* A stop-bit error on the GBA's word in the burst that carried the club's sync-2 answer, every
+     * transfer answered: the burst still confirms the answer. Ruby took it and commits, so a link
+     * lost the next frame counts as Assumed. Reporting RolledBack there would lose the GBA's
+     * traded Pokemon on both sides; the opposite misreport only clones the Flipper's offer */
     Bench b;
     MlinkTx tx;
     bench_init_trade(&b);
@@ -1740,15 +1741,16 @@ TEST(test_trade_sync2_answer_framing_error) {
     b.rx.framing_mask |= 1u << 4; /* complete and checksummed, but one stop bit low */
     gen3_club_frame(&b.club, &b.rx, &tx);
     count_sent(&b, &tx);
-    ASSERT_TRUE(b.club.sync2_unconfirmed);
+    ASSERT_TRUE(!b.club.sync2_unconfirmed);
     fake_ruby_power_off(&b.ruby);
     fake_ruby_frame(&b.ruby, &tx, &b.rx);
     bench_record(&b, &tx);
     run(&b, 30);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
     Gen3ClubStatus st = club_status(&b);
     ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
-    ASSERT_EQ(st.last_result, Gen3TradeResultRolledBack);
-    ASSERT_EQ(st.trades_done, 0);
+    ASSERT_EQ(st.last_result, Gen3TradeResultAssumed);
+    ASSERT_EQ(st.trades_done, 1);
     ASSERT_TRUE(!st.trade_pending);
 }
 
@@ -2612,6 +2614,72 @@ TEST(test_leave_never_sits) {
     ASSERT_TRUE(stays_left(&b));
 }
 
+TEST(test_leave_gba_walks_back_in) {
+    /* D9: left is sticky. A GBA that walks back into the Cable Club after End trade and sits gets
+     * no Flipper seat, so no trade can start: neither as the answer to its seat, nor as a late
+     * sit (R5) once the Flipper has a new offer */
+    for(int late = 0; late < 2; late++) {
+        Bench b;
+        uint8_t z[GEN3_PARTY_SIZE];
+        make_z(z);
+        bench_init_trade(&b);
+        if(late) ASSERT_TRUE(gen3_club_set_offer(&b.club, NULL, 0));
+        ASSERT_TRUE(bench_to_room(&b));
+        run(&b, 40);
+        gen3_club_request_leave(&b.club);
+        ASSERT_TRUE(run_until_closed_then_left(&b, 600));
+        run(&b, 60);
+        ruby_relink(&b); /* the GBA player walks back in */
+        ASSERT_TRUE(run_until_room(&b, 600));
+        ASSERT_TRUE(club_status(&b).left);
+        fake_ruby_sit(&b.ruby, 1);
+        for(int i = 0; i < 600; i++) {
+            step(&b);
+            ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+            if(late && i == 300) ASSERT_TRUE(bench_offer(&b, z));
+        }
+        ASSERT_EQ(b.sent_cafe16, 0);
+        const Gen3ClubStatus st = club_status(&b);
+        ASSERT_TRUE(st.gba_seated);
+        ASSERT_TRUE(!st.flipper_seated);
+        ASSERT_TRUE(st.left);
+        ASSERT_EQ(st.phase, Gen3ClubPhaseRoom);
+        ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubySeated);
+        ASSERT_TRUE(!st.trade_pending);
+        ASSERT_EQ(st.trades_done, 0);
+        ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 0);
+    }
+}
+
+TEST(test_leave_save_outcome_shown) {
+    /* D5 with D9: End trade during a trade, then the link lost in the GBA's save. The leave is
+     * over (left), and the guide shows the save's outcome, not "Link ended": lost after the
+     * sync-1 answer, RolledBack; after the sync-2 answer, Assumed */
+    for(uint8_t syncs = 1; syncs <= 2; syncs++) {
+        Bench b;
+        char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        ASSERT_TRUE(run_until_trade_link(&b, 600));
+        gen3_club_request_leave(&b.club);
+        for(int i = 0; i < 1000 && club_status(&b).save_syncs < syncs; i++) {
+            step(&b);
+            ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        }
+        ASSERT_EQ(club_status(&b).save_syncs, syncs);
+        run(&b, 4);
+        fake_ruby_power_off(&b.ruby);
+        run(&b, 30);
+        const Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+        ASSERT_TRUE(st.left);
+        ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), syncs - 1);
+        ASSERT_EQ(st.last_result, syncs == 1 ? Gen3TradeResultRolledBack : Gen3TradeResultAssumed);
+        ASSERT_TRUE(gen3_trade_guide(&st, true, true, Gen3RefuseNone, Gen3PickupOk, out));
+        ASSERT_STR_EQ(out[0], syncs == 1 ? "Link lost while the" : "Link lost at the end.");
+    }
+}
+
 TEST(test_leave_waits_for_save) {
     /* D9, R6: asked in the frame CCDD is queued, the leave waits for the trade and its link save
      * (no 0017, no EEBB, never left); the post-save menu then gets EEBB, and the room the 0017 */
@@ -3142,6 +3210,8 @@ int main(void) {
     RUN(test_leave_as_trade_starts);
     RUN(test_leave_while_seated);
     RUN(test_leave_never_sits);
+    RUN(test_leave_gba_walks_back_in);
+    RUN(test_leave_save_outcome_shown);
     RUN(test_leave_waits_for_save);
     RUN(test_leave_when_waiting);
     RUN(test_leave_in_relink_gap);

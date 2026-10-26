@@ -262,11 +262,13 @@ static void on_room_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
 /* §B1.4 with R5: in a trade session with an offer, the Flipper sits as soon as the GBA sits, or
  * later once it has an offer and no edit is open (O1; the GBA polls GetCableClubPartnersReady
  * with no timeout). It never sits first, nor while leaving (D9: a 0x16 after its 0x17 would turn
- * its EXITING slot READY and start the trade menu). One CAFE 0016, then zero bursts only, so G's
- * 5FFF isn't delayed (§B1.5). It stays READY if the GBA stands up (§B1.4: legal). */
+ * its EXITING slot READY and start the trade menu), nor once left: left is sticky, and a GBA that
+ * walks back in after End trade must not start a new trade in a session that is ending. One CAFE
+ * 0016, then zero bursts only, so G's 5FFF isn't delayed (§B1.5). It stays READY if the GBA
+ * stands up (§B1.4: legal). */
 static void try_sit(Gen3Club* club) {
     if(club->phase != Gen3ClubPhaseRoom || !club->cfg.trading || !club->has_offer ||
-       !club->gba_seated || club->flipper_seated || club->editing || club->leaving) {
+       !club->gba_seated || club->flipper_seated || club->editing || club->leaving || club->left) {
         return;
     }
     /* A full queue sends nothing: try again next frame */
@@ -695,12 +697,15 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     if(rx) {
         uint16_t cmd[GEN3_CMD_LEN];
         const Gen3LinkEvent event = gen3_link_rx(&club->link, rx, cmd);
-        /* Confirms the sync-2 answer once it has left (nothing queued) and a whole clean burst
-         * came back: every transfer answered (pokeruby's DoRecv queues a command only after all
-         * 8), no checksum error (the GBA's CheckErrorStatus would link-error before its commit)
-         * and no stop-bit error (a suspect burst both ways; it costs one frame of delay) */
+        /* Confirms the sync-2 answer once it has left (nothing queued) and a whole burst came
+         * back without a checksum error. Every transfer answered: pokeruby's DoRecv queues a
+         * command only after all 8, so a partial burst means the GBA never got our word. No
+         * checksum error: a mismatch both sides see makes the GBA's CheckErrorStatus link-error
+         * before its commit. A stop-bit error alone on the GBA's word doesn't hold it back: when
+         * unsure, Assumed (a clone of the Flipper's offer, which can be made again) is the safer
+         * misreport than RolledBack (the GBA's traded Pokemon lost on both sides). */
         if((event == Gen3LinkEventNone || event == Gen3LinkEventCommand) &&
-           rx->timeout_mask == 0 && rx->framing_mask == 0 && gen3_link_queued(&club->link) == 0) {
+           rx->timeout_mask == 0 && gen3_link_queued(&club->link) == 0) {
             club->sync2_unconfirmed = false;
         }
         switch(event) {

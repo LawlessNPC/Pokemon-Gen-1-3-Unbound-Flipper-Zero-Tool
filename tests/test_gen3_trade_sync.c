@@ -1031,6 +1031,49 @@ TEST(test_trade_back_action) {
     }
 }
 
+/* The app tick's own stop once the GBA has walked out (left, D9). left is sticky, so the GBA may
+ * be linked again by then (it walked back into the Cable Club while the session waited for a
+ * pickup): the tick stops only with no GBA linked, which R6 then allows too, and settled */
+TEST(test_trade_left_stop) {
+    Gen3ClubStatus st;
+
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    ASSERT_TRUE(!gen3_trade_left_stop(&st, true)); /* no leave asked */
+    st.left = true;
+    ASSERT_TRUE(gen3_trade_left_stop(&st, true));
+    ASSERT_TRUE(!gen3_trade_left_stop(&st, false)); /* a received Pokemon not picked up yet */
+    st.trade_pending = true; /* its 0x1144 relink never came: nothing written on the GBA (D1) */
+    ASSERT_TRUE(gen3_trade_left_stop(&st, true));
+    st.relinking = true; /* a relink's gap is linked */
+    ASSERT_TRUE(!gen3_trade_left_stop(&st, true));
+
+    /* The GBA walked back in after left: in the room, and in a trade's link save (D10) */
+    status_reset(&st, Gen3ClubPhaseRoom);
+    st.left = true;
+    ASSERT_TRUE(!gen3_trade_left_stop(&st, true));
+    status_reset(&st, Gen3ClubPhaseSave);
+    st.left = true;
+    st.trade_pending = true;
+    st.save_window = true;
+    ASSERT_TRUE(!gen3_trade_left_stop(&st, true));
+    ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+
+    for(int ph = Gen3ClubPhaseWaiting; ph <= Gen3ClubPhaseSave; ph++) {
+        for(unsigned bits = 0; bits < END_BITS; bits++) {
+            end_status(&st, ph, bits);
+            const bool settled = (bits >> 4) & 1;
+            const bool stop = gen3_trade_left_stop(&st, settled);
+            if(stop) {
+                ASSERT_TRUE(st.left && settled);
+                ASSERT_TRUE(gen3_trade_stop_allowed(&st)); /* R6, D10 */
+                ASSERT_TRUE(!end_linked(&st));
+            }
+            /* And it does stop once the GBA is gone with everything picked up */
+            if(st.left && settled && !end_linked(&st) && !st.save_window) ASSERT_TRUE(stop);
+        }
+    }
+}
+
 /* The guide as three strings; prints what it got on a mismatch */
 static bool guide_is(
     const Gen3ClubStatus* st,
@@ -1099,6 +1142,43 @@ TEST(test_guide_texts) {
     st.trade_pending = true;
     st.last_result = Gen3TradeResultCanceled;
     GUIDE(&st, Gen3RefuseItem, Gen3PickupBadData, "Link ended. You can", "unplug the GBA.", "");
+
+    /* End trade during a trade whose link was then lost in the GBA's save: the leave is done
+     * (left), and the save's outcome (D5) outranks "Link ended" */
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    st.left = true;
+    st.last_result = Gen3TradeResultRolledBack;
+    GUIDE(&st, no, ok, "Link lost while the", "GBA saved. It keeps", "its old save.");
+    st.last_result = Gen3TradeResultAssumed;
+    GUIDE(&st, no, ok, "Link lost at the end.", "Check the GBA party:", "it likely traded.");
+    st.left = false;
+    st.leaving = true;
+    GUIDE(&st, no, ok, "Link lost at the end.", "Check the GBA party:", "it likely traded.");
+    /* A pickup still waiting comes first, as without the leave */
+    st.leaving = false;
+    st.left = true;
+    GUIDE(
+        &st,
+        no,
+        Gen3PickupNoData,
+        "Can't take the traded",
+        "Pokemon: data file",
+        "unreadable. Retrying.");
+    /* Nothing written on the GBA, or nothing lost: "Link ended" */
+    st.last_result = Gen3TradeResultCanceled;
+    GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
+    st.last_result = Gen3TradeResultDone;
+    GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
+    /* An older trade's outcome: a later trade pending, a relink's gap, the GBA linked again */
+    st.last_result = Gen3TradeResultAssumed;
+    st.trade_pending = true;
+    GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
+    st.trade_pending = false;
+    st.relinking = true;
+    GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
+    st.relinking = false;
+    st.phase = Gen3ClubPhaseRoom;
+    GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
 
     /* leaving: no "offer changed" hint in the menu (T8 carry-over) */
     status_reset(&st, Gen3ClubPhaseMenu);
@@ -1265,6 +1345,8 @@ TEST(test_guide_texts) {
     /* Otherwise */
     status_reset(&st, Gen3ClubPhaseClosing);
     GUIDE(&st, no, ok, "Please wait...", "", "");
+    st.relinking = true; /* the club answered the GBA's 5FFF; its link not closed yet */
+    GUIDE(&st, no, ok, "Please wait...", "", "");
     status_reset(&st, Gen3ClubPhaseSave);
     st.last_result = Gen3TradeResultDone;
     st.trades_done = 1;
@@ -1424,6 +1506,7 @@ int main(void) {
     RUN_BULK(test_trade_end_action);
     RUN_BULK(test_trade_stop_link_action);
     RUN_BULK(test_trade_back_action);
+    RUN_BULK(test_trade_left_stop);
     RUN_BULK(test_guide_texts);
     RUN_BULK(test_guide_line_lengths);
     RUN_BULK(test_guide_copy_reports_cut);

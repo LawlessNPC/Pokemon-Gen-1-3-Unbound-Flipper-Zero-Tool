@@ -160,6 +160,10 @@ bool gen3_trade_stop_allowed(const Gen3ClubStatus* st) {
     return !(st->trade_pending && gba_linked(st));
 }
 
+bool gen3_trade_left_stop(const Gen3ClubStatus* st, bool settled) {
+    return st->left && settled && !gba_linked(st) && gen3_trade_stop_allowed(st);
+}
+
 Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool running, bool settled) {
     if(!running) return Gen3TradeEndMenu;
     if(st->save_window) return Gen3TradeEndSaving;
@@ -222,11 +226,20 @@ static void guide_pick(
     if(!cable_ok) SAY("Plug in the cable", "(or swap its ends).", "");
     if(!started) SAY("Starting...", "", "");
     if(st->save_window) SAY("The GBA is saving.", "Don't unplug or turn", "off. Back is locked.");
+    /* The latest trade reached the GBA's save and lost its link there (D5): its outcome, in the
+     * Waiting rows below, outranks the leave's rows, which End trade during that trade brings
+     * too. Not an older trade's: none pending since, and no GBA linked again (not even a relink's
+     * gap) */
+    const bool lost_in_save = st->phase == Gen3ClubPhaseWaiting && !st->relinking &&
+                              !st->trade_pending &&
+                              (st->last_result == Gen3TradeResultRolledBack ||
+                               st->last_result == Gen3TradeResultAssumed);
     /* left can come with a trade still pending (a 0x1144 relink that never came, before sync 1):
      * it says nothing about the trade */
-    if(st->left) SAY("Link ended. You can", "unplug the GBA.", "");
+    if(st->left && !lost_in_save) SAY("Link ended. You can", "unplug the GBA.", "");
     /* Ahead of the menu rows: no "offer changed" hint while leaving */
-    if(st->leaving) SAY("Ending: the GBA walks", "out of the Trade", "Center by itself.");
+    if(st->leaving && !lost_in_save)
+        SAY("Ending: the GBA walks", "out of the Trade", "Center by itself.");
     if(st->trade_pending) SAY("Trading...", "Watch the GBA.", "");
     if(st->phase == Gen3ClubPhaseError) {
         if(st->last_error == Gen3ClubErrorOtherRoom)

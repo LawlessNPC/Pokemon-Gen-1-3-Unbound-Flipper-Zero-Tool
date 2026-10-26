@@ -103,6 +103,13 @@ bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count)
  * neither flag. */
 bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
 
+/* The app tick's own stop, once the GBA has walked out (left, D9): left, settled
+ * (gen3_trade_sync_settled after this tick's poll), no GBA linked (Waiting, not in a relink's
+ * gap) and gen3_trade_stop_allowed. left is sticky, and the session can outlive it while a trade's
+ * Pokemon waits to be picked up; a GBA that walks back into the Cable Club meanwhile is linked
+ * again (the club no longer sits, so it can't trade), and the tick waits until it has gone. */
+bool gen3_trade_left_stop(const Gen3ClubStatus* st, bool settled);
+
 /* What ending a trade session takes now. Decided again from a fresh status on every button that
  * ends (fix round 1), never from what a dialog showed when it opened. */
 typedef enum {
@@ -137,9 +144,12 @@ Gen3TradeBackAction gen3_trade_back_action(const Gen3ClubStatus* st, bool runnin
 /* What is happening and what to do on the GBA. started: the session runs (or ran and ended);
  * cable_ok: the cable reads right; offer_refuse and pickup_fail: the sync's. Unused lines are "".
  * The guide never reads left as "trade resolved", nor refused alone as "no offer" (an R8 DDEE
- * leaves it None). Waiting with relinking (a relink's gap) reads as linked: "Linking...", never
- * the Waiting rows. Written through gen3_trade_guide_copy: false if a text, row or reason, had to
- * be cut to fit (test_guide_line_lengths: never). */
+ * leaves it None). The outcome of a trade whose link was lost in the GBA's save (RolledBack,
+ * Assumed) outranks left and leaving, which End trade during that trade brings too. Waiting with
+ * relinking (a relink's gap) reads as linked: "Linking...", never the Waiting rows. Closing with
+ * relinking (the club answered the GBA's 5FFF, and its link hasn't closed yet) keeps "Please
+ * wait...", as every Closing does. Written through gen3_trade_guide_copy: false if a text, row or
+ * reason, had to be cut to fit (test_guide_line_lengths: never). */
 bool gen3_trade_guide(
     const Gen3ClubStatus* st,
     bool started,

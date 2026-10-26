@@ -141,7 +141,7 @@ void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap) {
      * received Pokemon, which the GBA has saved as traded. That Pokemon is picked up on the first
      * tick back on a scene that doesn't edit, and the session stops then. Meanwhile the guide
      * shows "Link ended". A NoData pickup keeps it up: End trade offers Retry / End anyway. */
-    if(trading && st->left && gen3_trade_sync_settled(sync, received_count)) {
+    if(trading && gen3_trade_left_stop(st, gen3_trade_sync_settled(sync, received_count))) {
         gen3_session_stop(s); /* the last status stays readable */
         gen3_trade_reset(pokemon_fap);
         pokemon_fap->gen3_trade_ended = true;
