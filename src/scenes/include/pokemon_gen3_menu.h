@@ -1,6 +1,13 @@
 #pragma once
 
 #include <src/include/pokemon_app.h>
+#include <src/gen3/gen3_club.h>
+
+/* Copies the session's latest status (gen3_session_status; log_ok and cable_ok may be NULL) into
+ * one static buffer and returns it. Gen3ClubStatus is never a stack local (no app stack local is
+ * over 128 bytes). App thread only; pokemon_fap->gen3_session must exist. The next call
+ * overwrites it: don't hold the pointer across another call. */
+const Gen3ClubStatus* gen3_menu_status(PokemonFap* pokemon_fap, bool* log_ok, bool* cable_ok);
 
 /* Custom event a Gen III editor scene may send itself (from a view callback) to reach
  * gen3_menu_show_data_missing from its on_event. Clear of scene ids and the other Gen III

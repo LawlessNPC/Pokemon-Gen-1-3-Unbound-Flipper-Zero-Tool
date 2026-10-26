@@ -1,105 +1,8 @@
 #include "test.h"
-#include "fake_ruby.h"
+#include "club_bench.h"
 #include <stdbool.h>
 #include <src/gen3/gen3_club.h>
 #include <src/gen3/gen3_text.h>
-
-static const Gen3ClubConfig club_cfg = {"FLIPPER", 22222, 0, 0};
-
-/* Flipper (club) and fake Ruby wired back to back. rx is the fake's answer to the last tx. */
-typedef struct {
-    Gen3Club club;
-    FakeRuby ruby;
-    Gen3LinkPlayer me; /* the fake's LinkPlayer, kept for fake_ruby_init after a reset */
-    MlinkRx rx;
-    bool started;
-    /* Flipper commands by word 0; sent_cafe17 counts CAFE 0017 */
-    uint32_t sent_2222, sent_cccc, sent_5fff, sent_2ffe, sent_8888, sent_cafe, sent_cafe17;
-} Bench;
-
-static void bench_init(Bench* b, uint32_t ruby_link_type) {
-    memset(b, 0, sizeof(*b));
-    b->me.version = GEN3_VERSION_RUBY;
-    b->me.trainer_id = (54321u << 16) | 12345u;
-    gen3_text_encode("RUBY", b->me.name, sizeof(b->me.name), 7);
-    b->me.gender = 0;
-    b->me.link_type = ruby_link_type;
-    b->me.language = GEN3_LANGUAGE_ENGLISH;
-    gen3_club_init(&b->club, &club_cfg);
-    fake_ruby_init(&b->ruby, &b->me);
-}
-
-/* The GBA restarts (or its player is back at the counter) and links again; same club. */
-static void ruby_relink(Bench* b) {
-    fake_ruby_init(&b->ruby, &b->me);
-    fake_ruby_open_link(&b->ruby);
-}
-
-static void count_sent(Bench* b, const MlinkTx* tx) {
-    if(tx->count != MLINK_BURST_LEN) return;
-    if(tx->word[1] == 0x2222) b->sent_2222++;
-    if(tx->word[1] == 0xCCCC) b->sent_cccc++;
-    if(tx->word[1] == 0x5FFF) b->sent_5fff++;
-    if(tx->word[1] == 0x2FFE) b->sent_2ffe++;
-    if(tx->word[1] == 0x8888) b->sent_8888++;
-    if(tx->word[1] == 0xCAFE) {
-        b->sent_cafe++;
-        if(tx->word[2] == 0x0017) b->sent_cafe17++;
-    }
-}
-
-static void step(Bench* b) {
-    MlinkTx tx;
-    gen3_club_frame(&b->club, b->started ? &b->rx : NULL, &tx);
-    b->started = true;
-    count_sent(b, &tx);
-    fake_ruby_frame(&b->ruby, &tx, &b->rx);
-}
-
-static void run(Bench* b, uint32_t frames) {
-    for(uint32_t i = 0; i < frames; i++) step(b);
-}
-
-static Gen3ClubStatus club_status(const Bench* b) {
-    Gen3ClubStatus st;
-    gen3_club_status(&b->club, &st);
-    return st;
-}
-
-static bool run_until_phase(Bench* b, Gen3ClubPhase phase, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(club_status(b).phase == phase) return true;
-    }
-    return false;
-}
-
-static bool at_cards_or_later(Gen3ClubPhase p) {
-    return p == Gen3ClubPhaseCards || p == Gen3ClubPhaseRoom;
-}
-
-/* Until both sides are in the Trade Center: the club answered 2FFE, the fake got that answer. */
-static bool run_until_room(Bench* b, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        bool club_in = club_status(b).phase == Gen3ClubPhaseRoom;
-        if(club_in && fake_ruby_phase(&b->ruby) == FakeRubyRoom) return true;
-    }
-    return false;
-}
-
-static bool reach_room(Bench* b) {
-    bench_init(b, GEN3_LINKTYPE_TRADE_SETUP);
-    fake_ruby_open_link(&b->ruby);
-    return run_until_room(b, 400) && fake_ruby_error(&b->ruby) == NULL;
-}
-
-/* The GBA player walks out of the room (§B7); the club must go through Closing to Waiting. */
-static bool leave_room(Bench* b) {
-    fake_ruby_leave_room(&b->ruby);
-    return run_until_phase(b, Gen3ClubPhaseClosing, 600) &&
-           run_until_phase(b, Gen3ClubPhaseWaiting, 60);
-}
 
 TEST(test_club_reaches_cards) {
     Bench b;
@@ -401,6 +304,135 @@ TEST(test_club_checksum_one_sided_leaving) {
     }
 }
 
+TEST(test_club_own_block_after_gba) {
+    /* D2: the Flipper's LinkPlayerBlock follows the GBA's, so it can carry the GBA's link type. */
+    Bench b;
+    bench_init(&b, GEN3_LINKTYPE_TRADE_SETUP);
+    fake_ruby_open_link(&b.ruby);
+    for(int i = 0; i < 100 && b.bursts == 0; i++) step(&b);
+    ASSERT_EQ(b.bursts, 1);
+    /* The first burst after Connected: {2222, 1133, 0...}. Ruby doesn't read word 1 (§A1). */
+    ASSERT_EQ(b.last_tx.count, MLINK_BURST_LEN);
+    ASSERT_EQ(b.last_tx.word[1], 0x2222);
+    ASSERT_EQ(b.last_tx.word[2], GEN3_LINKTYPE_TRADE_SETUP);
+    for(int i = 3; i < MLINK_BURST_LEN; i++) ASSERT_EQ(b.last_tx.word[i], 0);
+
+    ASSERT_TRUE(run_until_room(&b, 400));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_TRUE(b.n_g_blocks >= 1);
+    ASSERT_EQ(b.n_f_blocks, 2); /* LinkPlayerBlock, trainer card */
+    const BenchBlock* g_lp = &b.g_blocks[0];
+    const BenchBlock* f_lp = &b.f_blocks[0];
+    ASSERT_EQ(g_lp->size, GEN3_LINK_PLAYER_BLOCK_SIZE);
+    ASSERT_EQ(f_lp->size, GEN3_LINK_PLAYER_BLOCK_SIZE);
+    ASSERT_TRUE(f_lp->first_burst > g_lp->last_burst);
+    /* §A6 margin: card_delay idle bursts after the Flipper's own last chunk, then 0xCCCC 2. */
+    ASSERT_EQ(b.n_f_cccc, 1);
+    ASSERT_EQ(b.f_cccc[0], 2);
+    ASSERT_EQ(b.f_cccc_burst[0], f_lp->last_burst + GEN3_CLUB_CARD_DELAY_BURSTS + 1);
+    ASSERT_EQ(b.f_blocks[1].size, GEN3_TRAINER_CARD_BLOCK_SIZE);
+}
+
+TEST(test_club_trainer_kept) {
+    Bench b;
+    char name[16];
+    ASSERT_TRUE(reach_room(&b));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(st.trainer_valid);
+    ASSERT_EQ(st.trainer.trainer_id & 0xFFFF, 12345);
+    ASSERT_EQ(st.trainer.trainer_id >> 16, 54321);
+    gen3_text_decode(st.trainer.name, sizeof(st.trainer.name), name, sizeof(name));
+    ASSERT_STR_EQ(name, "RUBY");
+    ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE_SETUP);
+
+    ASSERT_TRUE(leave_room(&b));
+    st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_TRUE(!st.partner_valid);
+    ASSERT_EQ(st.link_type, 0);
+    ASSERT_TRUE(st.trainer_valid);
+    gen3_text_decode(st.trainer.name, sizeof(st.trainer.name), name, sizeof(name));
+    ASSERT_STR_EQ(name, "RUBY");
+
+    /* Another GBA links: its player is the trainer now. */
+    b.me.trainer_id = (2u << 16) | 1u;
+    gen3_text_encode("SAPH", b.me.name, sizeof(b.me.name), 7);
+    ruby_relink(&b);
+    ASSERT_TRUE(run_until_room(&b, 400));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    st = club_status(&b);
+    ASSERT_TRUE(st.trainer_valid);
+    gen3_text_decode(st.trainer.name, sizeof(st.trainer.name), name, sizeof(name));
+    ASSERT_STR_EQ(name, "SAPH");
+    ASSERT_EQ(st.trainer.trainer_id & 0xFFFF, 1);
+    ASSERT_EQ(st.trainer.trainer_id >> 16, 2);
+}
+
+TEST(test_club_claim_game) {
+    static const Gen3ClubConfig cfg = {
+        .name = "FLIPPER", .tid = 22222, .sid = 0, .gender = 0, .trading = false};
+    static const uint8_t flipper[11] = {
+        0xC0, 0xC6, 0xC3, 0xCA, 0xCA, 0xBF, 0xCC, 0xFF, 0xFF, 0xFF, 0xFF};
+    Gen3LinkPlayer partner; /* the GBA's: unused while the Flipper always claims Ruby */
+    Gen3LinkPlayer lp;
+    uint8_t card[GEN3_TRAINER_CARD_BLOCK_SIZE];
+    uint8_t want_card[GEN3_TRAINER_CARD_BLOCK_SIZE];
+    uint8_t setup[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    uint8_t menu[GEN3_LINK_PLAYER_BLOCK_SIZE];
+
+    memset(&partner, 0, sizeof(partner));
+    partner.version = GEN3_VERSION_RUBY;
+    partner.trainer_id = (54321u << 16) | 12345u;
+    gen3_text_encode("RUBY", partner.name, sizeof(partner.name), 7);
+    partner.link_type = GEN3_LINKTYPE_TRADE_DISCONNECTED;
+    partner.language = GEN3_LANGUAGE_ENGLISH;
+
+    gen3_club_claim_game(&cfg, &partner, GEN3_LINKTYPE_TRADE_DISCONNECTED, true, &lp, card);
+    ASSERT_EQ(lp.version, 0x4002);
+    ASSERT_EQ(lp.lp_field_2, 0x8000);
+    ASSERT_EQ(lp.trainer_id, 22222);
+    ASSERT_EQ(lp.link_type, 0x1144);
+    ASSERT_EQ(lp.id, 0);
+    ASSERT_EQ(lp.language, 2);
+    ASSERT_EQ(lp.gender, 0);
+    ASSERT_MEM_EQ(lp.name, flipper, sizeof(flipper));
+    gen3_trainer_card_build(&lp, want_card);
+    ASSERT_MEM_EQ(card, want_card, sizeof(card));
+
+    gen3_club_claim_game(&cfg, &partner, GEN3_LINKTYPE_TRADE_DISCONNECTED, false, &lp, card);
+    ASSERT_EQ(lp.lp_field_2, 0);
+    ASSERT_EQ(lp.link_type, 0x1144);
+    gen3_club_claim_game(&cfg, &partner, GEN3_LINKTYPE_TRADE_CONNECTING, true, &lp, card);
+    ASSERT_EQ(lp.lp_field_2, 0); /* only the 0x1144 block carries the National Dex (§B4.5) */
+    ASSERT_EQ(lp.link_type, 0x1122);
+    gen3_trainer_card_build(&lp, want_card);
+    ASSERT_MEM_EQ(card, want_card, sizeof(card));
+    gen3_link_player_block_build(&lp, menu);
+
+    gen3_club_claim_game(&cfg, &partner, GEN3_LINKTYPE_TRADE_SETUP, false, &lp, card);
+    gen3_trainer_card_build(&lp, want_card);
+    ASSERT_MEM_EQ(card, want_card, sizeof(card));
+    gen3_link_player_block_build(&lp, setup);
+    /* §B1.6: every relink's block is byte-identical but for linkType (block bytes 0x24..0x27) */
+    for(size_t i = 0; i < sizeof(setup); i++) {
+        if(i >= 0x24 && i <= 0x27) continue;
+        ASSERT_EQ(setup[i], menu[i]);
+    }
+    ASSERT_EQ(setup[0x24], 0x33);
+    ASSERT_EQ(menu[0x24], 0x22);
+
+    /* trainer_id is sid << 16 | tid; any non-zero gender is sent as 1 (§A5) */
+    static const Gen3ClubConfig other = {
+        .name = "AB", .tid = 1, .sid = 2, .gender = 7, .trading = true};
+    static const uint8_t ab[11] = {
+        0xBB, 0xBC, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF};
+    gen3_club_claim_game(&other, &partner, GEN3_LINKTYPE_TRADE_SETUP, false, &lp, card);
+    ASSERT_EQ(lp.trainer_id, 0x00020001);
+    ASSERT_EQ(lp.gender, 1);
+    ASSERT_MEM_EQ(lp.name, ab, sizeof(ab));
+    ASSERT_EQ(card[0], 1); /* the card's gender */
+}
+
 int main(void) {
     RUN(test_club_reaches_cards);
     RUN(test_club_gba_not_ready);
@@ -417,5 +449,8 @@ int main(void) {
     RUN(test_club_checksum_one_sided_other_room);
     RUN(test_club_checksum_one_sided_linkup);
     RUN(test_club_checksum_one_sided_leaving);
+    RUN(test_club_own_block_after_gba);
+    RUN(test_club_trainer_kept);
+    RUN(test_club_claim_game);
     TEST_EXIT();
 }

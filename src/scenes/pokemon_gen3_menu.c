@@ -20,6 +20,14 @@
 /* The "Data missing" dialog is up instead of the menu */
 static bool gen3_menu_dialog_shown = false;
 
+/* gen3_menu_status's buffer */
+static Gen3ClubStatus gen3_menu_status_buf;
+
+const Gen3ClubStatus* gen3_menu_status(PokemonFap* pokemon_fap, bool* log_ok, bool* cable_ok) {
+    gen3_session_status(pokemon_fap->gen3_session, &gen3_menu_status_buf, log_ok, cable_ok);
+    return &gen3_menu_status_buf;
+}
+
 static void gen3_menu_item_callback(void* context, uint32_t index) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
 
@@ -52,9 +60,9 @@ static void gen3_menu_dialog_callback(DialogExResult result, void* context) {
     }
 }
 
-/* Everything but the Link Test needs the species names and learnsets from gen3_bulk.bin.
- * Deleting apps_assets/pokemon makes the Flipper unpack the app's assets again on the next start;
- * a reinstall alone doesn't if their signature still matches. */
+/* Everything but the Link Test needs gen3_bulk.bin (format v2): the species, move and item names
+ * and the learnsets. Deleting apps_assets/pokemon makes the Flipper unpack the app's assets again
+ * on the next start; a reinstall alone doesn't if their signature still matches. */
 void gen3_menu_show_data_missing(PokemonFap* pokemon_fap) {
     DialogEx* dialog_ex = pokemon_fap->dialog_ex;
 

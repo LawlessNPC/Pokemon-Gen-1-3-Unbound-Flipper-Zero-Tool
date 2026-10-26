@@ -43,12 +43,22 @@ static const char* gen3_link_test_phase_text(Gen3ClubPhase phase, Gen3ClubError 
         return "in Trade Center";
     case Gen3ClubPhaseClosing:
         return "closing";
+    case Gen3ClubPhaseExchange:
+        return "trade menu (loading)";
+    case Gen3ClubPhaseMenu:
+        return "trade menu";
+    case Gen3ClubPhaseTrade:
+        return "trading";
+    case Gen3ClubPhaseSave:
+        return "GBA saving";
     case Gen3ClubPhaseError: /* a checksum error never enters it: it only counts in Err */
         switch(error) {
         case Gen3ClubErrorBadPlayerBlock:
             return "error: bad data";
         case Gen3ClubErrorOtherRoom:
             return "GBA chose other room";
+        case Gen3ClubErrorUnexpected:
+            return "error: unexpected";
         default:
             return "error";
         }

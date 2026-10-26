@@ -174,7 +174,11 @@ bool gen3_session_start(Gen3Session* s) {
     if(s->running) return true;
 
     const Gen3ClubConfig cfg = {
-        GEN3_TEST_TRAINER_NAME, GEN3_TEST_TRAINER_TID, GEN3_TEST_TRAINER_SID, 0};
+        .name = GEN3_TEST_TRAINER_NAME,
+        .tid = GEN3_TEST_TRAINER_TID,
+        .sid = GEN3_TEST_TRAINER_SID,
+        .gender = 0,
+        .trading = false};
     MlinkTx first;
 
     /* The driver is off, so nothing else touches the club, the ring or the status yet. */

@@ -3,6 +3,7 @@
 #include <src/scenes/include/pokemon_scene.h>
 
 #include <src/gen3/gen3_session_furi.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 #include <src/views/gen3_link_test.h>
 
 /* Custom event from the view's 250 ms timer. Kept clear of the submenu (scene ids) and DialogEx
@@ -28,7 +29,6 @@ static void gen3_link_test_refresh(PokemonFap* pokemon_fap) {
         scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3LinkTest) ==
         GEN3_LINK_TEST_STARTED;
     bool cable_ok = true;
-    Gen3ClubStatus status;
     bool log_ok;
 
     if(!started) {
@@ -40,8 +40,9 @@ static void gen3_link_test_refresh(PokemonFap* pokemon_fap) {
         }
     }
 
-    gen3_session_status(session, &status, &log_ok, started ? &cable_ok : NULL);
-    gen3_link_test_update(pokemon_fap->gen3_link_test, cable_ok, &status, log_ok);
+    const Gen3ClubStatus* status =
+        gen3_menu_status(pokemon_fap, &log_ok, started ? &cable_ok : NULL);
+    gen3_link_test_update(pokemon_fap->gen3_link_test, cable_ok, status, log_ok);
 }
 
 /* Leaving now would drop the GBA to a link error screen. */
@@ -83,9 +84,7 @@ bool pokemon_scene_gen3_link_test_on_event(void* context, SceneManagerEvent even
         gen3_link_test_refresh(pokemon_fap);
         consumed = true;
     } else if(event.type == SceneManagerEventTypeBack) {
-        Gen3ClubStatus status;
-        gen3_session_status(pokemon_fap->gen3_session, &status, NULL, NULL);
-        if(gen3_link_test_in_club(status.phase)) {
+        if(gen3_link_test_in_club(gen3_menu_status(pokemon_fap, NULL, NULL)->phase)) {
             scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3LinkExit);
             consumed = true;
         } else {

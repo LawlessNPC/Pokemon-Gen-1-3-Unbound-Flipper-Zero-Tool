@@ -37,43 +37,76 @@ static void set_error(Gen3Club* club, Gen3ClubError error) {
     club->last_error = error;
 }
 
+/* Per link session. The trainer (and the config) outlive it. */
 static void reset_session(Gen3Club* club) {
     gen3_block_rx_reset(&club->block_rx);
     club->partner_valid = false;
     memset(&club->partner, 0, sizeof(club->partner));
+    club->link_type = 0;
     club->card_requested = false;
     club->close_answered = false;
     club->exit_answer_due = false;
     club->idle_bursts = 0;
 }
 
+void gen3_club_claim_game(
+    const Gen3ClubConfig* cfg,
+    const Gen3LinkPlayer* partner,
+    uint32_t link_type,
+    bool national_dex,
+    Gen3LinkPlayer* lp,
+    uint8_t card[GEN3_TRAINER_CARD_BLOCK_SIZE]) {
+    (void)partner; /* Ruby is claimed whatever the GBA is */
+    memset(lp, 0, sizeof(*lp));
+    lp->version = GEN3_VERSION_RUBY;
+    /* §B4.5: Ruby reads it only from the 0x1144 block */
+    lp->lp_field_2 =
+        (link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED && national_dex) ? GEN3_LP_NATIONAL_DEX : 0;
+    lp->trainer_id = ((uint32_t)cfg->sid << 16) | cfg->tid;
+    gen3_text_encode(cfg->name ? cfg->name : "", lp->name, sizeof(lp->name), NAME_MAX_CHARS);
+    lp->gender = cfg->gender ? 1 : 0; /* indexes the GBA's avatar table: 0 or 1 only (§A5) */
+    lp->link_type = link_type;
+    lp->id = 0;
+    lp->language = GEN3_LANGUAGE_ENGLISH;
+    gen3_trainer_card_build(lp, card);
+}
+
 void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg) {
     memset(club, 0, sizeof(*club));
     gen3_link_init(&club->link);
-
-    Gen3LinkPlayer own;
-    memset(&own, 0, sizeof(own));
-    own.version = GEN3_VERSION_RUBY;
-    own.lp_field_2 = 0;
-    own.trainer_id = ((uint32_t)cfg->sid << 16) | cfg->tid;
-    gen3_text_encode(cfg->name ? cfg->name : "", own.name, sizeof(own.name), NAME_MAX_CHARS);
-    own.gender = cfg->gender ? 1 : 0; /* indexes the GBA's avatar table: 0 or 1 only (§A5) */
-    own.link_type = GEN3_LINKTYPE_TRADE_SETUP;
-    own.id = 0;
-    own.language = GEN3_LANGUAGE_ENGLISH;
-    gen3_link_player_block_build(&own, club->own_player_block);
-    gen3_trainer_card_build(&own, club->own_card);
-
+    club->cfg = *cfg;
     club->card_delay = GEN3_CLUB_CARD_DELAY_BURSTS;
     club->phase = Gen3ClubPhaseWaiting;
     club->last_error = Gen3ClubErrorNone;
 }
 
-/* §A6 B1-B7: {2222,1133}, then our LinkPlayerBlock; both fit an empty queue (7 of 24). */
+/* §A6 B1: {2222,1133}. Ruby doesn't read word 1 (§A1), and answers with its LinkPlayerBlock. */
 static void on_connected(Gen3Club* club) {
     reset_session(club);
     club->phase = Gen3ClubPhaseLinked;
     send_cmd(club, CMD_SEND_LINK_TYPE, GEN3_LINKTYPE_TRADE_SETUP);
+}
+
+/* D2: the Flipper's block carries the GBA's link type in a trade session (§B1.6: a mismatch
+ * hangs the GBA silently), else 0x1133. */
+static uint32_t own_link_type(uint32_t gba_link_type) {
+    switch(gba_link_type) {
+    case GEN3_LINKTYPE_TRADE:
+    case GEN3_LINKTYPE_TRADE_CONNECTING:
+    case GEN3_LINKTYPE_TRADE_DISCONNECTED:
+        return gba_link_type;
+    default:
+        return GEN3_LINKTYPE_TRADE_SETUP;
+    }
+}
+
+/* §A6 "Optional" (D2): the Flipper's LinkPlayerBlock follows the GBA's. Six commands; nothing
+ * else is queued while the GBA's block comes in. */
+static void send_own_player_block(Gen3Club* club, uint32_t link_type) {
+    Gen3LinkPlayer lp;
+    gen3_club_claim_game(
+        &club->cfg, &club->partner, link_type, /* national_dex */ false, &lp, club->own_card);
+    gen3_link_player_block_build(&lp, club->own_player_block);
     gen3_block_send(
         &club->link,
         club->own_player_block,
@@ -81,21 +114,31 @@ static void on_connected(Gen3Club* club) {
         FLIPPER_MULTIPLAYER_ID);
 }
 
+/* The GBA's LinkPlayerBlock is complete. Whatever it holds, the Flipper's own block goes out, so
+ * the GBA never waits forever for one. */
 static void on_player_block(Gen3Club* club) {
     Gen3LinkPlayer lp;
+    uint32_t own_type = GEN3_LINKTYPE_TRADE_SETUP;
     if(club->block_rx.size != GEN3_LINK_PLAYER_BLOCK_SIZE ||
        !gen3_link_player_block_parse(club->block_rx.data, &lp)) {
         set_error(club, Gen3ClubErrorBadPlayerBlock);
-    } else if(lp.link_type != GEN3_LINKTYPE_TRADE_SETUP) {
-        /* Keep 0x1133: the GBA reports "different selections" and sends 5FFF (§A6). */
-        set_error(club, Gen3ClubErrorOtherRoom);
     } else {
         club->partner = lp;
-        club->partner_valid = true;
-        club->phase = Gen3ClubPhasePlayers;
-        club->idle_bursts = 0;
+        club->link_type = lp.link_type;
+        own_type = own_link_type(lp.link_type);
+        if(lp.link_type == GEN3_LINKTYPE_TRADE_SETUP) {
+            club->partner_valid = true;
+            club->trainer = lp; /* the GBA's player, kept across relinks */
+            club->trainer_valid = true;
+            club->phase = Gen3ClubPhasePlayers;
+            club->idle_bursts = 0;
+        } else {
+            /* At a 0x1133 linkup the GBA reports "different selections" and sends 5FFF (§A6). */
+            set_error(club, Gen3ClubErrorOtherRoom);
+        }
     }
     gen3_block_rx_reset(&club->block_rx);
+    send_own_player_block(club, own_type);
 }
 
 /* §A7 "What the Flipper must react to while idling": one answer per request; idle bursts stay
@@ -160,8 +203,8 @@ static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     }
 }
 
-/* §A6 "idle" row: once both player blocks are on the wire, card_delay all-zero bursts, then
- * 0xCCCC type 2 and our trainer card (10 commands into an empty queue). */
+/* §A6 "idle" row: once both player blocks are on the wire (ours goes last), card_delay all-zero
+ * bursts, then 0xCCCC type 2 and our trainer card (10 commands into an empty queue). */
 static void request_cards(Gen3Club* club) {
     if(club->phase != Gen3ClubPhasePlayers || club->card_requested) return;
     if(gen3_link_queued(&club->link) != 0) return; /* our own block is still going out */
@@ -216,6 +259,9 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->frames = club->frames;
     out->room_frames = club->room_frames;
     gen3_link_stats(&club->link, &out->link);
+    out->link_type = club->link_type;
+    out->trainer_valid = club->trainer_valid;
+    out->trainer = club->trainer;
 }
 
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts) {
