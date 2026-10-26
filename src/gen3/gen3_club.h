@@ -15,8 +15,13 @@
  * Pure C, no heap; gen3_club_frame runs in the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
-/* Idle bursts before a party-exchange CCCC (§B2.2): between both LinkPlayerBlocks and round 1's
- * (>= 8), and between both blocks of a round and the next round's (>= 5) */
+/* Idle bursts before a party-exchange CCCC (§B2.2). Round 1's follows both LinkPlayerBlocks: the
+ * GBA must take it 3 frames after them or later, and 10 also absorbs a GBA main-loop stall of up
+ * to 8 frames there. Rounds 2-5 follow both blocks of the previous round: this delay is
+ * defensive padding (§B2.2's ">= 5" is inferred), not required by pokeruby. The CCCC reaches the
+ * GBA's receive queue behind both blocks, so the GBA takes it no earlier than the frame it ends
+ * the round, and its copy for the next round (a frame later) precedes the block's first chunk
+ * (3 frames after the request). */
 #define GEN3_CLUB_ROUND1_DELAY_BURSTS 10
 #define GEN3_CLUB_ROUND_DELAY_BURSTS  6
 #define GEN3_CLUB_GBA_PARTY           6 /* the GBA's party slots */

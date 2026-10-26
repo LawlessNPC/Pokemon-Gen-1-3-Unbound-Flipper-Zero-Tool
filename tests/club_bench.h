@@ -274,17 +274,22 @@ static inline bool bench_to_room(Bench* b) {
     return run_until_room(b, 420) && fake_ruby_error(&b->ruby) == NULL;
 }
 
-/* On an initialised bench (a test may set the party or the offer first): bench_to_room, the GBA
- * sits on seat 1, then until its trade menu is Browsing (<= 600 frames). False on a fake error. */
-static inline bool bench_reach_menu(Bench* b) {
-    if(!bench_to_room(b)) return false;
-    fake_ruby_sit(&b->ruby, 1);
-    for(uint32_t i = 0; i < 600; i++) {
+/* Until the GBA's trade menu is Browsing; false on a fake error or after max_frames. */
+static inline bool run_until_browsing(Bench* b, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
         step(b);
         if(fake_ruby_error(&b->ruby) != NULL) return false;
         if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuBrowsing) return true;
     }
     return false;
+}
+
+/* On an initialised bench (a test may set the party or the offer first): bench_to_room, the GBA
+ * sits on seat 1, then until its trade menu is Browsing (<= 600 frames). False on a fake error. */
+static inline bool bench_reach_menu(Bench* b) {
+    if(!bench_to_room(b)) return false;
+    fake_ruby_sit(&b->ruby, 1);
+    return run_until_browsing(b, 600);
 }
 
 /* For `frames` frames a fresh Gen3Link is the master instead of the club: it handshakes, and on

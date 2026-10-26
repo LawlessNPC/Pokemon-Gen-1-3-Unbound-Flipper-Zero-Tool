@@ -240,13 +240,16 @@ static void start_round(Gen3Club* club, uint8_t round) {
     club->round = round;
     club->round_gba_done = false;
     club->idle_bursts = 0;
-    gen3_block_rx_reset(&club->block_rx);
+    /* Drops a partial block, if any: no full gen3_block_rx_reset (a 262-B memset) in the ISR.
+     * Chunks are ignored until the next header, which sets size and pos = 0, and Done comes only
+     * once that block's chunks have rewritten every byte below size. */
+    club->block_rx.active = false;
 }
 
 /* §B2.2. A step is complete once our block has left (the queue is empty) and the GBA's is in:
  * both LinkPlayerBlocks before round 1, both blocks of round r before round r + 1. Then
- * round1_delay or round_delay idle bursts, so the GBA has made its copy for the round and, at
- * round 1, its case 1 has run. After round 5: the trade menu. */
+ * round1_delay idle bursts (the GBA's case 1 must have run) or round_delay (padding, see
+ * gen3_club.h). After round 5: the trade menu. */
 static void exchange_step(Gen3Club* club) {
     if(club->phase != Gen3ClubPhaseExchange) return;
     if(club->round > 0 && !club->round_gba_done) return;

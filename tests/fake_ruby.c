@@ -66,13 +66,18 @@
 #define MENU_BUILD_FRAMES 32 /* state 6 up to callback1 (states 6-21 and the fade-in) */
 #define XCHG_STALL_FRAMES 600 /* test limit: a sub_8048D44 wait case has no timeout on Ruby */
 #define MAIL_BLOCK_SIZE   220 /* round 4: mail[0..5] and 4 more bytes (§B2.3) */
-/* What Ruby can hold (§B2.5 rules 1-3): internal species 1..251 and 277..411, items below
- * ITEMS_COUNT, never the ENIGMA BERRY */
+/* What Ruby can hold (§B2.5 rules 1-4): internal species 1..251 and 277..411, moves below
+ * NUM_MOVES, items below ITEMS_COUNT, never the ENIGMA BERRY, and no mail (a mail item or mail
+ * index needs mail data in round 4) */
 #define SPECIES_JOHTO_LAST  251
 #define SPECIES_HOENN_FIRST 277
 #define SPECIES_LAST        411
+#define MOVES_COUNT         355
 #define ITEMS_COUNT         349
 #define ITEM_ENIGMA_BERRY   175
+#define ITEM_MAIL_FIRST     121 /* ORANGE MAIL */
+#define ITEM_MAIL_LAST      132 /* RETRO MAIL */
+#define MAIL_NONE           0xFF
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -368,8 +373,11 @@ static void block_request(FakeRuby* g, uint16_t type) {
         init_block_send(g, g->block_send_buffer, block_request_size[type]);
         return;
     }
-    /* Ruby indexes the table without a bounds check; the club never sends type >= 5. */
-    if(type >= sizeof(block_request_size) / sizeof(block_request_size[0])) return;
+    /* Ruby indexes the table without a bounds check: it would send whatever lies past it. */
+    if(type >= sizeof(block_request_size) / sizeof(block_request_size[0])) {
+        set_error(g, "bad request");
+        return;
+    }
     /* A party-exchange round (§B2.1), refused while a block is active. block_send_chunk checks
      * its first chunk against the round's copy. */
     if(init_block_send(g, g->block_send_buffer, block_request_size[type])) {
@@ -873,6 +881,21 @@ static bool all_zero(const uint8_t* p, size_t len) {
     return true;
 }
 
+/* §B2.5 rules 1-4, for one decrypted slot of species != 0. */
+static bool ruby_can_hold(const Gen3Pkm* p) {
+    const uint32_t species = gen3_pkm_get(p, Gen3FieldSpecies);
+    const uint32_t item = gen3_pkm_get(p, Gen3FieldHeldItem);
+    if(species > SPECIES_LAST || (species > SPECIES_JOHTO_LAST && species < SPECIES_HOENN_FIRST)) {
+        return false;
+    }
+    for(int m = 0; m < 4; m++) {
+        if(gen3_pkm_get(p, (Gen3Field)(Gen3FieldMove1 + m)) >= MOVES_COUNT) return false;
+    }
+    if(item >= ITEMS_COUNT || item == ITEM_ENIGMA_BERRY) return false;
+    if(item >= ITEM_MAIL_FIRST && item <= ITEM_MAIL_LAST) return false;
+    return gen3_pkm_get(p, Gen3FieldMail) == MAIL_NONE;
+}
+
 /* State 6: CalculateEnemyPartyCount counts slots up to the first species 0 (§B2.5); a count of
  * 0 is legal (R8). Stricter than Ruby, which shows whatever it gets: a slot that fails its
  * checksum (a Bad Egg on Ruby) is "bad egg", and one Ruby can't hold is "bad offer". */
@@ -885,12 +908,8 @@ static void calculate_enemy_party_count(FakeRuby* g) {
             set_error(g, "bad egg");
             return;
         }
-        const uint32_t species = gen3_pkm_get(&p, Gen3FieldSpecies);
-        const uint32_t item = gen3_pkm_get(&p, Gen3FieldHeldItem);
-        if(species == 0) return;
-        if(species > SPECIES_LAST ||
-           (species > SPECIES_JOHTO_LAST && species < SPECIES_HOENN_FIRST) ||
-           item >= ITEMS_COUNT || item == ITEM_ENIGMA_BERRY) {
+        if(gen3_pkm_get(&p, Gen3FieldSpecies) == 0) return;
+        if(!ruby_can_hold(&p)) {
             set_error(g, "bad offer");
             return;
         }
@@ -1106,6 +1125,10 @@ void fake_ruby_sit(FakeRuby* g, uint8_t seat) {
 
 void fake_ruby_stand_up(FakeRuby* g) {
     g->b_press = true;
+}
+
+bool fake_ruby_on_seat(const FakeRuby* g) {
+    return g->on_seat;
 }
 
 uint8_t fake_ruby_link_state(const FakeRuby* g, uint8_t slot) {

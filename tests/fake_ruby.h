@@ -252,6 +252,9 @@ void fake_ruby_corrupt_next_checksum(FakeRuby* g);
 void fake_ruby_sit(FakeRuby* g, uint8_t seat);
 /* "Please wait...": the player presses B, seen by the next game update in the room (§B1.2). */
 void fake_ruby_stand_up(FakeRuby* g);
+/* The avatar stands on a seat tile: a fake_ruby_sit step was taken, whether or not it ran the
+ * seat script. */
+bool fake_ruby_on_seat(const FakeRuby* g);
 /* gUnknown_03000580 [sPlayerLinkStates]: 0x80 IDLE, 0x81 BUSY, 0x82 READY, 0x83 EXITING_ROOM */
 uint8_t fake_ruby_link_state(const FakeRuby* g, uint8_t slot);
 /* Frames from the latest OpenLink to gReceivedRemoteLinkPlayers; UINT32_MAX while waiting. */
@@ -264,7 +267,8 @@ FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
  * differ; Ruby hangs silently there, §B8), "stale block" (a party-exchange block requested before
  * its round's copy: Ruby sends stale bytes, U3), "exchange stalled" (a sub_8048D44 wait case
  * lasted 600 frames: Ruby's black screen, §B2.2), "bad egg" (a Flipper party slot fails its
- * checksum), "bad offer" (a Flipper party slot holds a species or item Ruby can't take, §B2.5) */
+ * checksum), "bad offer" (a Flipper party slot holds a species, move or item Ruby can't take, or
+ * mail, §B2.5), "bad request" (a CCCC type past sBlockRequestLookupTable) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as Ruby parsed it */
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);

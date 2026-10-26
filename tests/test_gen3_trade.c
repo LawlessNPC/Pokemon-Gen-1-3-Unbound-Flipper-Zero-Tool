@@ -226,16 +226,6 @@ TEST(test_trade_link_type_mismatch_trips_fake) {
     ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "link type");
 }
 
-/* Until the GBA's trade menu is Browsing, or a fake error; false if not within max_frames. */
-static bool run_until_browsing(Bench* b, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuBrowsing) return true;
-    }
-    return false;
-}
-
 TEST(test_trade_exchange_parties) {
     /* §B2.1: five rounds, then the GBA builds its trade menu with the Flipper's one Pokemon. */
     static const uint16_t types[GEN3_TRADE_ROUNDS] = {1, 1, 1, 3, 4};
@@ -326,6 +316,50 @@ TEST(test_trade_round1_delay_needed) {
     ASSERT_EQ(club_status(&b).round, 2);
 }
 
+/* bench_init_trade with set_round_delays(first, later); to the room and the GBA sits. When the
+ * Flipper's 0x1122 LinkPlayerBlock completes (its first block of size 60 in the GBA's trade
+ * menu), the GBA's main loop stalls `stall` frames: round 1's margin is all that absorbs it.
+ * Then until Browsing (true) or a fake error (false). */
+static bool exchange_with_round1_stall(Bench* b, uint8_t first, uint8_t later, uint8_t stall) {
+    bench_init_trade(b);
+    gen3_club_set_round_delays(&b->club, first, later);
+    if(!bench_to_room(b)) return false;
+    fake_ruby_sit(&b->ruby, 1);
+    bool stalled = false;
+    for(int i = 0; i < 900; i++) {
+        const uint8_t n = b->n_f_blocks;
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuBrowsing) return true;
+        if(!stalled && b->n_f_blocks > n && fake_ruby_phase(&b->ruby) == FakeRubyMenu &&
+           b->f_blocks[b->n_f_blocks - 1].size == GEN3_LINK_PLAYER_BLOCK_SIZE) {
+            fake_ruby_stall(&b->ruby, stall);
+            stalled = true;
+        }
+    }
+    return false;
+}
+
+TEST(test_trade_round1_margin) {
+    /* §B2.2: the GBA must take round 1's CCCC at least 3 frames after both LinkPlayerBlocks;
+     * the club's 10 idle bursts leave room for an 8-frame stall at the worst moment. */
+    Bench b;
+    ASSERT_TRUE(exchange_with_round1_stall(&b, GEN3_CLUB_ROUND1_DELAY_BURSTS, 6, 8));
+    ASSERT_TRUE(!exchange_with_round1_stall(&b, GEN3_CLUB_ROUND1_DELAY_BURSTS, 6, 9));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "stale block");
+}
+
+TEST(test_trade_later_rounds_need_no_delay) {
+    /* The rounds 2-5 delay is padding (§B2.2, inferred): each CCCC queues on the GBA behind both
+     * blocks of the previous round, so even no idle burst works, and the fake invents no
+     * hazard. */
+    Bench b;
+    ASSERT_TRUE(exchange_with_round1_stall(&b, GEN3_CLUB_ROUND1_DELAY_BURSTS, 0, 0));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_EQ(club_status(&b).phase, Gen3ClubPhaseMenu);
+}
+
 TEST(test_trade_missing_block_stalls_fake) {
     /* §B2.1: no timeout in any case. The Flipper's round-1 block never comes (its queue is
      * dropped and only its link layer runs on, sending idle bursts): case 3 waits forever. */
@@ -347,8 +381,9 @@ TEST(test_trade_missing_block_stalls_fake) {
     }
     ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
     ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "exchange stalled");
-    /* 600 frames into case 3, which began a few frames before round 1's CCCC */
-    ASSERT_TRUE(frames > 580 && frames <= 600);
+    /* 600 frames into case 3, which began 8 frames before the GBA got round 1's CCCC (G0 + 3
+     * against G0 + 11) */
+    ASSERT_EQ(frames, 592);
 }
 
 TEST(test_trade_exchange_with_backlog) {
@@ -426,6 +461,76 @@ TEST(test_trade_bad_item_trips_fake) {
     ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "bad offer");
 }
 
+/* bench_init_trade offering tm_make_pkm(252, 5, 21) with `field` poked raw to `value` (checksum
+ * fixed, past every check), then bench_reach_menu: the fake's error, or NULL. */
+static const char* offer_poked(Bench* b, Gen3Field field, uint32_t value) {
+    Gen3Pkm p;
+    uint8_t mon[GEN3_PARTY_SIZE];
+    tm_make_pkm(252, 5, 21, &p);
+    gen3_pkm_set(&p, field, value);
+    gen3_pkm_fix_checksum(&p);
+    gen3_pkm_encrypt(&p, mon);
+    bench_init_trade(b);
+    if(!bench_offer(b, mon)) return "offer refused";
+    bench_reach_menu(b);
+    return fake_ruby_error(&b->ruby);
+}
+
+TEST(test_trade_bad_move_trips_fake) {
+    /* §B2.5 rule 2: moves 0..354 (NUM_MOVES = 355) */
+    Bench b;
+    const char* error = offer_poked(&b, Gen3FieldMove2, 355);
+    ASSERT_TRUE(error != NULL);
+    ASSERT_STR_EQ(error, "bad offer");
+}
+
+TEST(test_trade_mail_byte_trips_fake) {
+    /* §B2.5 rule 4: no mail data goes with the Flipper's Pokemon, so its mail byte stays 0xFF */
+    Bench b;
+    const char* error = offer_poked(&b, Gen3FieldMail, 0);
+    ASSERT_TRUE(error != NULL);
+    ASSERT_STR_EQ(error, "bad offer");
+}
+
+TEST(test_trade_mail_item_trips_fake) {
+    /* §B2.5 rule 4: a mail item (121..132) without mail data */
+    Bench b;
+    const char* error = offer_poked(&b, Gen3FieldHeldItem, 132);
+    ASSERT_TRUE(error != NULL);
+    ASSERT_STR_EQ(error, "bad offer");
+}
+
+TEST(test_trade_bad_request_trips_fake) {
+    /* sBlockRequestLookupTable has 5 entries; Ruby would read past it for type 5. */
+    static const uint16_t request[GEN3_CMD_LEN] = {0xCCCC, 5};
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(gen3_link_send(&b.club.link, request)); /* raw, past the club */
+    for(int i = 0; i < 20 && fake_ruby_error(&b.ruby) == NULL; i++) step(&b);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "bad request");
+}
+
+TEST(test_trade_seat_step_while_busy) {
+    /* The fake's avatar: a step onto a seat while this GBA's player isn't IDLE (here BUSY in the
+     * exit prompt) runs no seat script, but the avatar still ends on the seat tile. */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_to_room(&b));
+    ASSERT_TRUE(!fake_ruby_on_seat(&b.ruby));
+    fake_ruby_leave_room(&b.ruby);
+    for(int i = 0; i < 60 && fake_ruby_link_state(&b.ruby, 1) != 0x81; i++) step(&b);
+    ASSERT_EQ(fake_ruby_link_state(&b.ruby, 1), 0x81); /* BUSY */
+    fake_ruby_sit(&b.ruby, 0);
+    run(&b, 10);
+    ASSERT_TRUE(fake_ruby_on_seat(&b.ruby));
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyLeaving); /* no seat script */
+    ASSERT_EQ(fake_ruby_link_state(&b.ruby, 1), 0x81);
+    ASSERT_EQ(b.sent_cafe16, 0);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
 TEST(test_trade_extra_request_trips_fake) {
     /* U3: a sixth CCCC after the exchange would get gBlockSendBuffer's round-5 bytes. */
     static const uint16_t request[GEN3_CMD_LEN] = {0xCCCC, 1};
@@ -455,11 +560,18 @@ int main(void) {
     RUN(test_trade_exchange_parties);
     RUN(test_trade_exchange_margins);
     RUN(test_trade_round1_delay_needed);
+    RUN(test_trade_round1_margin);
+    RUN(test_trade_later_rounds_need_no_delay);
     RUN(test_trade_missing_block_stalls_fake);
     RUN(test_trade_exchange_with_backlog);
     RUN(test_trade_exchange_empty_offer);
     RUN(test_trade_bad_offer_trips_fake);
     RUN(test_trade_bad_item_trips_fake);
+    RUN(test_trade_bad_move_trips_fake);
+    RUN(test_trade_mail_byte_trips_fake);
+    RUN(test_trade_mail_item_trips_fake);
+    RUN(test_trade_bad_request_trips_fake);
+    RUN(test_trade_seat_step_while_busy);
     RUN(test_trade_extra_request_trips_fake);
     RUN(test_club_size);
     TEST_EXIT();
