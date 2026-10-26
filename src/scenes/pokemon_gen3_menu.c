@@ -293,13 +293,16 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
             }
             consumed = true;
         } else if(event.event == PokemonSceneGen3Trade) {
-            /* The tick needs the editor: it hands the GBA player to it and offers its Pokemon */
-            if(!gen3_menu_editor_ready(pokemon_fap)) {
+            if(gen3_session_trading(pokemon_fap->gen3_session)) {
+                /* The running session's trade screen, whatever the SD card does: its editor
+                 * exists, and the guide says why a pickup waits for the data file */
+                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+            } else if(!gen3_menu_editor_ready(pokemon_fap)) {
+                /* A new session's tick needs the editor: it hands the GBA player to it and
+                 * offers its Pokemon */
                 gen3_menu_show_data_missing(pokemon_fap);
             } else {
-                if(!gen3_session_trading(pokemon_fap->gen3_session)) {
-                    gen3_menu_trade_alloc(pokemon_fap);
-                }
+                gen3_menu_trade_alloc(pokemon_fap);
                 scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
             }
             consumed = true;
