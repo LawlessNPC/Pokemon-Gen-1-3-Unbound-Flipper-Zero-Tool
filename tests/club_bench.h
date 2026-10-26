@@ -23,6 +23,7 @@ static const Gen3ClubConfig club_cfg_trade =
 #define BENCH_BLOCKS 96 /* f_blocks, g_blocks */
 #define BENCH_CCCC   32 /* f_cccc, f_cccc_burst */
 #define BENCH_SYNCS  16 /* f_2ffe_burst, g_2ffe_burst */
+#define BENCH_CLOSES 16 /* g_close_type */
 
 /* One completed block as one side put it on the wire. */
 typedef struct {
@@ -61,9 +62,14 @@ typedef struct {
     uint32_t f_2ffe_burst[BENCH_SYNCS], g_2ffe_burst[BENCH_SYNCS];
     uint8_t n_f_2ffe, n_g_2ffe;
     uint32_t g_5fff_burst;
+    /* word 1 of every GBA 5FFF, in order (FRLG's gReadyCloseLinkType, fr: link.c: BuildSendCmd) */
+    uint16_t g_close_type[BENCH_CLOSES];
+    uint8_t n_g_close;
     bool muted; /* bench_mute */
     uint8_t party[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* the GBA's party as set, game form */
     uint8_t party_count;
+    /* An FRLG fake's save progress, applied again at each ruby_relink */
+    bool natdex, can_link_rs;
 } Bench;
 
 /* The GBA's party (game form, slots 0..count-1), for the fake now and after ruby_relink. */
@@ -77,17 +83,42 @@ static inline void
     fake_ruby_set_party(&b->ruby, b->party, count);
 }
 
+/* The Ruby GBA of bench_init_cfg: "RUBY", TID 12345, SID 54321, gender 0, link type 0x1133 */
+static inline Gen3LinkPlayer bench_ruby_player(void) {
+    Gen3LinkPlayer lp;
+    memset(&lp, 0, sizeof(lp));
+    lp.version = GEN3_VERSION_RUBY;
+    lp.trainer_id = (54321u << 16) | 12345u;
+    gen3_text_encode("RUBY", lp.name, sizeof(lp.name), 7);
+    lp.gender = 0;
+    lp.link_type = GEN3_LINKTYPE_TRADE_SETUP;
+    lp.language = GEN3_LANGUAGE_ENGLISH;
+    return lp;
+}
+
+/* An FRLG GBA of that version: TID 13579, SID 24680, link type 0x1133; FireRed is "RED" (gender
+ * 0), LeafGreen (0x4005) "LEAF" (gender 1). The fake's FRLG mode sets its lp_field_2 and
+ * name[8..10]. */
+static inline Gen3LinkPlayer bench_frlg_player(uint16_t version) {
+    const bool leaf = version == GEN3_VERSION_LEAFGREEN;
+    Gen3LinkPlayer lp;
+    memset(&lp, 0, sizeof(lp));
+    lp.version = version;
+    lp.trainer_id = (24680u << 16) | 13579u;
+    gen3_text_encode(leaf ? "LEAF" : "RED", lp.name, sizeof(lp.name), 7);
+    lp.gender = leaf ? 1 : 0;
+    lp.link_type = GEN3_LINKTYPE_TRADE_SETUP;
+    lp.language = GEN3_LANGUAGE_ENGLISH;
+    return lp;
+}
+
 /* The GBA holds tm_make(1, 5, 11), tm_make(4, 5, 12) and tm_make(7, 10, 13). The test's main
  * must have called bulk_file_open. */
 static inline void bench_init_cfg(Bench* b, uint32_t ruby_link_type, const Gen3ClubConfig* cfg) {
     uint8_t party[3][GEN3_PARTY_SIZE];
     memset(b, 0, sizeof(*b));
-    b->me.version = GEN3_VERSION_RUBY;
-    b->me.trainer_id = (54321u << 16) | 12345u;
-    gen3_text_encode("RUBY", b->me.name, sizeof(b->me.name), 7);
-    b->me.gender = 0;
+    b->me = bench_ruby_player();
     b->me.link_type = ruby_link_type;
-    b->me.language = GEN3_LANGUAGE_ENGLISH;
     gen3_club_init(&b->club, cfg);
     fake_ruby_init(&b->ruby, &b->me);
     tm_make(1, 5, 11, party[0]);
@@ -118,9 +149,37 @@ static inline void bench_init_trade(Bench* b) {
     bench_offer(b, mon);
 }
 
-/* The GBA restarts (or its player is back at the counter) and links again; same club and party. */
+/* Another cartridge, or another save, in the same session: a fresh fake with LinkPlayer me (its
+ * save's progress natdex, without FLAG_SYS_CAN_LINK_WITH_RS, if FRLG) and the bench's party. The
+ * club and the bench's logs are untouched, and the link isn't opened. */
+static inline void bench_swap_gba(Bench* b, const Gen3LinkPlayer* me, bool natdex) {
+    b->me = *me;
+    b->natdex = natdex;
+    b->can_link_rs = false;
+    fake_ruby_init(&b->ruby, &b->me);
+    if(fake_ruby_is_frlg(&b->ruby)) fake_ruby_set_frlg_progress(&b->ruby, natdex, false);
+    fake_ruby_set_party(&b->ruby, b->party, b->party_count);
+}
+
+/* bench_init_trade with an FRLG GBA (bench_frlg_player(version), its save's National Dex natdex)
+ * offering CHARMANDER, tm_make(4, 5, 21), a Kanto Pokemon. The test's main must have called
+ * bulk_file_open. */
+static inline void bench_init_frlg(Bench* b, uint16_t version, bool natdex) {
+    uint8_t mon[GEN3_PARTY_SIZE];
+    const Gen3LinkPlayer me = bench_frlg_player(version);
+    bench_init_cfg(b, GEN3_LINKTYPE_TRADE_SETUP, &club_cfg_trade);
+    bench_swap_gba(b, &me, natdex);
+    tm_make(4, 5, 21, mon);
+    bench_offer(b, mon);
+}
+
+/* The GBA restarts (or its player is back at the counter) and links again; same club and party,
+ * and an FRLG save's same progress. */
 static inline void ruby_relink(Bench* b) {
     fake_ruby_init(&b->ruby, &b->me);
+    if(fake_ruby_is_frlg(&b->ruby)) {
+        fake_ruby_set_frlg_progress(&b->ruby, b->natdex, b->can_link_rs);
+    }
     fake_ruby_set_party(&b->ruby, b->party, b->party_count);
     fake_ruby_open_link(&b->ruby);
 }
@@ -204,7 +263,10 @@ static inline void bench_record(Bench* b, const MlinkTx* tx) {
         if(g[1] == 0x0016) b->g_cafe16_burst = burst;
     }
     if(g[0] == 0x2FFE && b->n_g_2ffe < BENCH_SYNCS) b->g_2ffe_burst[b->n_g_2ffe++] = burst;
-    if(g[0] == 0x5FFF) b->g_5fff_burst = burst;
+    if(g[0] == 0x5FFF) {
+        b->g_5fff_burst = burst;
+        if(b->n_g_close < BENCH_CLOSES) b->g_close_type[b->n_g_close++] = g[1];
+    }
 }
 
 /* While muted, step() doesn't call the club: the fake gets frames without transfers (a stalled

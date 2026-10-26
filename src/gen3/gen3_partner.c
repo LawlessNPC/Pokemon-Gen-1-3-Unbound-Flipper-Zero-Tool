@@ -2,9 +2,6 @@
 
 #include <src/gen3/gen3_data.h>
 
-/* progressFlags bits 0-3: "has the National Dex" (fr: trade.c: CanTradeSelectedMon) */
-#define PROGRESS_NATIONAL_DEX_BITS 0x0F
-
 Gen3LinkGame gen3_link_game(uint16_t version) {
     switch(version & 0xFF) {
     case GEN3_VERSION_SAPPHIRE & 0xFF:
@@ -27,7 +24,8 @@ void gen3_partner_rules(const Gen3LinkPlayer* gba, Gen3PartnerRules* out) {
     case Gen3LinkGameFRLG:
         /* FRLG tests its partner's progressFlagsCopy, a receiver's copy of block 0x20
          * (fr: link.c: ConvertLinkPlayerName), so the Flipper reads block 0x20 itself */
-        out->national_dex = (gen3_link_player_progress(gba) & PROGRESS_NATIONAL_DEX_BITS) != 0;
+        out->national_dex =
+            (gen3_link_player_progress(gba) & GEN3_FRLG_PROGRESS_NATIONAL_DEX_MASK) != 0;
         break;
     case Gen3LinkGameRS:
     case Gen3LinkGameE:

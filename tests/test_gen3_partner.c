@@ -62,6 +62,10 @@ TEST(test_partner_rules) {
     ASSERT_TRUE(rules_are(0x4004, 0x01, 0x01, Gen3LinkGameFRLG, true));
     ASSERT_TRUE(rules_are(0x4004, 0x0F, 0x0F, Gen3LinkGameFRLG, true));
     ASSERT_TRUE(rules_are(0x4004, 0x11, 0x11, Gen3LinkGameFRLG, true));
+    /* Any bit of the low nibble: FRLG tests progressFlagsCopy & 0xF, not bit 0 alone */
+    ASSERT_TRUE(rules_are(0x4004, 0x02, 0x02, Gen3LinkGameFRLG, true));
+    ASSERT_TRUE(rules_are(0x4004, 0x08, 0x08, Gen3LinkGameFRLG, true));
+    ASSERT_EQ(GEN3_FRLG_PROGRESS_NATIONAL_DEX_MASK, 0x0F);
     ASSERT_TRUE(rules_are(0x4004, 0x10, 0x10, Gen3LinkGameFRLG, false));
     ASSERT_TRUE(rules_are(0x4004, 0x00, 0x00, Gen3LinkGameFRLG, false));
     ASSERT_TRUE(rules_are(0x4005, 0x01, 0x01, Gen3LinkGameFRLG, true));

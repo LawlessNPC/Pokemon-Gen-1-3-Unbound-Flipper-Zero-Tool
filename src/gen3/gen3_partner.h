@@ -21,8 +21,10 @@ typedef enum {
     Gen3LinkGameFRLG,
 } Gen3LinkGame;
 
-/* By version & 0xFF, as fr: trade.c: GetGameProgressForLinkTrade reads it: 1 and 2 are R/S, 3 is
- * Emerald, 4 and 5 are FRLG, and anything else is Unknown. */
+/* By version & 0xFF, the one byte FRLG reads (fr: trade.c: GetGameProgressForLinkTrade): 1 and 2
+ * are R/S, 3 is Emerald, 4 and 5 are FRLG, and anything else is Unknown. Only the byte read is
+ * FRLG's: FRLG itself puts every value but 1, 2, 4 and 5 in one "Emerald or other" class. The
+ * Flipper keeps 3 apart as E, and E and Unknown both act as R/S. */
 Gen3LinkGame gen3_link_game(uint16_t version);
 
 typedef struct {

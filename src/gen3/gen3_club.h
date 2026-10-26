@@ -6,6 +6,7 @@
 #include <src/gen3/gen3_link.h>
 #include <src/gen3/gen3_block.h>
 #include <src/gen3/gen3_link_player.h>
+#include <src/gen3/gen3_partner.h>
 #include <src/gen3/gen3_pkm.h>
 #include <src/gen3/gen3_trade_block.h>
 
@@ -144,6 +145,11 @@ typedef struct {
      * GEN3_CLUB_RELINK_WAIT_FRAMES of Waiting take it as gone. Waiting with relinking is no
      * "no GBA linked": a stop then is a link error on the GBA, mid-relink. */
     bool relinking;
+    /* The rules of the GBA whose LinkPlayerBlock last parsed, of any link type: its game and,
+     * for FRLG, whether that save has the National Dex. Kept across disconnects, relinks and bad
+     * blocks, so after a cartridge swap they are the old GBA's until the new one's block parses;
+     * {Unknown, true} from init until the first block. */
+    Gen3PartnerRules partner_rules;
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -197,6 +203,9 @@ struct Gen3Club {
     uint8_t eebb_bursts; /* Leaving: bursts since the latest EEBB went out, up to the retry */
     Gen3Pkm scratch; /* the GBA mon of the latest AABB, decrypted (R2) */
     /* Trade context: survives relinks (D3) */
+    /* gen3_partner_rules of the GBA's latest parsed LinkPlayerBlock, any link type; {Unknown,
+     * true} from init. Disconnects and bad blocks keep them */
+    Gen3PartnerRules partner_rules;
     uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
     bool has_offer;
     uint32_t trades_done;
@@ -227,13 +236,23 @@ struct Gen3Club {
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
- * LinkPlayer for a session of link_type, and its trainer card. Plan 3 always claims Ruby:
- * version GEN3_VERSION_RUBY, name cfg->name (7 chars, EOS-filled to 11), trainer_id sid<<16|tid,
- * gender 0/1, id 0, language GEN3_LANGUAGE_ENGLISH, card gen3_trainer_card_build (§A5). lp_field_2
- * is GEN3_LP_NATIONAL_DEX only for GEN3_LINKTYPE_TRADE_DISCONNECTED with national_dex set, else 0.
- * partner (the GBA's LinkPlayer of this session) is unused until plan 4 claims FireRed/LeafGreen
- * for an FRLG partner (§C1, §C2). partner may be zeroed (bad block) or unaccepted (other type);
- * plan 4's FRLG choice must default to Ruby then. Pure: safe in the link ISR. */
+ * LinkPlayer for a session of link_type, and its trainer card, by the game of partner: the GBA's
+ * LinkPlayer of this session, whatever its link type. NULL, or zeros after a bad block or a reset,
+ * read as an Unknown game. Every claim has name cfg->name (7 chars, EOS-filled to 11), trainer_id
+ * sid<<16|tid, gender 0/1, id 0 and language GEN3_LANGUAGE_ENGLISH.
+ * - FireRed/LeafGreen: the GBA's own game, version 0x4000 | (partner->version & 0xFF), so FR
+ *   meets FR and LG meets LG. lp_field_2 GEN3_LP_NATIONAL_DEX in every block (what FRLG itself
+ *   sends; it never reads it), so national_dex is ignored. name[8..10] 01 00 01: progress
+ *   GEN3_FRLG_PROGRESS_NATIONAL_DEX, which lets the FRLG player offer a Pokemon above #151
+ *   (fr: trade.c: CanTradeSelectedMon). Card gen3_trainer_card_build_frlg. An FRLG claim passes
+ *   FRLG's linkup gate, and the GBA shows an FRLG avatar and the Kanto card (§C1, §C2).
+ * - Ruby/Sapphire, Emerald and Unknown: Ruby, version GEN3_VERSION_RUBY, name[8..10] EOS, card
+ *   gen3_trainer_card_build (§A5); lp_field_2 GEN3_LP_NATIONAL_DEX only for
+ *   GEN3_LINKTYPE_TRADE_DISCONNECTED with national_dex set, else 0. An FRLG GBA would refuse
+ *   this claim at the counter unless its save has FLAG_SYS_CAN_LINK_WITH_RS
+ *   (fr: trade.c: GetGameProgressForLinkTrade).
+ * An FRLG GBA in another room gets the FRLG claim too; the link types differ first, so nothing
+ * follows from it. Pure: safe in the link ISR. */
 void gen3_club_claim_game(
     const Gen3ClubConfig* cfg,
     const Gen3LinkPlayer* partner,

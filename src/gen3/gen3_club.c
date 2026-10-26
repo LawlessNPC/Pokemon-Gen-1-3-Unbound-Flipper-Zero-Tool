@@ -19,6 +19,8 @@
 #define BLOCK_REQ_TRAINER_CARD 2
 #define FLIPPER_MULTIPLAYER_ID 0 /* slot 0: block headers carry 0x80 */
 #define NAME_MAX_CHARS         7
+/* LinkPlayer versions are this + the game's VERSION_* (fr: link.c: InitLocalLinkPlayer) */
+#define LP_VERSION_BASE        0x4000
 
 /* Byte 0x13 of a Pokemon, game form or not (the header is never encrypted): bit 1 is hasSpecies
  * (pokeruby BoxPokemon, PKHeX PK3; Gen3FieldHasSpecies in gen3_pkm.c) */
@@ -88,19 +90,33 @@ void gen3_club_claim_game(
     bool national_dex,
     Gen3LinkPlayer* lp,
     uint8_t card[GEN3_TRAINER_CARD_BLOCK_SIZE]) {
-    (void)partner; /* Ruby is claimed whatever the GBA is */
     memset(lp, 0, sizeof(*lp));
-    lp->version = GEN3_VERSION_RUBY;
-    /* §B4.5: Ruby reads it only from the 0x1144 block */
-    lp->lp_field_2 =
-        (link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED && national_dex) ? GEN3_LP_NATIONAL_DEX : 0;
     lp->trainer_id = ((uint32_t)cfg->sid << 16) | cfg->tid;
     gen3_text_encode(cfg->name ? cfg->name : "", lp->name, sizeof(lp->name), NAME_MAX_CHARS);
     lp->gender = cfg->gender ? 1 : 0; /* indexes the GBA's avatar table: 0 or 1 only (§A5) */
     lp->link_type = link_type;
     lp->id = 0;
     lp->language = GEN3_LANGUAGE_ENGLISH;
-    gen3_trainer_card_build(lp, card);
+    switch(gen3_link_game(partner ? partner->version : 0)) {
+    case Gen3LinkGameFRLG:
+        /* §C1: the GBA's own game, and what FRLG's InitLocalLinkPlayer sends. A Ruby claim
+         * would fail FRLG's linkup gate (fr: trade.c: GetGameProgressForLinkTrade) */
+        lp->version = (uint16_t)(LP_VERSION_BASE | (partner->version & 0xFF));
+        lp->lp_field_2 = GEN3_LP_NATIONAL_DEX; /* in every block, as FRLG; it never reads it */
+        gen3_link_player_set_progress(lp, GEN3_FRLG_PROGRESS_NATIONAL_DEX);
+        gen3_trainer_card_build_frlg(lp, card); /* §C2: the Kanto card */
+        break;
+    case Gen3LinkGameRS:
+    case Gen3LinkGameE:
+    case Gen3LinkGameUnknown:
+        lp->version = GEN3_VERSION_RUBY;
+        /* §B4.5: Ruby reads it only from the 0x1144 block */
+        lp->lp_field_2 = (link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED && national_dex) ?
+                             GEN3_LP_NATIONAL_DEX :
+                             0;
+        gen3_trainer_card_build(lp, card);
+        break;
+    }
 }
 
 void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg) {
@@ -112,6 +128,7 @@ void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg) {
     club->round_delay = GEN3_CLUB_ROUND_DELAY_BURSTS;
     club->phase = Gen3ClubPhaseWaiting;
     club->last_error = Gen3ClubErrorNone;
+    gen3_partner_rules(NULL, &club->partner_rules); /* {Unknown, true}: a memset alone isn't */
 }
 
 /* §A6 B1: {2222,1133}. Ruby doesn't read word 1 (§A1), and answers with its LinkPlayerBlock. */
@@ -181,6 +198,9 @@ static void on_player_block(Gen3Club* club) {
        !gen3_link_player_block_parse(club->block_rx.data, &lp)) {
         set_error(club, Gen3ClubErrorBadPlayerBlock);
     } else {
+        /* Every parsed block, any link type, before the claim: the GBA linked now, so after a
+         * cartridge swap its rules replace the old GBA's at its first block */
+        gen3_partner_rules(&lp, &club->partner_rules);
         if(club->trade_pending && lp.link_type != GEN3_LINKTYPE_TRADE_DISCONNECTED) {
             /* D3: the GBA restarted or came back from the counter: the trade never began on it */
             end_trade(club, Gen3TradeResultCanceled);
@@ -786,6 +806,7 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->leaving = club->leaving;
     out->left = club->left;
     out->relinking = club->relink_due;
+    out->partner_rules = club->partner_rules;
 }
 
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {

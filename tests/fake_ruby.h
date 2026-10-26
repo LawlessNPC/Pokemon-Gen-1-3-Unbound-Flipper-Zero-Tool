@@ -17,7 +17,23 @@
  * cable_club.c linkup tasks, and in the room the lockstep game update (CB1_OverworldLink: player
  * link states, key intercept callbacks) with the exit and seat scripts, then trade.c's own
  * callbacks and tasks. One fake_ruby_frame() is one GBA frame: VBlank (LinkVSync), the frame's
- * transfers, then the main loop. Any error stops it answering (0xFFFF from then on). */
+ * transfers, then the main loop. Any error stops it answering (0xFFFF from then on).
+ *
+ * FRLG mode (docs/gen3/link-protocol-trade.md Part C): a LinkPlayer whose version & 0xFF is 4
+ * (FireRed) or 5 (LeafGreen) at fake_ruby_init makes this GBA FireRed/LeafGreen. Every Ruby check
+ * stays on; the mode adds what pokefirered does differently at the linkup, each branch citing
+ * its function (fr: file: Function):
+ * - its own LinkPlayer: lp_field_2 0x8000 and progressFlags in name[8], name[9..10] zero
+ *   (fr: link.c: InitLocalLinkPlayer);
+ * - every LinkPlayer it receives: name[8..10] zeroed for an R/S sender, else name[10] = name[8]
+ *   (fr: link.c: ProcessRecvCmds, ConvertLinkPlayerName);
+ * - the 0x1133 linkup gate (fr: trade.c: GetGameProgressForLinkTrade): "not ready" below;
+ * - its own trainer card with the version byte at 0x38
+ *   (fr: trainer_card.c: TrainerCard_GenerateCardForLinkPlayer), and the check of the Flipper's
+ *   (fr: cable_club.c: Task_LinkupAwaitTrainerCardData): "bad card" below.
+ * The room, the seats, the walk-in, the 0x1111 re-establish and the 300-frame tasks are Ruby's,
+ * as FRLG's are the same (§C5; fr: cable_club.c: Task_EnterCableClubSeat,
+ * Task_WaitForLinkPlayerConnection, cartridge build). */
 
 #define FAKE_RUBY_CMD_LEN   8 /* CMD_LENGTH */
 #define FAKE_RUBY_QUEUE_LEN 50 /* QUEUE_CAPACITY */
@@ -147,6 +163,7 @@ typedef struct FakeRuby FakeRuby;
 
 struct FakeRuby {
     Gen3LinkPlayer me; /* this GBA's LinkPlayer (InitLocalLinkPlayer) */
+    bool frlg; /* FRLG mode: me.version & 0xFF was 4 or 5 at fake_ruby_init */
     FakeRubyPhase phase;
     const char* error;
     bool powered;
@@ -202,6 +219,8 @@ struct FakeRuby {
     FakeRubyTask task;
     uint32_t task_frame; /* frame the current task step began */
     bool card_ready; /* own trainer card is in gBlockSendBuffer */
+    /* the Flipper's card block (request type 2) as received at this linkup; zeros until then */
+    uint8_t partner_card[GEN3_TRAINER_CARD_BLOCK_SIZE];
     uint32_t standby_frame; /* frame this GBA built its 0x2FFE */
 
     /* overworld.c in the Trade Center: CB1_OverworldLink and the room scripts */
@@ -287,8 +306,18 @@ struct FakeRuby {
     bool saved_national_dex;
 };
 
-/* me.link_type picks the counter */
+/* me.link_type picks the counter; me.version & 0xFF of 4 or 5 picks FRLG mode, whose own
+ * LinkPlayer then has lp_field_2 0x8000 and name[8..10] 00 00 00 (no progress) */
 void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me);
+/* FRLG mode (me.version & 0xFF is 4 or 5 at fake_ruby_init) */
+bool fake_ruby_is_frlg(const FakeRuby* g);
+/* FRLG mode, before fake_ruby_open_link: the save's National Dex and FLAG_SYS_CAN_LINK_WITH_RS,
+ * both false after fake_ruby_init (the strict case). Writes its own name[8], progressFlags
+ * (fr: link.c: InitLocalLinkPlayer). No effect in Ruby mode. */
+void fake_ruby_set_frlg_progress(FakeRuby* g, bool national_dex, bool can_link_rs);
+/* The Flipper's 100-byte card block as received at the latest linkup (both modes); all zeros
+ * before one arrives, from fake_ruby_init and from each fake_ruby_open_link */
+const uint8_t* fake_ruby_partner_card(const FakeRuby* g);
 /* player chose the counter: link opens after 6 frames (§A3 timeline) */
 void fake_ruby_open_link(FakeRuby* g);
 /* answers 0xFFFF from now on; fake_ruby_init powers it on again */
@@ -353,9 +382,18 @@ FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
  * sub_804DC88 state 9). Like the hangs, these two need a stray Flipper command that makes this
  * GBA send a block (a 2222, or a CCCC). "relink mismatch" (the 0x1111 relink after an EEBB: the
  * Flipper's trainer id, or its name up to the first EOS, differs from the Part A linkup's:
- * sub_800826C closes the link, CB2_LinkError) */
+ * sub_800826C closes the link, CB2_LinkError). FRLG mode adds "not ready" (the 0x1133 linkup
+ * gate: an R/S Flipper without this save's FLAG_SYS_CAN_LINK_WITH_RS, or an Emerald or other
+ * Flipper unless both progressFlagsCopy have a 0xF0 bit, fr: trade.c:
+ * GetGameProgressForLinkTrade. FRLG closes the link with no 5FFF, fr: cable_club.c:
+ * Task_LinkupExchangeDataWithLeader; phase Closed) and "bad card" (the Flipper's card has stars
+ * above 4, past sHoennTrainerCardPals/sKantoTrainerCardPals, or an FRLG Flipper's card has a
+ * version byte at 0x38 other than its LinkPlayer's: fr: cable_club.c:
+ * Task_LinkupAwaitTrainerCardData copies it whole, and fr: trainer_card.c: GetCardType picks
+ * the card from that byte) */
 const char* fake_ruby_error(const FakeRuby* g);
-/* the Flipper's block as Ruby parsed it */
+/* the Flipper's block as this GBA parsed it (in FRLG mode, converted as every received
+ * LinkPlayer is: fr: link.c: ConvertLinkPlayerName) */
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);
 
 /* The GBA's party, game form, slots 0..count-1 (also its saved party: it saved at the counter,

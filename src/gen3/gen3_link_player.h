@@ -45,8 +45,10 @@ void gen3_trainer_card_build(const Gen3LinkPlayer* lp, uint8_t out[GEN3_TRAINER_
 /* FRLG and Emerald give name[8..10] (block 0x20..0x22) to progressFlags, neverRead and
  * progressFlagsCopy (fr: include/link.h: struct LinkPlayer; Part C §C1). */
 #define GEN3_LP_PROGRESS_INDEX 8
-/* Has the National Dex: FRLG reads bits 0-3 as one flag (fr: trade.c: CanTradeSelectedMon) */
-#define GEN3_FRLG_PROGRESS_NATIONAL_DEX 0x01
+/* Has the National Dex: FRLG reads bits 0-3 as one flag (fr: trade.c: CanTradeSelectedMon tests
+ * progressFlagsCopy & 0xF), and sets bit 0 for it itself (fr: link.c: InitLocalLinkPlayer) */
+#define GEN3_FRLG_PROGRESS_NATIONAL_DEX_MASK 0x0F
+#define GEN3_FRLG_PROGRESS_NATIONAL_DEX      0x01
 /* FLAG_SYS_CAN_LINK_WITH_RS (fr: link.c: InitLocalLinkPlayer) */
 #define GEN3_FRLG_PROGRESS_CAN_LINK_RS 0x10
 /* struct TrainerCard.version, after the Ruby layout (fr: include/trainer_card.h) */

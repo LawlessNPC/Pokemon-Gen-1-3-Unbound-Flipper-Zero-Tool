@@ -2,7 +2,8 @@
 
 #include <string.h>
 
-/* Citations are pokeruby names, as in docs/gen3/link-protocol.md. */
+/* Citations are pokeruby names, as in docs/gen3/link-protocol.md. FRLG mode cites pokefirered as
+ * fr: file: Function (docs/gen3/link-protocol-trade.md Part C). */
 
 #define CMD_SEND_LINK_TYPE     0x2222
 #define CMD_READY_EXIT_STANDBY 0x2FFE
@@ -166,6 +167,26 @@
 /* Default main-loop stall per sector (not measured: link-protocol-trade.md T4) */
 #define SECTOR_STALL       2
 
+/* FRLG mode (Part C). LinkPlayer versions are 0x4000 + these (fr: include/constants/global.h);
+ * every receiver reads the low byte only. */
+#define VERSION_SAPPHIRE   1
+#define VERSION_RUBY       2
+#define VERSION_FIRE_RED   4
+#define VERSION_LEAF_GREEN 5
+#define FRLG_LP_FIELD_2    0x8000 /* fr: link.c: InitLocalLinkPlayer */
+/* fr: include/link.h: struct LinkPlayer 0x10..0x12, right after its 8-byte name: name[8..10] of
+ * a Gen3LinkPlayer, LinkPlayerBlock 0x20..0x22 */
+#define LP_PROGRESS_FLAGS      8 /* progressFlags */
+#define LP_NEVER_READ          9 /* neverRead */
+#define LP_PROGRESS_FLAGS_COPY 10 /* progressFlagsCopy */
+#define PROGRESS_NATIONAL_DEX  0x01 /* IsNationalPokedexEnabled() */
+#define PROGRESS_CAN_LINK_RS   0x10 /* FLAG_SYS_CAN_LINK_WITH_RS */
+#define PROGRESS_CLEARED_GAME  0xF0 /* the bits fr: trade.c: GetGameProgressForLinkTrade tests */
+/* fr: include/trainer_card.h: struct TrainerCard (its first 0x38 bytes are TrainerCardRSE) */
+#define CARD_STARS     0x01 /* rse.stars: indexes 5-entry palette tables (sKantoTrainerCardPals) */
+#define CARD_STARS_MAX 4
+#define CARD_VERSION   0x38 /* version */
+
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
 #define BLOCK_REQ_CARD 2
@@ -173,6 +194,16 @@ static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
 /* sMagic: an ASCII C string, compared with strcmp (15 bytes including the NUL) */
 static const char link_magic[] = "GameFreak inc.";
 #define LP_OFF_MAGIC2 0x2C
+
+static bool is_rs_version(uint16_t version) {
+    const uint8_t v = (uint8_t)(version & 0xFF);
+    return v == VERSION_RUBY || v == VERSION_SAPPHIRE;
+}
+
+static bool is_frlg_version(uint16_t version) {
+    const uint8_t v = (uint8_t)(version & 0xFF);
+    return v == VERSION_FIRE_RED || v == VERSION_LEAF_GREEN;
+}
 
 static void set_error(FakeRuby* g, const char* reason) {
     if(!g->error) g->error = reason;
@@ -423,6 +454,18 @@ static void receive_link_player(FakeRuby* g, uint8_t slot) {
     }
 }
 
+/* FRLG mode: fr: link.c: ProcessRecvCmds, then ConvertLinkPlayerName, on every LinkPlayer this
+ * GBA receives, its own echo included. An R/S sender's three progress bytes are zeroed; then
+ * progressFlagsCopy becomes progressFlags, whatever the sender wrote there. */
+static void frlg_convert_link_player(Gen3LinkPlayer* lp) {
+    if(is_rs_version(lp->version)) {
+        lp->name[LP_PROGRESS_FLAGS] = 0;
+        lp->name[LP_NEVER_READ] = 0;
+        lp->name[LP_PROGRESS_FLAGS_COPY] = 0;
+    }
+    lp->name[LP_PROGRESS_FLAGS_COPY] = lp->name[LP_PROGRESS_FLAGS];
+}
+
 /* IsLinkPlayerDataExchangeComplete: every linkType equals slot 0's. */
 static bool link_types_match(const FakeRuby* g) {
     for(int i = 1; i < FAKE_RUBY_PLAYERS; i++) {
@@ -455,6 +498,7 @@ static void cont_block(FakeRuby* g, uint8_t slot, const uint16_t* cmd) {
         return;
     }
     gen3_link_player_block_parse(buf, &g->link_players[slot]);
+    if(g->frlg) frlg_convert_link_player(&g->link_players[slot]); /* fr: link.c: ProcessRecvCmds */
     receive_link_player(g, slot);
 }
 
@@ -1688,6 +1732,31 @@ static void run_wait_task(FakeRuby* g) {
     if(g->received_link_players) g->wait_task = false;
 }
 
+/* FRLG mode, the 0x1133 linkup gate: fr: trade.c: GetGameProgressForLinkTrade as this GBA
+ * (slot 1) sees the Flipper (slot 0), on the converted LinkPlayers (frlg_convert_link_player).
+ * An FRLG partner is ready. An R/S partner needs this GBA's own progressFlagsCopy & 0xF0
+ * (FLAG_SYS_CAN_LINK_WITH_RS: the Sevii Islands are done); any other partner needs that, and
+ * the partner's own & 0xF0 too (an Emerald champion). */
+static bool frlg_partner_ready(const FakeRuby* g) {
+    const Gen3LinkPlayer* partner = &g->link_players[0];
+    if(is_frlg_version(partner->version)) return true;
+    if((g->link_players[LOCAL_ID].name[LP_PROGRESS_FLAGS_COPY] & PROGRESS_CLEARED_GAME) == 0) {
+        return false; /* TRADE_PLAYER_NOT_READY */
+    }
+    if(is_rs_version(partner->version)) return true;
+    return (partner->name[LP_PROGRESS_FLAGS_COPY] & PROGRESS_CLEARED_GAME) != 0;
+}
+
+/* FRLG mode: fr: cable_club.c: Task_LinkupAwaitTrainerCardData copies the Flipper's card whole
+ * when its LinkPlayer's version & 0xFF is 4 or 5 (else the first 0x38 bytes, with the
+ * LinkPlayer's version), and fr: trainer_card.c draws it: GetCardType picks the Kanto or the
+ * Hoenn card from that version, and rse.stars indexes a 5-entry palette table. */
+static bool frlg_card_ok(const FakeRuby* g) {
+    const uint16_t version = g->link_players[0].version;
+    if(g->partner_card[CARD_STARS] > CARD_STARS_MAX) return false;
+    return !is_frlg_version(version) || g->partner_card[CARD_VERSION] == (version & 0xFF);
+}
+
 /* cable_club.c (child side of the Trade Center linkup) and the counter script. */
 static void run_linkup_task(FakeRuby* g) {
     switch(g->task) {
@@ -1704,6 +1773,16 @@ static void run_linkup_task(FakeRuby* g) {
             next_task(g, FakeRubyTaskStop);
             break;
         }
+        if(g->frlg && g->link_players[0].link_type == GEN3_LINKTYPE_TRADE_SETUP &&
+           !frlg_partner_ready(g)) {
+            /* fr: cable_club.c: Task_LinkupExchangeDataWithLeader: PLAYER_NOT_READY and
+             * PARTNER_NOT_READY close the link at once, with no 5FFF, and the player is back at
+             * the counter */
+            close_link(g);
+            g->phase = FakeRubyClosed;
+            set_error(g, "not ready");
+            break;
+        }
         next_task(g, FakeRubyTaskMakeCard);
         break;
     case FakeRubyTaskMakeCard:
@@ -1714,6 +1793,11 @@ static void run_linkup_task(FakeRuby* g) {
          * sub_800826C checks against these */
         memcpy(g->saved_players, g->link_players, sizeof(g->saved_players));
         gen3_trainer_card_build(&g->me, g->block_send_buffer);
+        if(g->frlg) {
+            /* fr: trainer_card.c: TrainerCard_GenerateCardForLinkPlayer: version = GAME_VERSION
+             * after the Ruby layout; the rest of the FRLG card stays zero here */
+            g->block_send_buffer[CARD_VERSION] = (uint8_t)(g->me.version & 0xFF);
+        }
         g->send_copy = 0;
         g->card_ready = true;
         next_task(g, FakeRubyTaskAwaitCards);
@@ -1721,6 +1805,11 @@ static void run_linkup_task(FakeRuby* g) {
     case FakeRubyTaskAwaitCards:
         if(g->block_received != 0x3) break; /* Flipper's card and our own echo */
         g->block_received = 0; /* ResetBlockReceivedFlags */
+        memcpy(g->partner_card, g->block_recv_buffer[0], sizeof(g->partner_card));
+        if(g->frlg && !frlg_card_ok(g)) { /* fr: cable_club.c: Task_LinkupAwaitTrainerCardData */
+            set_error(g, "bad card");
+            break;
+        }
         g->phase = FakeRubyWalkIn;
         next_task(g, FakeRubyTaskWalkIn);
         break;
@@ -1859,12 +1948,39 @@ void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me) {
     g->relink_frames = UINT32_MAX;
     g->sector_stall = SECTOR_STALL;
     for(int i = 0; i < LINK_DATA_WORDS; i++) g->link_data[i] = LINK_DATA_LEFTOVER;
+    g->frlg = is_frlg_version(me->version);
+    if(g->frlg) {
+        /* fr: link.c: InitLocalLinkPlayer: lp_field_2 0x8000 and progressFlags from the save
+         * (none until fake_ruby_set_frlg_progress). neverRead and progressFlagsCopy are never
+         * written: only a receiver fills the copy (ConvertLinkPlayerName) */
+        g->me.lp_field_2 = FRLG_LP_FIELD_2;
+        g->me.name[LP_PROGRESS_FLAGS] = 0;
+        g->me.name[LP_NEVER_READ] = 0;
+        g->me.name[LP_PROGRESS_FLAGS_COPY] = 0;
+    }
+}
+
+bool fake_ruby_is_frlg(const FakeRuby* g) {
+    return g->frlg;
+}
+
+void fake_ruby_set_frlg_progress(FakeRuby* g, bool national_dex, bool can_link_rs) {
+    if(!g->frlg) return;
+    /* fr: link.c: InitLocalLinkPlayer: progressFlags = IsNationalPokedexEnabled(), | 0x10 with
+     * FLAG_SYS_CAN_LINK_WITH_RS */
+    g->me.name[LP_PROGRESS_FLAGS] = (uint8_t)((national_dex ? PROGRESS_NATIONAL_DEX : 0) |
+                                              (can_link_rs ? PROGRESS_CAN_LINK_RS : 0));
+}
+
+const uint8_t* fake_ruby_partner_card(const FakeRuby* g) {
+    return g->partner_card;
 }
 
 void fake_ruby_open_link(FakeRuby* g) {
     if(!g->powered || g->error) return;
     open_link(g);
     g->card_ready = false;
+    memset(g->partner_card, 0, sizeof(g->partner_card));
     next_task(g, FakeRubyTaskExchange);
     g->phase = FakeRubyHandshake;
 }
