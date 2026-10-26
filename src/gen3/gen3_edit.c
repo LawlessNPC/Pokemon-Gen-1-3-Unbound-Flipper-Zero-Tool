@@ -1,5 +1,6 @@
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_data.h>
+#include <src/gen3/gen3_pk3.h>
 
 #include <string.h>
 
@@ -221,6 +222,20 @@ bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
         gen3_pkm_set(pkm, Gen3FieldAbilityBit, 0);
         info->ability_fixed = true;
     }
+    /* No mail record exists behind this Pokemon. Ruby's trade code (pokeruby trade.c,
+     * sub_804BA94) uses the partner's mail index without checking the held item: 0..5 gives the
+     * received Pokemon that mail, 6..254 reads past the mail array. A held Mail item would make
+     * the game read or take mail[0xFF]. */
+    uint32_t item = gen3_pkm_get(pkm, Gen3FieldHeldItem);
+    if(item >= GEN3_ITEM_MAIL_FIRST && item <= GEN3_ITEM_MAIL_LAST) {
+        gen3_pkm_set(pkm, Gen3FieldHeldItem, 0);
+        info->mail_item_removed = true;
+    }
+    if(gen3_pkm_get(pkm, Gen3FieldMail) != GEN3_MAIL_NONE) {
+        gen3_pkm_set(pkm, Gen3FieldMail, GEN3_MAIL_NONE);
+        info->mail_cleared = true;
+    }
+    gen3_pkm_set(pkm, Gen3FieldHasSpecies, 1);
     /* Recalculate, keeping the current HP clamped to the new MaxHp. */
     uint32_t hp = gen3_pkm_get(pkm, Gen3FieldHp);
     gen3_recalc_party(pkm);
@@ -230,6 +245,7 @@ bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
 }
 
 bool gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm) {
+    if(gen3_pkm_check(pkm) != Gen3CheckOk) return false;
     Gen3Pkm p = *pkm;
     if(!gen3_normalise(&p, NULL)) return false;
     ed->pkm = p;

@@ -36,10 +36,11 @@ typedef struct {
     bool mail_removed; /* a held Mail item was removed: item 0, mail index 0xFF */
 } Gen3ImportInfo;
 
-/* Order: size, checksum, gen3_pkm_check. Then a held Mail item (ids 121..132) is removed (the file
- * is not refused) and gen3_normalise runs. len 80: party fields derived (Status 0, Mail 0xFF,
- * Hp = MaxHp, stats from gen3_recalc_party). len 100: the party bytes the editor doesn't model are
- * kept, stats are recomputed. On Ok, HasSpecies is set to 1. *out is unchanged unless Ok.
+/* Order: size, checksum, gen3_pkm_check. Then gen3_normalise runs, which also removes a held
+ * Mail item (ids 121..132; the file is not refused) and sets the mail index to 0xFF. len 80:
+ * party fields derived (Status 0, Mail 0xFF, Hp = MaxHp, stats from gen3_recalc_party). len 100:
+ * the status and current HP are kept, stats are recomputed, a mail index other than 0xFF is
+ * cleared (normalise.mail_cleared). On Ok, HasSpecies is set to 1. *out is unchanged unless Ok.
  * NoData: the Pokemon has no move and the default moveset can't be read from the bulk file.
  * info may be NULL; it is always reset. */
 Gen3Check gen3_pk3_import(const uint8_t* data, size_t len, Gen3Pkm* out, Gen3ImportInfo* info);

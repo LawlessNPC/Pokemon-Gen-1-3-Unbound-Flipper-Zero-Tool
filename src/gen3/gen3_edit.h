@@ -41,29 +41,35 @@ typedef struct Gen3Editor {
     Gen3Rng rng;
 } Gen3Editor;
 
-/* What gen3_normalise changed. Party stats are always recalculated and aren't reported. */
+/* What gen3_normalise changed. Party stats are always recalculated, and HasSpecies set, without
+ * being reported. */
 typedef struct {
     bool moves_defaulted; /* no move was left: the default moveset, full PP, PP Ups 0 */
     bool duplicates_removed; /* a repeated move was dropped with its PP and PP Ups */
     bool gaps_packed; /* the input had an empty move slot before a used one */
     bool exp_clamped; /* exp was outside the level 1..100 range */
     bool ability_fixed; /* ability bit 1 on a one-ability species, now 0 */
+    bool mail_item_removed; /* a held Mail item (GEN3_ITEM_MAIL_FIRST..LAST), now no item */
+    bool mail_cleared; /* the party mail index wasn't 0xFF, now 0xFF */
 } Gen3NormaliseInfo;
 
-/* Makes a validated Pokemon (a real species, not an egg, move ids < 355) game-valid, for loads
- * and imports: moves packed with duplicates dropped, exp clamped to the level 1..100 range, the
- * default moveset if no move is left, ability bit 0 on a one-ability species, party stats
- * recalculated with the current HP kept but clamped to MaxHp, checksum fixed. Every other byte
- * is kept. info (may be NULL) is always reset, then filled. false, with *pkm untouched and info
- * reset, if the species maps to no national, or if no move is left and the default moveset
- * can't be read from the bulk file. */
+/* Makes a validated Pokemon (gen3_pkm_check Ok: a real species, not an egg, move ids < 355,
+ * item < 377) game-valid, for loads and imports: moves packed with duplicates dropped, exp
+ * clamped to the level 1..100 range, the default moveset if no move is left, ability bit 0 on a
+ * one-ability species, no mail (a held Mail item removed, the mail index 0xFF: no mail record
+ * exists behind it), HasSpecies 1, party stats recalculated with the current HP kept but clamped
+ * to MaxHp, checksum fixed. Every other byte is kept. info (may be NULL) is always reset, then
+ * filled. false, with *pkm untouched and info reset, if the species maps to no national, or if
+ * no move is left and the default moveset can't be read from the bulk file. */
 bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info);
 
 /* Bulbasaur L5, default OT, preset RandIvZeroEv. false if the bulk file can't be read; *ed is
  * then not a usable editor. */
 bool gen3_edit_init(Gen3Editor* ed, uint32_t seed);
-/* Takes pkm and runs gen3_normalise on it; preset_applied = false. false, with the editor
- * unchanged, if gen3_normalise fails. */
+/* Takes pkm if gen3_pkm_check accepts it (gen3_pk3.h: not a Bad Egg or an egg, a real species,
+ * moves < 355, item < 377; the checksum isn't checked) and runs gen3_normalise on it;
+ * preset_applied = false. false, with the editor unchanged, if the check refuses it or
+ * gen3_normalise fails. */
 bool gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm);
 uint16_t gen3_edit_national(const Gen3Editor* ed);
 /* D5: a fresh Pokemon of that species, keeping OT name, TID, SID, OT gender, level and preset.

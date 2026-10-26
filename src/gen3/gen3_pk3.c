@@ -2,9 +2,6 @@
 #include "gen3_data.h"
 #include <string.h>
 
-#define GEN3_ITEM_MAIL_FIRST 121 /* ITEM_ORANGE_MAIL */
-#define GEN3_ITEM_MAIL_LAST  132 /* ITEM_RETRO_MAIL */
-
 const char* gen3_check_text(Gen3Check c) {
     switch(c) {
     case Gen3CheckOk:
@@ -54,22 +51,16 @@ Gen3Check gen3_pk3_import(const uint8_t* data, size_t len, Gen3Pkm* out, Gen3Imp
     Gen3Check c = gen3_pkm_check(&p);
     if(c != Gen3CheckOk) return c;
 
-    bool mail_removed = false;
-    uint32_t item = gen3_pkm_get(&p, Gen3FieldHeldItem);
-    if(item >= GEN3_ITEM_MAIL_FIRST && item <= GEN3_ITEM_MAIL_LAST) {
-        gen3_pkm_set(&p, Gen3FieldHeldItem, 0);
-        gen3_pkm_set(&p, Gen3FieldMail, GEN3_MAIL_NONE);
-        mail_removed = true;
-    }
+    /* A box Pokemon has no party fields: no status, no mail index to report as cleared */
     if(len == GEN3_BOX_SIZE) {
         gen3_pkm_set(&p, Gen3FieldStatus, 0);
         gen3_pkm_set(&p, Gen3FieldMail, GEN3_MAIL_NONE);
     }
-    gen3_pkm_set(&p, Gen3FieldHasSpecies, 1);
 
     Gen3NormaliseInfo ni;
     /* gen3_pkm_check has accepted the species, so the only failure left is a moveless Pokemon
-     * whose default moveset can't be read */
+     * whose default moveset can't be read. It also removes a held Mail item, sets the mail index
+     * to 0xFF and HasSpecies to 1. */
     if(!gen3_normalise(&p, &ni)) return Gen3CheckNoData;
     /* A box Pokemon has no stored HP: start full. */
     if(len == GEN3_BOX_SIZE) gen3_pkm_set(&p, Gen3FieldHp, gen3_pkm_get(&p, Gen3FieldMaxHp));
@@ -77,7 +68,7 @@ Gen3Check gen3_pk3_import(const uint8_t* data, size_t len, Gen3Pkm* out, Gen3Imp
     *out = p;
     if(info) {
         info->normalise = ni;
-        info->mail_removed = mail_removed;
+        info->mail_removed = ni.mail_item_removed;
     }
     return Gen3CheckOk;
 }

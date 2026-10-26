@@ -23,6 +23,8 @@
 #define GEN3_LEARNSET_MAX        17 /* the most entries one species has */
 #define GEN3_SPECIES_NAME_LEN    10
 #define GEN3_HOLDABLE_COUNT      231 /* no key items, HMs, Enigma Berry or mail */
+#define GEN3_ITEM_MAIL_FIRST     121 /* ITEM_ORANGE_MAIL */
+#define GEN3_ITEM_MAIL_LAST      132 /* ITEM_RETRO_MAIL */
 #define GEN3_SPRITE_MAX_NATIONAL 251 /* files/all_sprites.fxbm covers 1..251 */
 #define GEN3_NATIONAL_MEW        151
 #define GEN3_NATIONAL_UNOWN      201

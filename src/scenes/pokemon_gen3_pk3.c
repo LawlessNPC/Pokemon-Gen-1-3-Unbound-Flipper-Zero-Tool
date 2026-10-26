@@ -46,17 +46,21 @@ static void gen3_pk3_show_result(PokemonFap* pokemon_fap, const char* header, co
 static void gen3_load_changes(const Gen3ImportInfo* info, char* out, size_t out_size) {
     const Gen3NormaliseInfo* n = &info->normalise;
     bool moves = n->moves_defaulted || n->duplicates_removed || n->gaps_packed;
+    /* A held Mail item, or a stale mail index in a 100-byte file */
+    bool mail = info->mail_removed || n->mail_cleared;
 
-    if(!info->mail_removed && !moves && !n->exp_clamped && !n->ability_fixed) {
+    if(!mail && !moves && !n->exp_clamped && !n->ability_fixed) {
         out[0] = '\0';
         return;
     }
-    /* Stats are always recalculated from exp, IVs, EVs and nature */
+    /* Stats are always recalculated from exp, IVs, EVs and nature. At most
+     * "\nFixed: mail moves level ability" (32 characters); with a 10-character nickname and
+     * species name and "Lv. 100" the text is 61 characters, under GEN3_RESULT_TEXT_MAX. */
     snprintf(
         out,
         out_size,
         "\nFixed:%s%s%s%s",
-        info->mail_removed ? " mail" : "",
+        mail ? " mail" : "",
         moves ? " moves" : "",
         n->exp_clamped ? " level" : "",
         n->ability_fixed ? " ability" : "");

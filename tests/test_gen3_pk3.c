@@ -29,15 +29,29 @@ TEST(test_import_100_keeps_bytes) {
     ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldAtk), 12);
     ASSERT_MEM_EQ(out.raw, GOLDEN_PK3, 100);
 
-    /* party bytes the editor does not model are kept */
+    /* The party status and the current HP are kept. The mail index isn't: no mail record comes
+     * with a file, so a stale index (0x55 from another save, say) is cleared to 0xFF. */
+    static const uint8_t stale[] = {3, 0x55};
+    for(size_t i = 0; i < sizeof(stale); i++) {
+        Gen3ImportInfo info;
+        golden(&in);
+        gen3_pkm_set(&in, Gen3FieldStatus, 0x07);
+        gen3_pkm_set(&in, Gen3FieldMail, stale[i]);
+        gen3_pkm_set(&in, Gen3FieldHp, 7);
+        ASSERT_EQ(gen3_pk3_import(in.raw, 100, &out, &info), Gen3CheckOk);
+        ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldStatus), 7);
+        ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldMail), 0xFF);
+        ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldHp), 7);
+        ASSERT_TRUE(info.normalise.mail_cleared);
+        ASSERT_TRUE(!info.mail_removed);
+    }
+    /* An 80-byte file has no mail index: 0xFF, and nothing to report */
+    Gen3ImportInfo info;
     golden(&in);
-    gen3_pkm_set(&in, Gen3FieldStatus, 0x07);
-    gen3_pkm_set(&in, Gen3FieldMail, 3);
-    gen3_pkm_set(&in, Gen3FieldHp, 7);
-    ASSERT_EQ(gen3_pk3_import(in.raw, 100, &out, NULL), Gen3CheckOk);
-    ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldStatus), 7);
-    ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldMail), 3);
-    ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldHp), 7);
+    gen3_pkm_set(&in, Gen3FieldMail, 0x55);
+    ASSERT_EQ(gen3_pk3_import(in.raw, 80, &out, &info), Gen3CheckOk);
+    ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldMail), 0xFF);
+    ASSERT_TRUE(!info.normalise.mail_cleared);
 }
 
 TEST(test_export_roundtrip_every_byte) {
@@ -164,6 +178,7 @@ TEST(test_import_strips_mail) {
             gen3_pkm_set(&in, Gen3FieldMail, 2);
             ASSERT_EQ(import_pkm(&in, k ? 80 : 100, &out, &info), Gen3CheckOk);
             ASSERT_TRUE(info.mail_removed);
+            ASSERT_TRUE(info.normalise.mail_item_removed);
             ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldHeldItem), 0);
             ASSERT_EQ(gen3_pkm_get(&out, Gen3FieldMail), 0xFF);
             ASSERT_EQ(gen3_pkm_checksum(&out), gen3_pkm_get(&out, Gen3FieldChecksum));

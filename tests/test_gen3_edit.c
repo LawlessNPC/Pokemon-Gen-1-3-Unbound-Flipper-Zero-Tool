@@ -53,6 +53,9 @@ static bool edit_consistent_hp(const Gen3Editor* ed, bool full_hp) {
         n++;
     }
     RULE(n >= 1, "no moves");
+    uint32_t item = gen3_pkm_get(p, Gen3FieldHeldItem);
+    RULE(item < GEN3_ITEM_MAIL_FIRST || item > GEN3_ITEM_MAIL_LAST, "holds a Mail item");
+    RULE(gen3_pkm_get(p, Gen3FieldMail) == GEN3_MAIL_NONE, "mail index != 0xFF");
     return true;
 }
 
@@ -841,7 +844,14 @@ TEST(test_edit_two_ability_bit_kept) {
 
 static bool info_is(const Gen3NormaliseInfo* i, bool md, bool dr, bool gp, bool ec, bool af) {
     return i->moves_defaulted == md && i->duplicates_removed == dr && i->gaps_packed == gp &&
-           i->exp_clamped == ec && i->ability_fixed == af;
+           i->exp_clamped == ec && i->ability_fixed == af && !i->mail_item_removed &&
+           !i->mail_cleared;
+}
+
+/* Only the mail flags given are set */
+static bool info_mail_is(const Gen3NormaliseInfo* i, bool item_removed, bool cleared) {
+    return !i->moves_defaulted && !i->duplicates_removed && !i->gaps_packed && !i->exp_clamped &&
+           !i->ability_fixed && i->mail_item_removed == item_removed && i->mail_cleared == cleared;
 }
 
 static void set_moves(Gen3Pkm* p, uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
@@ -922,6 +932,124 @@ TEST(test_normalise_flags) {
         ASSERT_TRUE(info_is(&ni, false, false, false, false, false));
         ASSERT_MEM_EQ(p.raw, before.raw, GEN3_PARTY_SIZE);
     }
+}
+
+/* No mail record exists behind the editor's Pokemon, so the mail index always comes out 0xFF.
+ * Ruby's trade code uses the partner's index without looking at the held item: 0..5 gives the
+ * received Pokemon that mail (and its item), 6..254 reads past the mail array. */
+TEST(test_normalise_mail) {
+    static const uint8_t stale[] = {0, 3, 5, 6, 0x55, 0xFE};
+    for(size_t i = 0; i < sizeof(stale); i++) {
+        Gen3Pkm p;
+        Gen3NormaliseInfo ni;
+        golden_pkm(&p);
+        gen3_pkm_set(&p, Gen3FieldMail, stale[i]);
+        memset(&ni, 0xFF, sizeof(ni));
+        ASSERT_TRUE(gen3_normalise(&p, &ni));
+        ASSERT_TRUE(info_mail_is(&ni, false, true));
+        ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    }
+    /* Already 0xFF: nothing to report */
+    Gen3Pkm p;
+    Gen3NormaliseInfo ni;
+    golden_pkm(&p);
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldMail), GEN3_MAIL_NONE);
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_mail_is(&ni, false, false));
+
+    /* A held Mail item has no record behind it either: the item goes. Other items stay. */
+    for(uint16_t item = GEN3_ITEM_MAIL_FIRST; item <= GEN3_ITEM_MAIL_LAST; item++) {
+        golden_pkm(&p);
+        gen3_pkm_set(&p, Gen3FieldHeldItem, item);
+        ASSERT_TRUE(gen3_normalise(&p, &ni));
+        ASSERT_TRUE(info_mail_is(&ni, true, false));
+        ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+        golden_pkm(&p);
+        gen3_pkm_set(&p, Gen3FieldHeldItem, item);
+        gen3_pkm_set(&p, Gen3FieldMail, 2);
+        ASSERT_TRUE(gen3_normalise(&p, &ni));
+        ASSERT_TRUE(info_mail_is(&ni, true, true));
+        ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    }
+    static const uint16_t keep[] = {GEN3_ITEM_MAIL_FIRST - 1, GEN3_ITEM_MAIL_LAST + 1, 200};
+    for(size_t i = 0; i < sizeof(keep) / sizeof(keep[0]); i++) {
+        golden_pkm(&p);
+        gen3_pkm_set(&p, Gen3FieldHeldItem, keep[i]);
+        ASSERT_TRUE(gen3_normalise(&p, &ni));
+        ASSERT_TRUE(info_mail_is(&ni, false, false));
+        ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldHeldItem), keep[i]);
+    }
+
+    /* The same through gen3_edit_load: the stale index of a loaded Pokemon is cleared */
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    golden_pkm(&p);
+    gen3_pkm_set(&p, Gen3FieldMail, 0x55);
+    gen3_pkm_set(&p, Gen3FieldHeldItem, GEN3_ITEM_MAIL_FIRST);
+    gen3_pkm_fix_checksum(&p);
+    ASSERT_TRUE(gen3_edit_load(&ed, &p));
+    ASSERT_MEM_EQ(ed.pkm.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* HasSpecies is set without being reported, as party stats are recalculated. */
+TEST(test_normalise_has_species) {
+    Gen3Pkm p;
+    Gen3NormaliseInfo ni;
+    golden_pkm(&p);
+    gen3_pkm_set(&p, Gen3FieldHasSpecies, 0);
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, false, false, false, false));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldHasSpecies), 1);
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+}
+
+static bool editor_eq(const Gen3Editor* a, const Gen3Editor* b) {
+    return memcmp(a->pkm.raw, b->pkm.raw, GEN3_PARTY_SIZE) == 0 && a->preset == b->preset &&
+           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state;
+}
+
+/* gen3_edit_load takes only what gen3_pkm_check accepts. Anything else leaves the editor as it
+ * was. */
+TEST(test_edit_load_validates) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, "LEAFY"));
+    Gen3Editor before = ed;
+    static const struct {
+        Gen3Field field;
+        uint32_t value;
+    } bad[] = {
+        {Gen3FieldIsEgg, 1},
+        {Gen3FieldEggFlag, 1},
+        {Gen3FieldBadEgg, 1},
+        {Gen3FieldMove1, GEN3_MOVE_COUNT},
+        {Gen3FieldMove2, GEN3_MOVE_COUNT},
+        {Gen3FieldMove4, 0xFFFF},
+        {Gen3FieldHeldItem, GEN3_ITEM_COUNT},
+        {Gen3FieldHeldItem, 0xFFFF},
+        {Gen3FieldSpecies, 0},
+        {Gen3FieldSpecies, 260},
+    };
+    for(size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        Gen3Pkm in;
+        golden_pkm(&in);
+        gen3_pkm_set(&in, bad[i].field, bad[i].value);
+        gen3_pkm_fix_checksum(&in);
+        ASSERT_TRUE(!gen3_edit_load(&ed, &in));
+        ASSERT_TRUE(editor_eq(&ed, &before));
+    }
+
+    /* HasSpecies 0 is accepted and comes out set */
+    Gen3Pkm in;
+    golden_pkm(&in);
+    gen3_pkm_set(&in, Gen3FieldHasSpecies, 0);
+    gen3_pkm_fix_checksum(&in);
+    ASSERT_TRUE(gen3_edit_load(&ed, &in));
+    ASSERT_EQ(G(HasSpecies), 1);
+    ASSERT_MEM_EQ(ed.pkm.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(!ed.preset_applied);
+    ASSERT_TRUE(edit_consistent(&ed));
 }
 
 TEST(test_edit_load_no_moves) {
@@ -1062,6 +1190,9 @@ int main(void) {
     RUN(test_edit_load_no_moves);
     RUN(test_edit_two_ability_bit_kept);
     RUN(test_normalise_flags);
+    RUN(test_normalise_mail);
+    RUN(test_normalise_has_species);
+    RUN(test_edit_load_validates);
     RUN(test_edit_no_data_keeps_pokemon);
     RUN(test_edit_no_data_load);
     TEST_EXIT();
