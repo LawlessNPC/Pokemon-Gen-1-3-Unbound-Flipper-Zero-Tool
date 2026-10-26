@@ -186,23 +186,44 @@ bool pokemon_gen3_trade_begin_edit(PokemonFap* pokemon_fap) {
     return gen3_session_set_editing(s, true, sync->trades_seen);
 }
 
-bool pokemon_gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** st) {
+/* T12 review (a): a running trade session gets one tick first. From a scene that doesn't edit,
+ * its poll picks up a finished trade's Pokemon (and the tick may end the session itself, once
+ * the GBA has left). Then *st gets the status, and only after it the received count is read: a
+ * trade that ends after that status (its link lost after the sync-2 answer: Assumed, at Waiting)
+ * is in the count, so the status never shows Waiting with its Pokemon unseen. Returns
+ * gen3_trade_sync_settled, or true without a running trade session. */
+static bool gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** st) {
     Gen3Session* s = pokemon_fap->gen3_session;
     Gen3TradeSync* sync = pokemon_fap->gen3_trade_sync;
     uint32_t received_count = 0;
 
-    /* From a scene that doesn't edit, this polls: a finished trade's Pokemon is picked up */
     if(gen3_session_trading(s) && sync) pokemon_gen3_trade_tick(pokemon_fap);
-    /* The status first, then the count (see the header) */
-    const Gen3ClubStatus* status = gen3_menu_status(pokemon_fap, NULL, NULL);
-    if(st) *st = status;
+    *st = gen3_menu_status(pokemon_fap, NULL, NULL);
     if(!gen3_session_trading(s) || !sync) return true; /* the tick may have ended it, all seen */
     gen3_session_get_received(s, gen3_trade_received, &received_count);
     return gen3_trade_sync_settled(sync, received_count);
 }
 
+Gen3TradeEndAction pokemon_gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link) {
+    const Gen3ClubStatus* st;
+    const bool settled = gen3_trade_settled(pokemon_fap, &st);
+    /* After the tick: a session it stopped reads as not running (Menu) */
+    const bool running = gen3_session_running(pokemon_fap->gen3_session);
+
+    return stop_link ? gen3_trade_stop_link_action(st, running, settled) :
+                       gen3_trade_end_action(st, running, settled);
+}
+
 void pokemon_scene_gen3_trade_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
+
+    /* Fix round 1: never switch to a trade view that is gone (the menu freed it with its
+     * session); the menu instead */
+    if(!pokemon_fap->gen3_trade_view || !pokemon_fap->gen3_session) {
+        scene_manager_search_and_switch_to_previous_scene(
+            pokemon_fap->scene_manager, PokemonSceneGen3Menu);
+        return;
+    }
 
     pokemon_gen3_trade_tick(pokemon_fap);
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewGen3Trade);

@@ -154,10 +154,19 @@ bool gen3_trade_stop_allowed(const Gen3ClubStatus* st) {
     return !(st->trade_pending && st->phase != Gen3ClubPhaseWaiting);
 }
 
-Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool settled) {
+Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool running, bool settled) {
+    if(!running) return Gen3TradeEndMenu;
     if(st->save_window) return Gen3TradeEndSaving;
     if(st->phase != Gen3ClubPhaseWaiting) return Gen3TradeEndAsk;
     /* No GBA linked, so R6 allows the stop (a pending trade here hasn't reached sync 1) */
+    return settled ? Gen3TradeEndStop : Gen3TradeEndPickup;
+}
+
+Gen3TradeEndAction
+    gen3_trade_stop_link_action(const Gen3ClubStatus* st, bool running, bool settled) {
+    if(!running) return Gen3TradeEndMenu;
+    if(st->save_window) return Gen3TradeEndSaving;
+    if(!gen3_trade_stop_allowed(st)) return Gen3TradeEndAsk;
     return settled ? Gen3TradeEndStop : Gen3TradeEndPickup;
 }
 

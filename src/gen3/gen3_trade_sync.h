@@ -101,16 +101,24 @@ bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count)
  * read (left is no "trade resolved"). A Link Test session sets neither flag. */
 bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
 
-/* End trade, or Back on the Gen III menu, while a trade session runs */
+/* What ending a trade session takes now. Decided again from a fresh status on every button that
+ * ends (fix round 1), never from what a dialog showed when it opened. */
 typedef enum {
-    Gen3TradeEndStop, /* no GBA linked and nothing left to pick up: stop and free it now */
+    Gen3TradeEndStop, /* stop and free it now: R6 allows it, and nothing is left to pick up */
     Gen3TradeEndSaving, /* the GBA is saving (D10): "The GBA is saving", OK only */
     Gen3TradeEndAsk, /* a GBA is linked: "End trade?"; End asks it to walk out (D9) */
-    Gen3TradeEndPickup, /* no GBA linked, but a NoData pickup waits: Retry or End anyway */
+    Gen3TradeEndPickup, /* it may stop, but a NoData pickup waits: Retry or End anyway */
+    Gen3TradeEndMenu, /* it has stopped (the GBA left): back to the menu, which frees it */
 } Gen3TradeEndAction;
-/* st: the running session's status; settled: gen3_trade_sync_settled after a poll. Stop only
- * when gen3_trade_stop_allowed and settled. */
-Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool settled);
+/* End trade, or Back on the Gen III menu. st: the session's status; running: it runs; settled:
+ * gen3_trade_sync_settled after a poll. Stop only when gen3_trade_stop_allowed and settled. */
+Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool running, bool settled);
+/* "Stop link?" confirmed (D1), or Retry / End anyway in the Pickup dialog opened from it. As
+ * gen3_trade_end_action, but a linked GBA is stopped too where R6 allows it (the leave has
+ * stalled); where R6 doesn't (a trade under way with the GBA linked), Ask: the leave waits for
+ * the trade. */
+Gen3TradeEndAction
+    gen3_trade_stop_link_action(const Gen3ClubStatus* st, bool running, bool settled);
 
 /* Back on the trade screen */
 typedef enum {

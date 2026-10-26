@@ -46,17 +46,24 @@ bool gen3_menu_editor_ready(PokemonFap* pokemon_fap);
  * Gen III events. */
 #define GEN3_TRADE_EVENT_EDIT 0x47330201u
 
-/* Call before stopping a session for good, from Gen3Menu, Gen3TradeEnd or Gen3LinkExit (T12
- * review (a)); pokemon_fap->gen3_session must exist. A running trade session gets one tick first:
- * from a scene that doesn't edit, its poll picks up a finished trade's Pokemon (and the tick may
- * end the session itself, once the GBA has left). Then st (may be NULL) gets the status
- * (gen3_menu_status's buffer), and only after it the received count is read: a trade that ends
- * after that status (its link lost after the sync-2 answer: Assumed, at Waiting) is in the
- * count, so the status never shows Waiting with its Pokemon unseen. Returns
- * gen3_trade_sync_settled, or true without a running trade session. false: a NoData pickup waits
- * for the SD card, so don't stop silently (Gen3TradeEnd's Retry / End anyway). Defined in
+/* What ending the session takes now, decided from a fresh status at the moment it is asked
+ * (T13; fix round 1). Call from Gen3Menu, Gen3TradeEnd or Gen3LinkExit, on every button that may
+ * end or stop it, never from what a dialog showed when it opened; pokemon_fap->gen3_session must
+ * exist. A running trade session gets one tick first, so a finished trade's Pokemon is picked up
+ * and the session never stops without it (T12 review (a)); the tick may also end the session
+ * itself (then Menu). stop_link: gen3_trade_stop_link_action ("Stop link?" confirmed), else
+ * gen3_trade_end_action (End trade, menu Back). A running Link Test session: Stop. Defined in
  * pokemon_gen3_trade.c. */
-bool pokemon_gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** st);
+Gen3TradeEndAction pokemon_gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link);
+
+/* Opens Gen3TradeEnd over the Gen III menu (the current scene, or the one under Gen3LinkExit,
+ * which must switch to it first) showing action: Saving, Ask or Pickup. stop_link: the user
+ * confirmed "Stop link?", so its buttons re-decide with gen3_trade_stop_link_action. Defined in
+ * pokemon_gen3_trade_end.c. */
+void pokemon_gen3_trade_end_open(
+    PokemonFap* pokemon_fap,
+    Gen3TradeEndAction action,
+    bool stop_link);
 
 /* Rebuilds the Gen III menu's items for the session and settings as they are now, keeping the
  * highlighted item (or the first one, if it has gone), and frees nothing. Call while Gen3Menu is
