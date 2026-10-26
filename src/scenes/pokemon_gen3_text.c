@@ -48,6 +48,8 @@ static bool gen3_text_validator(const char* text, FuriString* error, void* conte
         return false;
     }
 
+    /* The setters change nothing for the text shown, so saving it unchanged keeps characters
+     * the app shows as '?' */
     gen3_text_no_data = false;
     if(nickname)
         gen3_text_no_data = !gen3_edit_set_nickname(pokemon_fap->gen3_editor, text);

@@ -376,6 +376,71 @@ TEST(test_edit_nickname_default) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
+/* Confirming the value already shown changes nothing: the level keeps exp inside the level and
+ * the current HP; a name keeps the bytes it shows as '?' or '.'. */
+TEST(test_edit_same_value_is_noop) {
+    const Gen3SpeciesInfo* info = gen3_species(252); /* golden: Treecko L5 */
+    uint32_t exp = gen3_exp_for_level(info->growth, 5) + 20;
+    ASSERT_EQ(gen3_level_for_exp(info->growth, exp), 5);
+    Gen3Pkm in;
+    golden_pkm(&in);
+    gen3_pkm_set(&in, Gen3FieldExp, exp);
+    gen3_pkm_set(&in, Gen3FieldHp, 7);
+    gen3_pkm_set_nickname(&in, "LEAFX");
+    in.raw[0x08 + 4] = 0x01; /* a character the app can't show: '?' */
+    gen3_pkm_set_ot_name(&in, "ASHX");
+    in.raw[0x14 + 3] = 0xB0; /* the ellipsis, shown as '.' (which encodes as 0xAD) */
+    gen3_pkm_fix_checksum(&in);
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_load(&ed, &in));
+    char buf[16];
+    gen3_pkm_nickname(&ed.pkm, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "LEAF?");
+    gen3_pkm_ot_name(&ed.pkm, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "ASH.");
+    Gen3Editor before = ed;
+
+    gen3_edit_set_level(&ed, 5);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, "LEAF?"));
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    gen3_edit_set_ot_name(&ed, "ASH.");
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_EQ(G(Hp), 7);
+    ASSERT_TRUE(edit_consistent_hp(&ed, false));
+
+    /* A different value is a real edit */
+    gen3_edit_set_ot_name(&ed, "ASH");
+    ASSERT_EQ(ed.pkm.raw[0x14 + 3], 0xFF);
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, "LEAF!"));
+    ASSERT_EQ(ed.pkm.raw[0x08 + 4], 0xAB);
+    gen3_edit_set_level(&ed, 6);
+    ASSERT_EQ(G(Exp), gen3_exp_for_level(info->growth, 6));
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* The empty nickname is the species name: nothing to change while that is shown */
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, ""));
+    gen3_pkm_nickname(&ed.pkm, buf, sizeof(buf));
+    ASSERT_STR_EQ(buf, "TREECKO");
+    before = ed;
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, ""));
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, NULL));
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, "TREECKO"));
+    ASSERT_TRUE(editor_eq(&ed, &before));
+
+    /* The level is compared once clamped */
+    gen3_edit_set_level(&ed, 100);
+    before = ed;
+    gen3_edit_set_level(&ed, 101);
+    gen3_edit_set_level(&ed, 255);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    gen3_edit_set_level(&ed, 1);
+    before = ed;
+    gen3_edit_set_level(&ed, 0);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+}
+
 TEST(test_edit_set_move_pp) {
     Gen3Editor ed;
     gen3_edit_init(&ed, 7);
@@ -1227,6 +1292,7 @@ int main(void) {
     RUN(test_edit_level_ev_follows_level);
     RUN(test_edit_loaded_evs_kept);
     RUN(test_edit_nickname_default);
+    RUN(test_edit_same_value_is_noop);
     RUN(test_edit_set_move_pp);
     RUN(test_edit_set_move_packs);
     RUN(test_edit_set_move_rejects);

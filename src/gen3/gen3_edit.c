@@ -268,6 +268,8 @@ void gen3_edit_set_level(Gen3Editor* ed, uint8_t level) {
     if(!info) return;
     if(level < 1) level = 1;
     if(level > 100) level = 100;
+    /* The current level: keep exp inside it, and a loaded Pokemon's current HP */
+    if(level == ed_level(&ed->pkm)) return;
     gen3_pkm_set(&ed->pkm, Gen3FieldExp, gen3_exp_for_level(info->growth, level));
     if(ed->preset_applied && ed_level_ev(ed->preset)) ed_apply_evs(ed);
     ed_commit(ed);
@@ -282,17 +284,26 @@ void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset) {
 
 bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii) {
     char name[GEN3_SPECIES_NAME_LEN + 1];
+    char shown[GEN3_NICKNAME_LEN + 1];
     if(!ascii || !ascii[0]) {
         if(!gen3_species_name_get(gen3_edit_national(ed), name)) return false;
         ascii = name;
     }
+    /* The name shown: keep the bytes, which may include characters shown as '?' */
+    gen3_pkm_nickname(&ed->pkm, shown, sizeof(shown));
+    if(strcmp(ascii, shown) == 0) return true;
     gen3_pkm_set_nickname(&ed->pkm, ascii);
     ed_commit(ed);
     return true;
 }
 
 void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii) {
-    gen3_pkm_set_ot_name(&ed->pkm, ascii ? ascii : "");
+    char shown[GEN3_OT_NAME_LEN + 1];
+    if(!ascii) ascii = "";
+    /* As for the nickname */
+    gen3_pkm_ot_name(&ed->pkm, shown, sizeof(shown));
+    if(strcmp(ascii, shown) == 0) return;
+    gen3_pkm_set_ot_name(&ed->pkm, ascii);
     ed_commit(ed);
 }
 

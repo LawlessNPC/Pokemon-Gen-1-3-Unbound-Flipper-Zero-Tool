@@ -76,13 +76,16 @@ uint16_t gen3_edit_national(const Gen3Editor* ed);
  * true and no change if it is the current species. false (unchanged) for an invalid species or
  * if its name or default moveset can't be read from the bulk file. */
 bool gen3_edit_set_species(Gen3Editor* ed, uint16_t national);
-/* Clamped 1..100; exp = exp_for_level. */
+/* Clamped 1..100; exp = exp_for_level. Nothing changes if that is the current level (exp stays
+ * inside it, and a loaded Pokemon keeps its current HP). */
 void gen3_edit_set_level(Gen3Editor* ed, uint8_t level);
 /* Applies IVs (re-rolls random ones) and EVs. No-op for a value >= GEN3_PRESET_COUNT. */
 void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset);
 /* "" or NULL -> species name (game encoding). false (unchanged) if that name can't be read from
- * the bulk file. */
+ * the bulk file. true and nothing changes if the name equals gen3_pkm_nickname's, so confirming
+ * the name shown keeps bytes it shows as '?'. */
 bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii);
+/* NULL -> "". Nothing changes if the name equals gen3_pkm_ot_name's, as for the nickname. */
 void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii);
 
 typedef enum {

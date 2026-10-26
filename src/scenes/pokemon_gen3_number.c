@@ -41,7 +41,8 @@ static bool gen3_number_validator(const char* text, FuriString* error, void* con
         return false;
     }
 
-    /* The other half of the OT ID is kept */
+    /* The other half of the OT ID is kept. The level setter does nothing for the current level,
+     * so confirming it unchanged keeps exp and HP. */
     Gen3OtIdResult result = Gen3OtIdOk;
     if(level)
         gen3_edit_set_level(ed, (uint8_t)number);
