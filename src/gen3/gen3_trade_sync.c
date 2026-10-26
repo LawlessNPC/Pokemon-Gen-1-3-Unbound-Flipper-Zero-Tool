@@ -1,0 +1,232 @@
+#include <src/gen3/gen3_trade_sync.h>
+
+#include <string.h>
+#include <src/gen3/gen3_data.h>
+
+void gen3_trainer_from_link_player(const Gen3LinkPlayer* lp, Gen3Trainer* out) {
+    memset(out, 0, sizeof(*out));
+    memcpy(out->name, lp->name, GEN3_OT_NAME_LEN);
+    out->tid = (uint16_t)(lp->trainer_id & 0xFFFF);
+    out->sid = (uint16_t)(lp->trainer_id >> 16);
+    out->gender = lp->gender != 0;
+}
+
+/* Field by field: no padding compared */
+static bool trainer_eq(const Gen3Trainer* a, const Gen3Trainer* b) {
+    return memcmp(a->name, b->name, GEN3_OT_NAME_LEN) == 0 && a->tid == b->tid &&
+           a->sid == b->sid && a->gender == b->gender;
+}
+
+void gen3_trade_sync_init(Gen3TradeSync* sync) {
+    memset(sync, 0, sizeof(*sync));
+    sync->offer_refuse = Gen3RefuseNone;
+    sync->pickup_fail = Gen3PickupOk;
+}
+
+/* Step 1 (F17, O2): take the latest trade's Pokemon into the editor, or retry a NoData pickup.
+ * The club keeps the received bytes, and no new trade can happen while the offer is unpublished,
+ * so a retry reads the same Pokemon. */
+static unsigned sync_pickup(
+    Gen3TradeSync* sync,
+    Gen3Editor* ed,
+    const uint8_t received[GEN3_PARTY_SIZE],
+    uint32_t received_count) {
+    if(received_count != sync->trades_seen) {
+        /* A new trade: the editor's Pokemon is the GBA's now */
+        sync->gone_pid = gen3_pkm_get(&ed->pkm, Gen3FieldPid);
+        sync->gone_ot_id = gen3_pkm_get(&ed->pkm, Gen3FieldOtId);
+        sync->gone_valid = true;
+        sync->trades_seen = received_count;
+    } else if(sync->pickup_fail != Gen3PickupNoData) {
+        return 0;
+    }
+    /* gen3_edit_load normalises (preflight §8.4, corrected by the T7 review). That recalculates
+     * the party stats, which Ruby leaves behind the EVs after a battle (MonGainEVs doesn't
+     * recalculate them), so the Pokemon published below can differ from the received bytes the
+     * club offers after the trade. The poll publishes it at once, on the first tick after
+     * trades_done advances, normally before the post-save exchange's round 1; if round 1 comes
+     * first, the club sees a changed offer: one EEBB and one re-sit. Normalisation is never
+     * skipped to avoid that. */
+    bool decrypted = gen3_pkm_decrypt(received, GEN3_PARTY_SIZE, &sync->scratch);
+    if(decrypted && gen3_edit_load(ed, &sync->scratch)) {
+        sync->pickup_fail = Gen3PickupOk;
+        sync->gone_valid = false;
+        return Gen3SyncPickedUp;
+    }
+    sync->pickup_fail = decrypted && !gen3_bulk_ready() ? Gen3PickupNoData : Gen3PickupBadData;
+    return Gen3SyncPickupBad;
+}
+
+/* Step 2 (D7) */
+static unsigned sync_trainer(Gen3TradeSync* sync, Gen3Editor* ed, const Gen3ClubStatus* st) {
+    if(!st->trainer_valid) return 0;
+    Gen3Trainer t;
+    gen3_trainer_from_link_player(&st->trainer, &t);
+    if(sync->trainer_known && trainer_eq(&t, &sync->trainer)) return 0;
+    gen3_edit_set_trainer(ed, &t);
+    sync->trainer = t;
+    sync->trainer_known = true;
+    return Gen3SyncTrainer;
+}
+
+/* Step 3 (G6, D8, O2) */
+static unsigned sync_offer(Gen3TradeSync* sync, const Gen3Editor* ed) {
+    /* The user loaded or made another Pokemon: the traded-away one is gone from the editor */
+    if(sync->pickup_fail == Gen3PickupBadData && sync->gone_valid &&
+       (gen3_pkm_get(&ed->pkm, Gen3FieldPid) != sync->gone_pid ||
+        gen3_pkm_get(&ed->pkm, Gen3FieldOtId) != sync->gone_ot_id)) {
+        sync->pickup_fail = Gen3PickupOk;
+        sync->gone_valid = false;
+    }
+    sync->offer_refuse = gen3_trade_offer_check(&ed->pkm);
+    sync->offer_valid = sync->offer_refuse == Gen3RefuseNone && sync->pickup_fail == Gen3PickupOk;
+    if(sync->offer_valid) {
+        gen3_pkm_encrypt(&ed->pkm, sync->offer);
+    } else {
+        memset(sync->offer, 0, sizeof(sync->offer));
+    }
+    /* offer is zeros without a valid one, so one compare covers both */
+    if(sync->taken && sync->taken_valid == sync->offer_valid &&
+       memcmp(sync->taken_offer, sync->offer, sizeof(sync->offer)) == 0)
+        return 0;
+    return Gen3SyncOffer;
+}
+
+unsigned gen3_trade_sync_poll(
+    Gen3TradeSync* sync,
+    Gen3Editor* ed,
+    const Gen3ClubStatus* st,
+    const uint8_t received[GEN3_PARTY_SIZE],
+    uint32_t received_count,
+    bool editing) {
+    if(editing) return 0;
+    unsigned result = sync_pickup(sync, ed, received, received_count);
+    result |= sync_trainer(sync, ed, st);
+    result |= sync_offer(sync, ed);
+    return result;
+}
+
+void gen3_trade_sync_offer_taken(Gen3TradeSync* sync) {
+    sync->taken = true;
+    sync->taken_valid = sync->offer_valid;
+    memcpy(sync->taken_offer, sync->offer, sizeof(sync->taken_offer));
+}
+
+/* The reason line of a refusal (the Flipper's offer, or the GBA's pick) */
+static const char* guide_reason(Gen3Refuse r) {
+    switch(r) {
+    case Gen3RefuseEmpty:
+        return "that slot is empty.";
+    case Gen3RefuseBadEgg:
+        return "it's a Bad Egg.";
+    case Gen3RefuseEgg:
+        return "it's an Egg.";
+    case Gen3RefuseMail:
+        return "it holds Mail.";
+    case Gen3RefuseItem:
+        return "it holds a bad item.";
+    case Gen3RefuseNone: /* never asked for */
+    case Gen3RefuseBadData:
+        break;
+    }
+    return "its data is invalid.";
+}
+
+/* SAY sets the three lines and returns: the first row that matches wins */
+#define SAY(a, b, c) \
+    do { \
+        l[0] = (a); \
+        l[1] = (b); \
+        l[2] = (c); \
+        return; \
+    } while(0)
+
+static void guide_pick(
+    const Gen3ClubStatus* st,
+    bool started,
+    bool cable_ok,
+    Gen3Refuse offer_refuse,
+    Gen3PickupFail pickup_fail,
+    const char* l[GEN3_GUIDE_LINES]) {
+    if(!cable_ok) SAY("Plug in the cable", "(or swap its ends).", "");
+    if(!started) SAY("Starting...", "", "");
+    if(st->save_window) SAY("The GBA is saving.", "Don't unplug or turn", "off. Back is locked.");
+    /* left can come with a trade still pending (a 0x1144 relink that never came, before sync 1):
+     * it says nothing about the trade */
+    if(st->left) SAY("Link ended. You can", "unplug the GBA.", "");
+    /* Ahead of the menu rows: no "offer changed" hint while leaving */
+    if(st->leaving) SAY("Ending: the GBA walks", "out of the Trade", "Center by itself.");
+    if(st->trade_pending) SAY("Trading...", "Watch the GBA.", "");
+    if(st->phase == Gen3ClubPhaseError) {
+        if(st->last_error == Gen3ClubErrorOtherRoom)
+            SAY("The GBA chose another", "room. Use the Trade", "Center (right).");
+        SAY("Link error. Restart", "the GBA, then go to", "the Cable Club.");
+    }
+    /* No valid offer (R5, O2): the club doesn't sit, and in the menu it sends EEBB */
+    if(pickup_fail == Gen3PickupNoData)
+        SAY("Can't take the traded", "Pokemon: data file", "unreadable. Retrying.");
+    if(pickup_fail == Gen3PickupBadData)
+        SAY("Can't take the traded", "Pokemon: bad data.", "Load or pick another.");
+    if(offer_refuse != Gen3RefuseNone) {
+        /* R5: the Flipper sits as soon as there is a valid offer */
+        if(st->phase == Gen3ClubPhaseRoom && st->gba_seated)
+            SAY("Can't offer it:", guide_reason(offer_refuse), "Edit it; stay seated.");
+        SAY("Can't offer it:", guide_reason(offer_refuse), "Edit it first.");
+    }
+    switch(st->phase) {
+    case Gen3ClubPhaseWaiting:
+        if(st->last_result == Gen3TradeResultRolledBack)
+            SAY("Link lost while the", "GBA saved. It keeps", "its old save.");
+        if(st->last_result == Gen3TradeResultAssumed)
+            SAY("Link lost at the end.", "Check the GBA party:", "it likely traded.");
+        if(st->last_result == Gen3TradeResultCanceled)
+            SAY("Link lost. Nothing", "was traded.", "");
+        SAY("Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+    case Gen3ClubPhaseLinked:
+    case Gen3ClubPhasePlayers:
+    case Gen3ClubPhaseCards:
+        SAY("Linking...", "", "");
+    case Gen3ClubPhaseRoom:
+        /* T7 review: the hint only while the GBA isn't seated */
+        if(st->resit_needed && !st->gba_seated)
+            SAY("Sit at the table", "again (step off and", "back on if seated).");
+        if(st->gba_seated) SAY("Opening the trade", "menu...", "");
+        SAY("In the Trade Center:", "sit at the table on", "the GBA.");
+    case Gen3ClubPhaseExchange:
+        SAY("Opening the trade", "menu...", "");
+    case Gen3ClubPhaseMenu:
+        if(st->offer_stale || st->menu == Gen3ClubMenuLeaving)
+            SAY("Updating the trade", "menu: the GBA goes", "back to the room.");
+        /* An R8 DDEE leaves refused at None: no reason is shown for it */
+        if(st->refused != Gen3RefuseNone)
+            SAY("Can't take that one:", guide_reason(st->refused), "Pick another one.");
+        if(st->menu == Gen3ClubMenuOffered) SAY("Confirm the trade", "on the GBA.", "");
+        if(st->trades_done > 0) SAY("Edit it (OK), or pick", "the next trade on", "the GBA.");
+        SAY("Pick a Pokemon to", "trade on the GBA.", "");
+    case Gen3ClubPhaseClosing:
+    case Gen3ClubPhaseError:
+    case Gen3ClubPhaseTrade:
+    case Gen3ClubPhaseSave:
+        break;
+    }
+    SAY("Please wait...", "", "");
+}
+
+#undef SAY
+
+void gen3_trade_guide(
+    const Gen3ClubStatus* st,
+    bool started,
+    bool cable_ok,
+    Gen3Refuse offer_refuse,
+    Gen3PickupFail pickup_fail,
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN]) {
+    const char* l[GEN3_GUIDE_LINES];
+    guide_pick(st, started, cable_ok, offer_refuse, pickup_fail, l);
+    for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
+        /* Every text fits (test_guide_texts, test_guide_line_lengths); cut, never overrun */
+        size_t n = 0;
+        for(; l[i][n] != '\0' && n < GEN3_GUIDE_LINE_LEN - 1; n++) out[i][n] = l[i][n];
+        out[i][n] = '\0';
+    }
+}

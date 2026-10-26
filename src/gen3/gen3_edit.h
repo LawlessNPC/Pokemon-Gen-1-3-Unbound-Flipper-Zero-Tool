@@ -137,8 +137,9 @@ void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value);
  * has for this OT (gen3_unown_shiny_possible). Both are refused before any PID is tried. */
 bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want);
 
-/* Remember the GBA player (D7). A pristine editor (still the initial default) takes it as OT at
- * once, as gen3_edit_use_trainer_ot does, and stays pristine; an edited Pokemon is left alone. */
+/* Remember the GBA player (D7), any non-zero gender stored as 1. A pristine editor (still the
+ * initial default) takes it as OT at once, as gen3_edit_use_trainer_ot does, and stays pristine;
+ * an edited Pokemon is left alone. */
 void gen3_edit_set_trainer(Gen3Editor* ed, const Gen3Trainer* t);
 const Gen3Trainer* gen3_edit_trainer(const Gen3Editor* ed); /* NULL until set */
 /* The OT name bytes, TID, SID and OT gender equal the trainer's. false without a trainer. */

@@ -7,6 +7,8 @@
 #include <src/gen3/gen3_link_player.h>
 #include <src/gen3/gen3_trade_block.h>
 
+_Static_assert(GEN3_RUBY_ITEMS_COUNT == 349 && GEN3_ITEM_ENIGMA_BERRY == 175, "D8");
+
 TEST(test_link_type_values) {
     ASSERT_EQ(GEN3_LINKTYPE_TRADE, 0x1111);
     ASSERT_EQ(GEN3_LINKTYPE_TRADE_CONNECTING, 0x1122);

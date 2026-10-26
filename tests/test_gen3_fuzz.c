@@ -7,6 +7,8 @@
 #include <src/gen3/gen3_rules.h>
 #include <src/gen3/gen3_trade_block.h>
 
+_Static_assert(GEN3_RUBY_ITEMS_COUNT == 349 && GEN3_ITEM_ENIGMA_BERRY == 175, "D8");
+
 /* A deterministic random sequence of editor calls (out-of-range arguments included), 80- and
  * 100-byte imports, direct gen3_edit_load calls, GBA players (D7) and bulk reads that fail at
  * random after a good open; now and then a new editor replaces the old one. After every step the
@@ -121,8 +123,9 @@ static bool fuzz_valid(const Gen3Pkm* p) {
     CHECK(item < GEN3_ITEM_COUNT, "item id out of range");
     CHECK(!is_mail(item), "holds a Mail item");
     CHECK(gen3_pkm_get(p, Gen3FieldMail) == GEN3_MAIL_NONE, "mail index != 0xFF");
-    /* D8 cross-check: the trade refuses a game-valid Pokemon only for an item Ruby lacks */
-    bool ruby_lacks = item == GEN3_ITEM_ENIGMA_BERRY || item >= GEN3_RUBY_ITEMS_COUNT;
+    /* D8 cross-check: the trade refuses a game-valid Pokemon only for an item Ruby lacks (the
+     * ENIGMA BERRY, or ITEMS_COUNT and up), with D8's numbers, not the header's */
+    bool ruby_lacks = item == 175 || item >= 349;
     CHECK(
         gen3_trade_offer_check(p) == (ruby_lacks ? Gen3RefuseItem : Gen3RefuseNone),
         "offer check (D8)");

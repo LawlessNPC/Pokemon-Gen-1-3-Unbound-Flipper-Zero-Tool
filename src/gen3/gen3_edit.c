@@ -469,6 +469,8 @@ static Gen3OtIdResult ed_use_trainer_ot(Gen3Editor* ed) {
 
 void gen3_edit_set_trainer(Gen3Editor* ed, const Gen3Trainer* t) {
     ed->trainer = *t;
+    /* The OT gender bit's value, so gen3_edit_ot_is_trainer can match it */
+    ed->trainer.gender = t->gender != 0;
     ed->has_trainer = true;
     /* The untouched default becomes the player's own, and is still the default (R4) */
     if(ed->pristine) ed_use_trainer_ot(ed);

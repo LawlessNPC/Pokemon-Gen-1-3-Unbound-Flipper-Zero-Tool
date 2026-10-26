@@ -1341,6 +1341,68 @@ TEST(test_edit_trainer_pristine) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
+/* T9 review (b): the default's PID is shiny under the player's OT (sid = pid_hi ^ pid_lo ^ tid).
+ * set_trainer finds a new PID with the same nature, gender and ability, and the editor stays
+ * pristine. */
+TEST(test_edit_trainer_pristine_refinds_pid) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    uint32_t pid = G(Pid);
+    Gen3Traits old;
+    gen3_traits_of(&ed.pkm, &old);
+    ASSERT_TRUE(!old.shiny);
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    t.sid = (uint16_t)((pid >> 16) ^ (pid & 0xFFFF) ^ t.tid);
+    uint32_t ot_id = ((uint32_t)t.sid << 16) | t.tid;
+    ASSERT_TRUE(gen3_is_shiny(ot_id, pid));
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(ed.pristine);
+    ASSERT_EQ(G(OtId), ot_id);
+    ASSERT_TRUE(G(Pid) != pid);
+    ASSERT_TRUE(!gen3_is_shiny(ot_id, G(Pid)));
+    Gen3Traits got;
+    gen3_traits_of(&ed.pkm, &got);
+    ASSERT_TRUE(!got.shiny);
+    ASSERT_EQ(got.nature, old.nature);
+    ASSERT_EQ(got.gender, old.gender);
+    ASSERT_EQ(got.ability_slot, old.ability_slot);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* T9 review (d): any non-zero gender is stored as 1, the OT gender bit's value, so the OT still
+ * reads as the trainer's */
+TEST(test_edit_trainer_gender_normalised) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    t.gender = 5;
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_EQ(gen3_edit_trainer(&ed)->gender, 1);
+    ASSERT_EQ(G(OtGender), 1);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    Gen3Editor before = ed;
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerOk);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+
+    /* An edited Pokemon: only remembered, normalised the same way */
+    gen3_edit_set_level(&ed, 10);
+    t.gender = 0x80;
+    t.tid = 1;
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_EQ(gen3_edit_trainer(&ed)->gender, 1);
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerOk);
+    ASSERT_EQ(G(OtGender), 1);
+    ASSERT_EQ(G(OtId), 0xD4310001u);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    t.gender = 0;
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_EQ(gen3_edit_trainer(&ed)->gender, 0);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
 /* An edited Pokemon keeps its OT: the player is only remembered */
 TEST(test_edit_trainer_after_edit) {
     Gen3Editor ed;
@@ -1482,6 +1544,32 @@ TEST(test_edit_use_trainer_ot) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
+/* T9 review (c): the no-op guard. A loaded, hurt Pokemon that already carries the trainer's OT is
+ * left exactly as it is (ed_commit would heal it). */
+TEST(test_edit_use_trainer_ot_noop_keeps_hp) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    Gen3Pkm in;
+    golden_pkm(&in);
+    gen3_pkm_set_ot_name_raw(&in, RUBY_NAME);
+    gen3_pkm_set(&in, Gen3FieldOtId, RUBY_OT_ID);
+    gen3_pkm_set(&in, Gen3FieldOtGender, 1);
+    gen3_pkm_set(&in, Gen3FieldHp, 10);
+    gen3_pkm_fix_checksum(&in);
+    ASSERT_TRUE(gen3_edit_load(&ed, &in));
+    ASSERT_EQ(G(Hp), 10);
+    ASSERT_EQ(G(MaxHp), 20);
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    Gen3Editor before = ed;
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerOk);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_EQ(G(Hp), 10);
+    ASSERT_TRUE(edit_consistent_hp(&ed, false));
+}
+
 /* The player's name bytes are taken as they are, even ones the app can't show */
 TEST(test_edit_trainer_raw_bytes) {
     static const uint8_t odd[GEN3_OT_NAME_LEN] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
@@ -1618,9 +1706,12 @@ int main(void) {
     RUN(test_edit_no_data_keeps_pokemon);
     RUN(test_edit_no_data_load);
     RUN(test_edit_trainer_pristine);
+    RUN(test_edit_trainer_pristine_refinds_pid);
+    RUN(test_edit_trainer_gender_normalised);
     RUN(test_edit_trainer_after_edit);
     RUN(test_edit_species_takes_trainer);
     RUN(test_edit_use_trainer_ot);
+    RUN(test_edit_use_trainer_ot_noop_keeps_hp);
     RUN(test_edit_trainer_raw_bytes);
     RUN(test_edit_pristine_flags);
     TEST_EXIT();
