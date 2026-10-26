@@ -15,7 +15,7 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 ## A. Editor basics
 
 1. **Gen III menu.** Main menu → `Gen III  (GBA non-JPN)` shows `Edit Pokemon` and `Link Test`. `Link Test` still opens the Link Test screen, and Back from it returns to this menu.
-2. **Defaults.** `Edit Pokemon` shows, in this order: Nickname `BULBASAUR`, Level `5`, `Random IV, Zero EV`, a nature, Ability `OVERGROW`, Shiny `No`, Gender `Male` or `Female`, Ball `POKE BALL`, OT Name `FLIPPER`, OT TID `22222`, OT SID `00000`. The menu has no header. The values line up in one column, except the preset row (`Random IV, Zero EV`, which has no label) and Unown Form (only shown for Unown).
+2. **Defaults.** `Edit Pokemon` shows, in this order: Pokemon `BULBASAUR`, Nickname `BULBASAUR`, Level `5`, `Random IV, Zero EV`, a nature, Ability `OVERGROW`, Shiny `No`, Gender `Male` or `Female`, Ball `POKE BALL`, OT Name `FLIPPER`, OT TID `22222`, OT SID `00000`. The menu has no header. The values line up in one column, except the preset row (`Random IV, Zero EV`, which has no label) and Unown Form (only shown for Unown).
 3. **Nickname.** Set it to `Leafy` → the row shows `Leafy`. Clear the field and save it empty → the row shows `BULBASAUR`. Type `A_B` (`a` comes out as `A`, `_` with a short press, then long-press `b` for `B`) → the keyboard shows `Unsupported character!` and stays open.
 4. **OT Name.** Set it to `Ash` → the row shows `Ash`. Clear the field and save it empty → the keyboard shows `Name can't be empty!` and stays open; Back leaves the name as `Ash`.
 5. **Level.** `0` and `101` are refused with `Level must be 1-100!`, and so is an empty field. `50` is accepted and the row shows `50`.
@@ -27,6 +27,16 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 11. **Ball.** The list shows 12 balls, `MASTER BALL` to `PREMIER BALL`, with `POKE BALL` highlighted. Choose `MASTER BALL` → the Ball row shows `MASTER BALL`.
 12. **Kept on Back.** Press Back to the Gen III menu, then open `Edit Pokemon` again → the same values as before, and the last row you used is highlighted.
 13. **No regression.** Back to the main menu. `Gen I` and `Gen II` each open and show their own editors as before.
+
+## B. Species
+
+1. **Sprites.** Open the `Pokemon` row. #001 to #251 each show a sprite; step through a few with Left/Right.
+2. **No sprite.** #252 TREECKO shows the `?` frame and the type `GRASS`.
+3. **Wrapping and jumps.** Left from #001 goes to #386 DEOXYS. Up and Down jump by 10 (Down from #005 and Up from #380 wrap around). Holding Right scrolls.
+4. **Pick a species.** OK on TREECKO → the menu shows `Pokemon: TREECKO` with nickname `TREECKO`, the level unchanged and the OT unchanged.
+5. **Nickname kept.** Set the nickname to `X`, then pick TREECKO again → the nickname is still `X`.
+6. **Unown.** Pick UNOWN → an `Unown Form` row appears. Set `?` → the row shows `?`.
+7. **Stress.** Switch #251 <-> #252 <-> #001 20 times → no crash.
 
 ## Results
 
@@ -45,3 +55,10 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 | A11 Ball | | |
 | A12 Kept on Back | | |
 | A13 Gen I / Gen II | | |
+| B1 Sprites | | |
+| B2 No sprite | | |
+| B3 Wrapping and jumps | | |
+| B4 Pick a species | | |
+| B5 Nickname kept | | |
+| B6 Unown | | |
+| B7 Stress | | |

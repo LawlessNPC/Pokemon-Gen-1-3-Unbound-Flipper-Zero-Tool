@@ -49,6 +49,9 @@ struct pokemon_fap {
      * time the Gen III menu is shown, then kept for the app's lifetime.
      */
     struct Gen3Editor* gen3_editor;
+
+    /* Gen III species picker view, allocated next to the editor */
+    void* gen3_species_select;
 };
 
 typedef struct pokemon_fap PokemonFap;
@@ -61,6 +64,7 @@ typedef enum {
     AppViewSelectPokemon,
     AppViewTrade,
     AppViewGen3LinkTest,
+    AppViewGen3SpeciesSelect,
 } AppView;
 
 #endif /* POKEMON_APP_H */

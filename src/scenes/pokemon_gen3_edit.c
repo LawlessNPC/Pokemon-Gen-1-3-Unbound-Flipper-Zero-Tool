@@ -51,6 +51,9 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
 
     submenu_reset(pokemon_fap->submenu);
 
+    snprintf(buf, sizeof(buf), "Pokemon:     %s", gen3_species_name(national));
+    gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Species);
+
     gen3_pkm_nickname(p, name_buf, sizeof(name_buf));
     snprintf(buf, sizeof(buf), "Nickname:  %s", name_buf);
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Nickname);
@@ -144,6 +147,10 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
         if(gen3_species_gender_fixed(national)) return true;
         alias = PokemonSceneGen3Preset;
         break;
+    case PokemonSceneGen3Species:
+        /* Its own scene, so there is no alias state to set */
+        scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Species);
+        return true;
     case PokemonSceneGen3Preset:
     case PokemonSceneGen3Nature:
     case PokemonSceneGen3Shiny:

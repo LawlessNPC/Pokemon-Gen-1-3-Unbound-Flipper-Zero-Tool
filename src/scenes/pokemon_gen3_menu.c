@@ -8,6 +8,7 @@
 #include <furi_hal_random.h>
 #include <stdlib.h>
 #include <src/gen3/gen3_edit.h>
+#include <src/views/gen3_species_select.h>
 
 static void gen3_menu_item_callback(void* context, uint32_t index) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
@@ -40,6 +41,10 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
     if(!pokemon_fap->gen3_editor) {
         pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
         gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get());
+    }
+    if(!pokemon_fap->gen3_species_select) {
+        pokemon_fap->gen3_species_select =
+            gen3_species_select_alloc(pokemon_fap->view_dispatcher, AppViewGen3SpeciesSelect);
     }
 
     submenu_reset(pokemon_fap->submenu);

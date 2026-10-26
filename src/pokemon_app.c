@@ -10,6 +10,7 @@
 
 #include <gblink/include/gblink_pinconf.h>
 #include <src/gen3/gen3_pins_furi.h>
+#include <src/views/gen3_species_select.h>
 #include <gblink.h>
 
 bool pokemon_custom_event_callback(void* context, uint32_t event) {
@@ -32,6 +33,7 @@ PokemonFap* pokemon_alloc() {
 
     // Gen III editor, allocated by the Gen III menu
     pokemon_fap->gen3_editor = NULL;
+    pokemon_fap->gen3_species_select = NULL;
 
     // View dispatcher
     view_dispatcher = view_dispatcher_alloc();
@@ -98,6 +100,14 @@ void free_app(PokemonFap* pokemon_fap) {
     // Dialog ex
     view_dispatcher_remove_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
     dialog_ex_free(pokemon_fap->dialog_ex);
+
+    // Gen III species picker
+    if(pokemon_fap->gen3_species_select) {
+        gen3_species_select_free(
+            pokemon_fap->view_dispatcher,
+            AppViewGen3SpeciesSelect,
+            pokemon_fap->gen3_species_select);
+    }
 
     view_dispatcher_free(pokemon_fap->view_dispatcher);
 
