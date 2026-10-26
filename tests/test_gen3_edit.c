@@ -219,13 +219,40 @@ TEST(test_edit_species_fateful) {
     gen3_edit_init(&ed, 7);
     gen3_edit_set_species(&ed, 151);
     ASSERT_EQ(G(Fateful), 1);
+    ASSERT_EQ(G(Friendship), 100); /* species base friendship, not a fixed 70 */
     ASSERT_TRUE(edit_consistent(&ed));
     gen3_edit_set_species(&ed, 386);
     ASSERT_EQ(G(Fateful), 1);
+    ASSERT_EQ(G(Friendship), 0);
     ASSERT_TRUE(edit_consistent(&ed));
     gen3_edit_set_species(&ed, 1);
     ASSERT_EQ(G(Fateful), 0);
+    ASSERT_EQ(G(Friendship), 70);
     ASSERT_TRUE(edit_consistent(&ed));
+}
+
+TEST(test_edit_all_species) {
+    static const uint8_t levels[2] = {1, 100};
+    for(int li = 0; li < 2; li++) {
+        for(uint16_t n = 1; n <= GEN3_NATIONAL_COUNT; n++) {
+            const Gen3SpeciesInfo* info = gen3_species(n);
+            Gen3Editor ed;
+            gen3_edit_init(&ed, n);
+            gen3_edit_set_level(&ed, levels[li]);
+            gen3_edit_set_species(&ed, n);
+            bool ok = gen3_edit_national(&ed) == n && G(Species) == info->internal &&
+                      G(Level) == levels[li] && G(Friendship) == info->friendship &&
+                      edit_consistent(&ed);
+            /* D6: a new Pokemon's ability slot is pid & 1 on a two-ability species. */
+            if(info->ability[1] != 0) ok = ok && G(AbilityBit) == (G(Pid) & 1);
+            for(int s = 0; ok && s < 4; s++) {
+                uint16_t m = gen3_pkm_get(&ed.pkm, Gen3FieldMove1 + s);
+                ok = gen3_pkm_get(&ed.pkm, Gen3FieldPp1 + s) == (m ? gen3_move_pp(m) : 0);
+            }
+            if(!ok) printf("  national %u level %u\n", n, levels[li]);
+            ASSERT_TRUE(ok);
+        }
+    }
 }
 
 TEST(test_edit_level) {
@@ -503,6 +530,8 @@ TEST(test_edit_traits_preserve_other_bytes) {
     want.nature = 4;
     ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
     ASSERT_EQ(G(Pid) % 25, 4);
+    /* The new PID re-orders the substructures (seed 7 guarantees it), so encrypt must use it. */
+    ASSERT_TRUE(G(Pid) % 24 != gen3_pkm_get(&before, Gen3FieldPid) % 24);
     for(int i = 0; i < GEN3_PARTY_SIZE; i++) {
         if(i <= 0x03 || i == 0x1C || i == 0x1D || (i >= 0x56 && i <= 0x63)) continue;
         if(i == 0x4B) {
@@ -681,6 +710,127 @@ TEST(test_edit_load_keeps_current_hp) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
+TEST(test_edit_two_ability_bit_kept) {
+    Gen3Editor ed;
+    gen3_edit_init(&ed, 7);
+    gen3_edit_set_species(&ed, 280); /* Ralts: Synchronize / Trace */
+    Gen3Pkm in = ed.pkm;
+    uint32_t bit = !(gen3_pkm_get(&in, Gen3FieldPid) & 1); /* stored slot != pid & 1 */
+    gen3_pkm_set(&in, Gen3FieldAbilityBit, bit);
+    gen3_pkm_fix_checksum(&in);
+    gen3_edit_load(&ed, &in);
+    ASSERT_EQ(G(AbilityBit), bit);
+    gen3_edit_set_nickname(&ed, "LEAFY");
+    ASSERT_EQ(G(AbilityBit), bit);
+    gen3_edit_set_item(&ed, 200);
+    ASSERT_EQ(G(AbilityBit), bit);
+    gen3_edit_set_level(&ed, 30);
+    ASSERT_EQ(G(AbilityBit), bit);
+    gen3_edit_set_ball(&ed, 2);
+    ASSERT_EQ(G(AbilityBit), bit);
+    ASSERT_TRUE(gen3_edit_set_move(&ed, 3, 0));
+    ASSERT_EQ(G(AbilityBit), bit);
+    /* set_ot_id without a shininess flip keeps the PID and the slot. */
+    uint32_t pid = G(Pid);
+    ASSERT_TRUE(!gen3_is_shiny((7u << 16) | 7u, pid));
+    gen3_edit_set_ot_id(&ed, 7, 7);
+    ASSERT_EQ(G(Pid), pid);
+    ASSERT_EQ(G(AbilityBit), bit);
+    ASSERT_TRUE(edit_consistent(&ed));
+    /* With a flip (the old PID is shiny for this OT) it finds a new PID for the same slot. */
+    uint16_t tid = (pid >> 16) ^ (pid & 0xFFFF);
+    gen3_edit_set_ot_id(&ed, tid, 0);
+    ASSERT_TRUE(G(Pid) != pid);
+    ASSERT_TRUE(!gen3_is_shiny(G(OtId), G(Pid)));
+    ASSERT_EQ(G(AbilityBit), bit);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+static bool info_is(const Gen3NormaliseInfo* i, bool md, bool dr, bool gp, bool ec, bool af) {
+    return i->moves_defaulted == md && i->duplicates_removed == dr && i->gaps_packed == gp &&
+           i->exp_clamped == ec && i->ability_fixed == af;
+}
+
+static void set_moves(Gen3Pkm* p, uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
+    const uint16_t mv[4] = {a, b, c, d};
+    for(int s = 0; s < 4; s++) {
+        gen3_pkm_set(p, Gen3FieldMove1 + s, mv[s]);
+        gen3_pkm_set(p, Gen3FieldPp1 + s, mv[s] ? gen3_move_pp(mv[s]) : 0);
+    }
+}
+
+TEST(test_normalise_flags) {
+    Gen3Pkm p;
+    Gen3NormaliseInfo ni;
+    golden_pkm(&p);
+    gen3_pkm_set(&p, Gen3FieldHp, 999); /* party stats are fixed silently */
+    gen3_pkm_set(&p, Gen3FieldLevel, 77);
+    memset(&ni, 0xFF, sizeof(ni));
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, false, false, false, false));
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+
+    golden_pkm(&p);
+    set_moves(&p, 1, 0, 43, 0);
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, false, true, false, false));
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+
+    golden_pkm(&p);
+    set_moves(&p, 1, 43, 1, 0); /* the dropped duplicate leaves no gap before a move */
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, true, false, false, false));
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+
+    golden_pkm(&p);
+    set_moves(&p, 1, 1, 43, 0); /* gaps_packed reports the input, which had no gap */
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, true, false, false, false));
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+
+    golden_pkm(&p);
+    set_moves(&p, 0, 0, 0, 0);
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, true, false, false, false, false));
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+
+    golden_pkm(&p);
+    gen3_pkm_set(&p, Gen3FieldExp, 0);
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, false, false, true, false));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldExp), 1);
+
+    golden_pkm(&p);
+    gen3_pkm_set(&p, Gen3FieldAbilityBit, 1); /* Treecko has one ability */
+    ASSERT_TRUE(gen3_normalise(&p, &ni));
+    ASSERT_TRUE(info_is(&ni, false, false, false, false, true));
+    ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+
+    /* A two-ability species keeps its stored slot, even when it isn't pid & 1. */
+    Gen3Editor ed;
+    gen3_edit_init(&ed, 7);
+    gen3_edit_set_species(&ed, 280);
+    p = ed.pkm;
+    uint32_t bit = !(gen3_pkm_get(&p, Gen3FieldPid) & 1);
+    gen3_pkm_set(&p, Gen3FieldAbilityBit, bit);
+    ASSERT_TRUE(gen3_normalise(&p, NULL));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldAbilityBit), bit);
+    ASSERT_EQ(gen3_pkm_checksum(&p), gen3_pkm_get(&p, Gen3FieldChecksum));
+
+    /* Unknown species (0, a "?" placeholder 260, past the table 412): false, untouched. */
+    static const uint16_t bad[3] = {0, 260, 412};
+    for(int i = 0; i < 3; i++) {
+        golden_pkm(&p);
+        gen3_pkm_set(&p, Gen3FieldSpecies, bad[i]);
+        set_moves(&p, 1, 0, 1, 43);
+        Gen3Pkm before = p;
+        memset(&ni, 0xFF, sizeof(ni));
+        ASSERT_TRUE(!gen3_normalise(&p, &ni));
+        ASSERT_TRUE(info_is(&ni, false, false, false, false, false));
+        ASSERT_MEM_EQ(p.raw, before.raw, GEN3_PARTY_SIZE);
+    }
+}
+
 TEST(test_edit_load_no_moves) {
     Gen3Pkm in;
     golden_pkm(&in);
@@ -705,6 +855,7 @@ int main(void) {
     RUN(test_edit_species_same_is_noop);
     RUN(test_edit_species_skips_shiny_pid);
     RUN(test_edit_species_fateful);
+    RUN(test_edit_all_species);
     RUN(test_edit_level);
     RUN(test_edit_level_clamped);
     RUN(test_edit_presets);
@@ -727,5 +878,7 @@ int main(void) {
     RUN(test_edit_load_clamps_exp);
     RUN(test_edit_load_keeps_current_hp);
     RUN(test_edit_load_no_moves);
+    RUN(test_edit_two_ability_bit_kept);
+    RUN(test_normalise_flags);
     TEST_EXIT();
 }

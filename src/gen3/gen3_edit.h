@@ -5,8 +5,9 @@
 #include <src/gen3/gen3_pkm.h>
 #include <src/gen3/gen3_rules.h>
 
-/* Editor model. Every mutator leaves the Pokemon game-valid: the ability bit is pid & 1 for
- * two-ability species and 0 otherwise, the party stats match exp, IVs, EVs and nature
+/* Editor model. Every mutator leaves the Pokemon game-valid: the ability bit is 0 for a
+ * one-ability species (a two-ability species keeps its stored slot; a new PID sets it to the
+ * slot it was found for, pid & 1), the party stats match exp, IVs, EVs and nature
  * (gen3_recalc_party, so Hp = MaxHp), and the checksum is fixed. */
 
 #define GEN3_EDIT_DEFAULT_NATIONAL 1
@@ -35,13 +36,26 @@ typedef struct Gen3Editor {
     Gen3Rng rng;
 } Gen3Editor;
 
+/* What gen3_normalise changed. Party stats are always recalculated and aren't reported. */
+typedef struct {
+    bool moves_defaulted; /* no move was left: the default moveset, full PP, PP Ups 0 */
+    bool duplicates_removed; /* a repeated move was dropped with its PP and PP Ups */
+    bool gaps_packed; /* the input had an empty move slot before a used one */
+    bool exp_clamped; /* exp was outside the level 1..100 range */
+    bool ability_fixed; /* ability bit 1 on a one-ability species, now 0 */
+} Gen3NormaliseInfo;
+
+/* Makes a validated Pokemon (a real species, not an egg, move ids < 355) game-valid, for loads
+ * and imports: moves packed with duplicates dropped, exp clamped to the level 1..100 range, the
+ * default moveset if no move is left, ability bit 0 on a one-ability species, party stats
+ * recalculated with the current HP kept but clamped to MaxHp, checksum fixed. Every other byte
+ * is kept. info (may be NULL) is always reset, then filled. false, with *pkm untouched, if the
+ * species maps to no national. */
+bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info);
+
 /* Bulbasaur L5, default OT, preset RandIvZeroEv. */
 void gen3_edit_init(Gen3Editor* ed, uint32_t seed);
-/* Takes a validated pkm (a real species, not an egg, move ids < 355) and normalises it: exp
- * clamped to the level 1..100 range, party stats recalculated with the current HP kept but
- * clamped to MaxHp, moves packed with duplicates dropped along with their PP and PP Ups (the
- * default moveset if none is left), ability bit 0 for one-ability species, checksum fixed. Every
- * other byte is kept. preset_applied = false. */
+/* Takes pkm and runs gen3_normalise on it; preset_applied = false. */
 void gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm);
 uint16_t gen3_edit_national(const Gen3Editor* ed);
 /* D5: a fresh Pokemon of that species, keeping OT name, TID, SID, OT gender, level and preset.
@@ -54,7 +68,7 @@ void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset);
 /* "" -> species name (game encoding). */
 void gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii);
 void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii);
-/* Keeps shininess (D6) by finding a new PID when needed. */
+/* Keeps shininess (D6) by finding a new PID when needed, and the stored ability slot. */
 void gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid);
 /* 0 (no item) or an id gen3_item_holdable accepts; anything else is refused (no-op). */
 void gen3_edit_set_item(Gen3Editor* ed, uint16_t item);

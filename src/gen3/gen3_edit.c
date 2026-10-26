@@ -18,13 +18,23 @@ static uint8_t ed_level(const Gen3Pkm* p) {
     return gen3_level_for_exp(info->growth, gen3_pkm_get(p, Gen3FieldExp));
 }
 
-/* Every mutator ends here: ability bit, party stats, checksum. */
+static bool ed_two_abilities(const Gen3Pkm* p) {
+    const Gen3SpeciesInfo* info = ed_info(p);
+    return info && info->ability[1] != 0;
+}
+
+/* After a new PID: the ability slot it was chosen for, which is pid & 1 (CreateBoxMon; and
+ * gen3_pid_find matches pid & 1 to the wanted slot on a two-ability species). */
+static void ed_ability_from_pid(Gen3Pkm* p) {
+    gen3_pkm_set(
+        p, Gen3FieldAbilityBit, ed_two_abilities(p) ? (gen3_pkm_get(p, Gen3FieldPid) & 1) : 0);
+}
+
+/* Every mutator ends here: ability bit 0 on a one-ability species (a two-ability species keeps
+ * its stored slot, so an unrelated edit never changes its ability), party stats, checksum. */
 static void ed_commit(Gen3Editor* ed) {
     Gen3Pkm* p = &ed->pkm;
-    const Gen3SpeciesInfo* info = ed_info(p);
-    bool two_abilities = info && info->ability[1] != 0;
-    gen3_pkm_set(
-        p, Gen3FieldAbilityBit, two_abilities ? (gen3_pkm_get(p, Gen3FieldPid) & 1) : 0);
+    if(!ed_two_abilities(p)) gen3_pkm_set(p, Gen3FieldAbilityBit, 0);
     gen3_recalc_party(p);
     gen3_pkm_fix_checksum(p);
 }
@@ -129,6 +139,7 @@ static void ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
     if(national == GEN3_NATIONAL_MEW || national == GEN3_NATIONAL_DEOXYS)
         gen3_pkm_set(&p, Gen3FieldFateful, 1);
     gen3_pkm_set(&p, Gen3FieldMail, GEN3_MAIL_NONE);
+    ed_ability_from_pid(&p);
     ed->pkm = p;
     ed_apply_preset(ed);
     ed_commit(ed);
@@ -146,40 +157,63 @@ void gen3_edit_init(Gen3Editor* ed, uint32_t seed) {
     ed_new_mon(ed, GEN3_EDIT_DEFAULT_NATIONAL, GEN3_EDIT_DEFAULT_LEVEL);
 }
 
-void gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm) {
-    ed->pkm = *pkm;
-    ed->preset_applied = false;
-    Gen3Pkm* p = &ed->pkm;
-    const Gen3SpeciesInfo* info = ed_info(p);
+bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
+    Gen3NormaliseInfo unused;
+    if(!info) info = &unused;
+    memset(info, 0, sizeof(*info));
+    uint16_t national = gen3_national_from_internal(gen3_pkm_get(pkm, Gen3FieldSpecies));
+    const Gen3SpeciesInfo* sp = gen3_species(national);
+    if(!sp) return false;
 
-    /* Drop duplicate moves with their PP and PP Ups, then pack. */
+    /* Moves: note gaps in the input, drop duplicates with their PP and PP Ups, then pack. */
+    bool empty_seen = false;
+    for(int s = 0; s < 4; s++) {
+        uint16_t m = gen3_pkm_get(pkm, Gen3FieldMove1 + s);
+        if(!m)
+            empty_seen = true;
+        else if(empty_seen)
+            info->gaps_packed = true;
+    }
     for(int s = 1; s < 4; s++) {
-        uint16_t m = gen3_pkm_get(p, Gen3FieldMove1 + s);
+        uint16_t m = gen3_pkm_get(pkm, Gen3FieldMove1 + s);
         for(int t = 0; m && t < s; t++) {
-            if(gen3_pkm_get(p, Gen3FieldMove1 + t) == m) {
-                ed_clear_move(p, s);
+            if(gen3_pkm_get(pkm, Gen3FieldMove1 + t) == m) {
+                ed_clear_move(pkm, s);
+                info->duplicates_removed = true;
                 break;
             }
         }
     }
-    ed_pack_moves(p);
+    ed_pack_moves(pkm);
 
-    if(info) {
-        uint32_t exp = gen3_pkm_get(p, Gen3FieldExp);
-        uint32_t lo = gen3_exp_for_level(info->growth, 1);
-        uint32_t hi = gen3_exp_for_level(info->growth, 100);
-        if(exp < lo) exp = lo;
-        if(exp > hi) exp = hi;
-        gen3_pkm_set(p, Gen3FieldExp, exp);
-        if(gen3_pkm_get(p, Gen3FieldMove1) == 0)
-            ed_set_default_moves(p, gen3_edit_national(ed), ed_level(p));
-        if(info->ability[1] == 0) gen3_pkm_set(p, Gen3FieldAbilityBit, 0);
-        /* Recalculate, keeping the current HP clamped to the new MaxHp. */
-        uint32_t hp = gen3_pkm_get(p, Gen3FieldHp);
-        gen3_recalc_party(p);
-        if(hp < gen3_pkm_get(p, Gen3FieldMaxHp)) gen3_pkm_set(p, Gen3FieldHp, hp);
+    uint32_t exp = gen3_pkm_get(pkm, Gen3FieldExp);
+    uint32_t lo = gen3_exp_for_level(sp->growth, 1);
+    uint32_t hi = gen3_exp_for_level(sp->growth, 100);
+    uint32_t clamped = exp < lo ? lo : (exp > hi ? hi : exp);
+    if(clamped != exp) {
+        gen3_pkm_set(pkm, Gen3FieldExp, clamped);
+        info->exp_clamped = true;
     }
-    gen3_pkm_fix_checksum(p);
+    if(gen3_pkm_get(pkm, Gen3FieldMove1) == 0) {
+        ed_set_default_moves(pkm, national, ed_level(pkm));
+        info->moves_defaulted = true;
+    }
+    if(sp->ability[1] == 0 && gen3_pkm_get(pkm, Gen3FieldAbilityBit)) {
+        gen3_pkm_set(pkm, Gen3FieldAbilityBit, 0);
+        info->ability_fixed = true;
+    }
+    /* Recalculate, keeping the current HP clamped to the new MaxHp. */
+    uint32_t hp = gen3_pkm_get(pkm, Gen3FieldHp);
+    gen3_recalc_party(pkm);
+    if(hp < gen3_pkm_get(pkm, Gen3FieldMaxHp)) gen3_pkm_set(pkm, Gen3FieldHp, hp);
+    gen3_pkm_fix_checksum(pkm);
+    return true;
+}
+
+void gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm) {
+    ed->pkm = *pkm;
+    ed->preset_applied = false;
+    gen3_normalise(&ed->pkm, NULL);
 }
 
 uint16_t gen3_edit_national(const Gen3Editor* ed) {
@@ -224,9 +258,15 @@ void gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
     gen3_traits_of(&ed->pkm, &old);
     uint32_t ot_id = ((uint32_t)sid << 16) | tid;
     gen3_pkm_set(&ed->pkm, Gen3FieldOtId, ot_id);
+    /* Both paths keep the stored ability slot: set_traits asks for old.ability_slot (the stored
+     * bit), and ed_commit leaves a two-ability species' bit alone. */
     if(gen3_is_shiny(ot_id, gen3_pkm_get(&ed->pkm, Gen3FieldPid)) != old.shiny &&
        gen3_edit_set_traits(ed, &old))
         return;
+    /* Reached with flipped shininess only for an unknown species: for a real one, every want
+     * gen3_traits_of returns is in range (nature < 25, a 1-bit slot, letter < 28, the gender the
+     * ratio allows), and the rarest one (an Unown nature and letter, ~1 in 700 PIDs; shiny PIDs
+     * are built shiny) is found far inside GEN3_PID_MAX_TRIES, so set_traits doesn't fail. */
     ed_commit(ed);
 }
 
@@ -283,6 +323,7 @@ bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want) {
            &pid))
         return false;
     gen3_pkm_set(&ed->pkm, Gen3FieldPid, pid);
+    ed_ability_from_pid(&ed->pkm); /* the slot gen3_pid_find satisfied */
     ed_commit(ed);
     return true;
 }
