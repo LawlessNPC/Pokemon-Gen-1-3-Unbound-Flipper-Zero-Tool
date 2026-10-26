@@ -38,7 +38,7 @@ void gen3_trade_sync_restart(Gen3TradeSync* sync) {
     }
 }
 
-/* Step 1 (F17, O2): take the latest trade's Pokemon into the editor, or retry a NoData pickup.
+/* Step 1 (O2): take the latest trade's Pokemon into the editor, or retry a NoData pickup.
  * The club keeps the received bytes, and no new trade can happen while the offer is unpublished,
  * so a retry reads the same Pokemon. */
 static unsigned sync_pickup(
@@ -63,13 +63,12 @@ static unsigned sync_pickup(
     } else if(sync->pickup_fail != Gen3PickupNoData) {
         return 0;
     }
-    /* gen3_edit_load normalises (preflight §8.4, corrected by the T7 review). That recalculates
-     * the party stats, which Ruby leaves behind the EVs after a battle (MonGainEVs doesn't
-     * recalculate them), so the Pokemon published below can differ from the received bytes the
-     * club offers after the trade. The poll publishes it at once, on the first tick after
-     * trades_done advances, normally before the post-save exchange's round 1; if round 1 comes
-     * first, the club sees a changed offer: one EEBB and one re-sit. Normalisation is never
-     * skipped to avoid that. */
+    /* gen3_edit_load normalises. That recalculates the party stats, which Ruby leaves behind the
+     * EVs after a battle (MonGainEVs doesn't recalculate them), so the Pokemon published below
+     * can differ from the received bytes the club offers after the trade. The poll publishes it
+     * at once, on the first tick after trades_done advances, normally before the post-save
+     * exchange's round 1; if round 1 comes first, the club sees a changed offer: one EEBB and
+     * one re-sit. Normalisation is never skipped to avoid that. */
     bool decrypted = gen3_pkm_decrypt(received, GEN3_PARTY_SIZE, &sync->scratch);
     if(decrypted && gen3_edit_load(ed, &sync->scratch)) {
         sync->pickup_fail = Gen3PickupOk;
@@ -102,7 +101,7 @@ static unsigned sync_trainer(Gen3TradeSync* sync, Gen3Editor* ed, const Gen3Club
     return Gen3SyncTrainer;
 }
 
-/* Step 3 (G6, D8, O2) */
+/* Step 3 (D8, O2): only a Pokemon that passes gen3_trade_offer_check is ever offered */
 static unsigned sync_offer(Gen3TradeSync* sync, const Gen3Editor* ed) {
     /* The user loaded or made another Pokemon: the traded-away one is gone from the editor */
     if(sync->pickup_fail == Gen3PickupBadData && sync->gone_valid &&
@@ -149,8 +148,8 @@ bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count)
     return received_count == sync->trades_seen && sync->pickup_fail != Gen3PickupNoData;
 }
 
-/* A GBA is linked, or in a relink's gap (fix round 2): stopping now would drop it mid-relink,
- * a link error on the GBA. Waiting without relinking is "no GBA linked" (D1). */
+/* A GBA is linked, or in a relink's gap: stopping now would drop it mid-relink, a link error on
+ * the GBA. Waiting without relinking is "no GBA linked" (D1). */
 static bool gba_linked(const Gen3ClubStatus* st) {
     return st->phase != Gen3ClubPhaseWaiting || st->relinking;
 }
@@ -260,7 +259,7 @@ static void guide_pick(
     switch(st->phase) {
     case Gen3ClubPhaseWaiting:
         /* A relink's gap (about 20 frames) is linked, as for ending (gba_linked): the GBA opens
-         * its next link at once, so no Waiting row flashes up (T14) */
+         * its next link at once, so no Waiting row flashes up */
         if(st->relinking) SAY("Linking...", "", "");
         if(st->last_result == Gen3TradeResultRolledBack)
             SAY("Link lost while the", "GBA saved. It keeps", "its old save.");
@@ -274,7 +273,7 @@ static void guide_pick(
     case Gen3ClubPhaseCards:
         SAY("Linking...", "", "");
     case Gen3ClubPhaseRoom:
-        /* T7 review: the hint only while the GBA isn't seated */
+        /* The hint only while the GBA isn't seated: a seated GBA is past it */
         if(st->resit_needed && !st->gba_seated)
             SAY("Sit at the table", "again (step off and", "back on if seated).");
         if(st->gba_seated) SAY("Opening the trade", "menu...", "");

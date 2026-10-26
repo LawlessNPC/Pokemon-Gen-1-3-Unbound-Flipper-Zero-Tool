@@ -31,7 +31,8 @@
  * >= 2) */
 #define GEN3_CLUB_REPLY_DELAY_BURSTS  6
 #define GEN3_CLUB_SAVE_SYNCS          3 /* the GBA's 2FFEs in one link save (§B5.1) */
-#define GEN3_CLUB_EEBB_RETRY_BURSTS   180 /* resend an EEBB without the GBA's 5FFF (T2: ~3 s) */
+/* Resend an EEBB without the GBA's 5FFF: ~3 s (§B3.4; inferred, link-protocol-trade.md T2) */
+#define GEN3_CLUB_EEBB_RETRY_BURSTS   180
 /* Menu: an incomplete GBA block is dropped on the GEN3_CLUB_BLOCK_GAP_BURSTS-th burst in a row
  * with no chunk for it, or that many plus GEN3_CLUB_BLOCK_HEADER_BURSTS after its header (the
  * frames LinkCB_BlockSendBegin waits before the first chunk). Ruby sends a block's chunks on
@@ -44,7 +45,8 @@
  * its first CAFE: the FADE_FROM_BLACK palette fade and its 5 finishing calls, then the weather
  * update and task_mpl_807DD60 case 2 (field_weather.c:497-501, field_fadetransition.c:122-128).
  * An exit forced in the fade-in finds the controls unlocked when it ends (sub_80553E4 sends 0x1A),
- * and TerminateLink restarts once: no link error, but a reprinted message. At least 26 (ruled). */
+ * and TerminateLink restarts once: no link error, but a reprinted message. At least 26: the
+ * fade-in and a margin. */
 #define GEN3_CLUB_LEAVE_DELAY_CAFES   30
 /* After the GBA closed a link to open the next one at once (the 5FFF answered in Room for the
  * trade menu, in Menu or in Save), the frames the club waits for it to connect before taking the
@@ -140,7 +142,7 @@ typedef struct {
     /* The GBA closed its link to open the next one at once (its 5FFF answered in Room for the
      * trade menu, in Menu, or in Save): from that answer until it connects again, or until
      * GEN3_CLUB_RELINK_WAIT_FRAMES of Waiting take it as gone. Waiting with relinking is no
-     * "no GBA linked" (T13 fix round 2). */
+     * "no GBA linked": a stop then is a link error on the GBA, mid-relink. */
     bool relinking;
 } Gen3ClubStatus;
 
@@ -246,8 +248,9 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx);
 void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out);
 /* Sets (game != NULL) or clears the offer: the Flipper's one party Pokemon, game form. false and
  * nothing changed if trades_seen != the club's trades_done (D6): an app that hasn't picked up the
- * latest trade can't overwrite the received Pokemon. Unchecked (G6): the app offers only a
- * Pokemon that passes gen3_trade_offer_check. */
+ * latest trade can't overwrite the received Pokemon. Unchecked, since the app sets it in a
+ * PRIMASK section, where nothing may decrypt: the app offers only a Pokemon that passes
+ * gen3_trade_offer_check. */
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen);
 /* O1: the app is editing the offer. While set, offer_stale is true (EEBB to every GBA block in
  * Menu, and an unsolicited EEBB), and the club never sits, nor sends DDDD or CCDD. Setting it

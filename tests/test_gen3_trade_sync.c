@@ -219,10 +219,10 @@ TEST(test_sync_pickup) {
     ASSERT_MEM_EQ(sync.offer, rx, GEN3_PARTY_SIZE);
 }
 
-/* T7 carry-over: Ruby's MonGainEVs raises EVs without recalculating the party stats, and the
- * pickup's gen3_normalise recalculates them. The normalised Pokemon is published in the same poll
- * as the pickup (the first tick after trades_done advances), so its game form differs from the
- * received bytes the club offers after the trade. */
+/* Ruby's MonGainEVs raises EVs without recalculating the party stats, and the pickup's
+ * gen3_normalise recalculates them. The normalised Pokemon is published in the same poll as the
+ * pickup (the first tick after trades_done advances), so its game form differs from the received
+ * bytes the club offers after the trade. */
 TEST(test_sync_pickup_stats_lag_evs) {
     Gen3Editor ed;
     Gen3TradeSync sync;
@@ -337,9 +337,9 @@ TEST(test_sync_bad_received) {
     ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
 }
 
-/* O2, T10 review minor 2: the block follows a trainer swap. Player A trades the default away and
- * the pickup fails; B and then A link again. The default takes each one's OT, and the Pokemon A
- * traded away is never published, to B or back to A. */
+/* O2: the block follows a trainer swap. Player A trades the default away and the pickup fails; B
+ * and then A link again. The default takes each one's OT, and the Pokemon A traded away is never
+ * published, to B or back to A. */
 TEST(test_sync_block_follows_trainer) {
     Gen3Editor ed;
     Gen3TradeSync sync;
@@ -384,8 +384,8 @@ TEST(test_sync_block_follows_trainer) {
     ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
 }
 
-/* T10 review minor 4: received_count below trades_seen is a club reset (trades_done back to 0,
- * the received Pokemon zeros): trades_seen follows it, with no pickup */
+/* received_count below trades_seen is a club reset (trades_done back to 0, the received Pokemon
+ * zeros): trades_seen follows it, with no pickup */
 TEST(test_sync_club_reset) {
     Gen3Editor ed;
     Gen3TradeSync sync;
@@ -482,9 +482,9 @@ TEST(test_sync_pickup_retry) {
     ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), 0);
 }
 
-/* G15 across sessions (T12 review): a restart (the session stopped, or started a new club) keeps
- * the block on the traded-away Pokemon. Everything else begins again: no trade seen, no offer
- * taken, no trainer known. */
+/* O2 across sessions: a restart (the session stopped, or started a new club) keeps the block on
+ * the traded-away Pokemon, which is never offered again. Everything else begins again: no trade
+ * seen, no offer taken, no trainer known. */
 TEST(test_sync_restart_keeps_block) {
     Gen3Editor ed;
     Gen3TradeSync sync;
@@ -673,7 +673,7 @@ TEST(test_sync_holds_while_editing) {
     ASSERT_TRUE(offer_is_editor(&sync, &ed));
 }
 
-/* G6, D8, F7/R7: a Pokemon the trade can't take is never published */
+/* D8, R7: a Pokemon the trade can't take is never published (the club doesn't check) */
 TEST(test_sync_bad_offer_unpublished) {
     Gen3Editor ed;
     Gen3TradeSync sync;
@@ -750,8 +750,8 @@ TEST(test_enigma_fixture) {
     ASSERT_EQ(gen3_trade_offer_check(&q), Gen3RefuseItem);
 }
 
-/* T13 review (a): a trade session may stop for good only once the sync has every Pokemon the club
- * received. A NoData pickup waits for a retry; a BadData one is final. */
+/* A trade session may stop for good only once the sync has every Pokemon the club received. A
+ * NoData pickup waits for a retry; a BadData one is final. */
 TEST(test_sync_settled) {
     Gen3Editor ed;
     Gen3TradeSync sync;
@@ -789,8 +789,8 @@ TEST(test_sync_settled) {
     ASSERT_TRUE(!gen3_trade_sync_settled(&sync, 3));
 }
 
-/* The sweeps below cover every phase with every combination of the flags the T13 decisions read:
- * END_BITS bits 0-3 and 5 set these five, and bit 4 is the settled argument. */
+/* The sweeps below cover every phase with every combination of the flags the end decisions
+ * read: END_BITS bits 0-3 and 5 set these five, and bit 4 is the settled argument. */
 #define END_BITS 64u
 static void end_status(Gen3ClubStatus* st, int phase, unsigned bits) {
     status_reset(st, (Gen3ClubPhase)phase);
@@ -806,10 +806,10 @@ static bool end_linked(const Gen3ClubStatus* st) {
     return st->phase != Gen3ClubPhaseWaiting || st->relinking;
 }
 
-/* R6, as refined by the T6 review and fix round 2: "Stop link?" may stop the link outside the
- * save window, and outside a pending trade with the GBA linked, a relink's gap included. Once
- * the relink has timed out (Waiting, not relinking), a pending trade may stop (D1): the GBA
- * wrote nothing before sync 1. left and leaving don't matter: left is no "trade resolved". */
+/* R6: "Stop link?" may stop the link outside the save window, and outside a pending trade with the
+ * GBA linked, a relink's gap included. Once the relink has timed out (Waiting, not relinking), a
+ * pending trade may stop (D1): the GBA wrote nothing before sync 1. left and leaving don't matter:
+ * left is no "trade resolved". */
 TEST(test_trade_stop_allowed) {
     Gen3ClubStatus st;
 
@@ -823,7 +823,7 @@ TEST(test_trade_stop_allowed) {
     ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
     st.left = true; /* the 0x1144 timeout can set left with the trade still pending */
     ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
-    /* Fix round 2: the 0x1144 gap (Waiting, the relink due) is still linked */
+    /* The 0x1144 gap (Waiting, the relink due) is still linked */
     st.left = false;
     st.phase = Gen3ClubPhaseWaiting;
     st.relinking = true;
@@ -833,7 +833,7 @@ TEST(test_trade_stop_allowed) {
     st.left = true;
     ASSERT_TRUE(gen3_trade_stop_allowed(&st));
 
-    /* Independent invariants over every phase and flag (fix round 1: not the formula again) */
+    /* Independent invariants over every phase and flag, not the formula again */
     for(int ph = Gen3ClubPhaseWaiting; ph <= Gen3ClubPhaseSave; ph++) {
         for(unsigned bits = 0; bits < END_BITS; bits++) {
             end_status(&st, ph, bits);
@@ -883,8 +883,8 @@ TEST(test_trade_end_action) {
     st.trade_pending = true; /* the 0x1144 relink timed out: nothing written on the GBA yet */
     ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndStop);
 
-    /* Fix round 2: a relink's gap (the 0x1144 one after CCDD, the 0x1122 one after the save) is
-     * no "no GBA linked": ask it to walk out once it relinks, never drop it mid-relink */
+    /* A relink's gap (the 0x1144 one after CCDD, the 0x1122 one after the save) is no "no GBA
+     * linked": ask it to walk out once it relinks, never drop it mid-relink */
     st.relinking = true;
     ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndAsk);
     ASSERT_EQ(gen3_trade_end_action(&st, true, false), Gen3TradeEndAsk);
@@ -894,8 +894,8 @@ TEST(test_trade_end_action) {
     st.relinking = false;
     ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndStop);
 
-    /* Fix round 1: a stale dialog. The tick stopped the session (the GBA left, its Pokemon
-     * picked up): back to the menu, never End on it. */
+    /* A stale dialog. The tick stopped the session (the GBA left, its Pokemon picked up): back to
+     * the menu, never End on it. */
     status_reset(&st, Gen3ClubPhaseWaiting);
     st.left = true;
     ASSERT_EQ(gen3_trade_end_action(&st, false, true), Gen3TradeEndMenu);
@@ -948,7 +948,7 @@ TEST(test_trade_stop_link_action) {
     st.save_window = false;
     st.phase = Gen3ClubPhaseTrade;
     ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndAsk);
-    st.phase = Gen3ClubPhaseWaiting; /* fix round 2: the 0x1144 gap is still linked */
+    st.phase = Gen3ClubPhaseWaiting; /* the 0x1144 gap is still linked */
     st.relinking = true;
     ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndAsk);
     st.relinking = false; /* the relink timed out: may stop (D1) */
@@ -1004,7 +1004,7 @@ TEST(test_trade_back_action) {
     st.phase = Gen3ClubPhaseTrade;
     st.leaving = true;
     ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLeave);
-    st.phase = Gen3ClubPhaseWaiting; /* fix round 2: the 0x1144 gap: still no "Stop link?" */
+    st.phase = Gen3ClubPhaseWaiting; /* the 0x1144 gap: still no "Stop link?" */
     st.relinking = true;
     ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLeave);
     st.relinking = false; /* the relink timed out: may stop (D1) */
@@ -1135,8 +1135,7 @@ TEST(test_guide_texts) {
     st.leaving = true;
     GUIDE(&st, no, ok, "The GBA is saving.", "Don't unplug or turn", "off. Back is locked.");
 
-    /* left (D9) says nothing about a trade still pending (T8 carry-over: left isn't "trade
-     * resolved") */
+    /* left (D9) says nothing about a trade still pending: left isn't "trade resolved" */
     status_reset(&st, Gen3ClubPhaseWaiting);
     st.left = true;
     st.trade_pending = true;
@@ -1180,7 +1179,7 @@ TEST(test_guide_texts) {
     st.phase = Gen3ClubPhaseRoom;
     GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
 
-    /* leaving: no "offer changed" hint in the menu (T8 carry-over) */
+    /* leaving: no "offer changed" hint in the menu */
     status_reset(&st, Gen3ClubPhaseMenu);
     st.leaving = true;
     st.offer_stale = true;
@@ -1265,12 +1264,12 @@ TEST(test_guide_texts) {
     GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
     st.last_result = Gen3TradeResultNone;
     GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
-    /* T7 carry-over: after a Disconnected, the link state, not the re-sit hint */
+    /* After a Disconnected, the link state, not the re-sit hint */
     st.resit_needed = true;
     GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
 
-    /* A relink's gap (T14, from the T13 fix round 2): Waiting with relinking is the GBA opening
-     * its next link, about 20 frames. It counts as linked, so never the Waiting rows */
+    /* A relink's gap: Waiting with relinking is the GBA opening its next link, about 20 frames. It
+     * counts as linked, so never the Waiting rows */
     status_reset(&st, Gen3ClubPhaseWaiting);
     st.relinking = true; /* the sit's 0x1122, to the trade menu */
     GUIDE(&st, no, ok, "Linking...", "", "");
@@ -1304,7 +1303,7 @@ TEST(test_guide_texts) {
     status_reset(&st, Gen3ClubPhaseRoom);
     st.resit_needed = true;
     GUIDE(&st, no, ok, "Sit at the table", "again (step off and", "back on if seated).");
-    st.gba_seated = true; /* T7 carry-over: the hint only while the GBA isn't seated */
+    st.gba_seated = true; /* the hint only while the GBA isn't seated */
     GUIDE(&st, no, ok, "Opening the trade", "menu...", "");
     st.resit_needed = false;
     GUIDE(&st, no, ok, "Opening the trade", "menu...", "");
@@ -1337,7 +1336,7 @@ TEST(test_guide_texts) {
     GUIDE(&st, no, ok, "Edit it (OK), or pick", "the next trade on", "the GBA.");
     status_reset(&st, Gen3ClubPhaseMenu);
     GUIDE(&st, no, ok, "Pick a Pokemon to", "trade on the GBA.", "");
-    /* An R8 DDEE leaves refused at None: no reason is claimed (T5 carry-over) */
+    /* An R8 DDEE leaves refused at None: no reason is claimed */
     st.menu = Gen3ClubMenuIdle;
     st.refused = Gen3RefuseNone;
     GUIDE(&st, no, ok, "Pick a Pokemon to", "trade on the GBA.", "");
@@ -1380,7 +1379,7 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
             out[2]);
         return false;
     }
-    /* A relink's gap is linked (T14): never the Waiting rows, whatever else is set */
+    /* A relink's gap is linked: never the Waiting rows, whatever else is set */
     if(st->relinking && (strcmp(out[0], "Go to the Cable Club:") == 0 ||
                          strncmp(out[0], "Link lost", strlen("Link lost")) == 0)) {
         printf(

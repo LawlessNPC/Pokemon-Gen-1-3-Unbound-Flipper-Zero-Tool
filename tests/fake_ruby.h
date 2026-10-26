@@ -386,7 +386,8 @@ void fake_ruby_answer(FakeRuby* g, bool yes);
 void fake_ruby_press_a(FakeRuby* g);
 /* Browsing: SUMMARY of a Pokemon (ShowPokemonSummaryScreen). callback1 still handles the
  * Flipper's blocks, but a slot-0 EEBB handled while the summary is open is lost: closing it runs
- * sub_80484F4 [CB2_ReturnToTradeMenu], which resets the menu state (§B3.4, T2). */
+ * sub_80484F4 [CB2_ReturnToTradeMenu], which resets the menu state (§B3.4;
+ * link-protocol-trade.md T2). */
 void fake_ruby_open_summary(FakeRuby* g);
 /* Summary: back to Browsing. */
 void fake_ruby_close_summary(FakeRuby* g);
@@ -401,5 +402,6 @@ uint32_t fake_ruby_saved_trades(const FakeRuby* g); /* link saves committed */
  * was: on Ruby, the boot reports a corrupt save and loads the previous one. */
 bool fake_ruby_save_corrupt(const FakeRuby* g);
 bool fake_ruby_national_dex(const FakeRuby* g); /* saved National Dex flag */
-/* Main-loop stall per flash sector written in the link save; default 2 (T4: not measured). */
+/* Main-loop stall per flash sector written in the link save; default 2 (not measured:
+ * link-protocol-trade.md T4). */
 void fake_ruby_set_sector_stall(FakeRuby* g, uint8_t frames);

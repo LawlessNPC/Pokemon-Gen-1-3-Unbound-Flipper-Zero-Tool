@@ -8,8 +8,8 @@ _Static_assert(Gen3PresetMaxIvMaxEv + 1 == GEN3_PRESET_COUNT, "GEN3_PRESET_COUNT
 
 static bool ed_set_traits(Gen3Editor* ed, const Gen3Traits* want);
 
-/* R4: a call clears pristine only when the Pokemon's bytes differ from other's, the bytes it
- * had on entry. */
+/* A call clears pristine only when the Pokemon's bytes differ from other's, the bytes it had
+ * on entry: a refused, failed or no-op call leaves the default untouched. */
 static void ed_note_change(Gen3Editor* ed, const Gen3Pkm* other) {
     if(memcmp(ed->pkm.raw, other->raw, GEN3_PARTY_SIZE) != 0) ed->pristine = false;
 }
@@ -472,7 +472,7 @@ void gen3_edit_set_trainer(Gen3Editor* ed, const Gen3Trainer* t) {
     /* The OT gender bit's value, so gen3_edit_ot_is_trainer can match it */
     ed->trainer.gender = t->gender != 0;
     ed->has_trainer = true;
-    /* The untouched default becomes the player's own, and is still the default (R4) */
+    /* The untouched default becomes the player's own, and is still the default (D7) */
     if(ed->pristine) ed_use_trainer_ot(ed);
 }
 

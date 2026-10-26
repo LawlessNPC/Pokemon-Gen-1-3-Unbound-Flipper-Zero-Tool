@@ -262,7 +262,7 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool
     if(cable_ok) *cable_ok = mlink_hw_cable_ok(s->hw);
 }
 
-/* ---- App <-> club hand-off (G5) ----
+/* ---- App <-> club hand-off ----
  * Each PRIMASK section masks every interrupt, TIM2 included, around exactly one gen3_club_* call,
  * so the frame callback never sees a half-made change. Inside: at most 104 bytes copied (one
  * 100-byte Pokemon plus scalars), nothing that blocks, no memcmp, no decrypt: about 10-13 us at

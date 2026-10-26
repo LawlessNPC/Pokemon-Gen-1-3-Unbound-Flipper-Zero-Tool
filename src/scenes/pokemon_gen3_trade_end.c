@@ -10,22 +10,22 @@
 #include <src/gen3/gen3_trade_sync.h>
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
-/* End trade (T13: D9, D10), over the Gen III menu. The scene state is what it shows (a
+/* End trade (D9, D10), over the Gen III menu. The scene state is what it shows (a
  * Gen3TradeEndAction: Saving, Ask or Pickup), plus GEN3_TRADE_END_STOP_LINK if it was opened
  * from a confirmed "Stop link?".
  * - Saving: the GBA is saving; OK returns.
  * - Ask: Stay returns; End ends the trade.
- * - Pickup (T12 review (f)): a received Pokemon waits for the SD card. Retry (right) tries the
- *   card again and, once it is picked up, goes on with the end; End anyway (left) ends it, losing
- *   that Pokemon. Retry sits where End and "Stop link?"'s Stop are (fix round 2), so pressing the
- *   right button again never loses the Pokemon.
+ * - Pickup: a received Pokemon waits for the SD card. Retry (right) tries the card again and,
+ *   once it is picked up, goes on with the end; End anyway (left) ends it, losing that Pokemon.
+ *   Retry sits where End and "Stop link?"'s Stop are, so pressing the right button again never
+ *   loses the Pokemon.
  * Back is Stay (or OK), with the session still running.
  *
  * The session runs on behind the dialog, and the tick polls here (the dialog doesn't edit), so
  * what it shows can go stale: the GBA saves, or walks out and the tick stops the session. So
- * every button that ends decides again from a fresh status (fix round 1) and does what that
- * says, never what the dialog showed: stop and free, ask the GBA to walk out, show the saving or
- * pickup dialog, or, once the session has stopped, just the menu (which frees it). */
+ * every button that ends decides again from a fresh status and does what that says, never what
+ * the dialog showed: stop and free, ask the GBA to walk out, show the saving or pickup dialog, or,
+ * once the session has stopped, just the menu (which frees it). */
 
 #define GEN3_TRADE_END_STOP_LINK 0x100u
 #define GEN3_TRADE_END_ACTION    0xFFu
@@ -91,8 +91,8 @@ void gen3_trade_end_open(PokemonFap* pokemon_fap, Gen3TradeEndAction action, boo
     scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3TradeEnd);
 }
 
-/* End, Retry or End anyway: decide again now and do that (fix round 1). end_anyway: the user
- * chose to lose a Pokemon still waiting for the SD card. */
+/* End, Retry or End anyway: decide again now and do that. end_anyway: the user chose to lose a
+ * Pokemon still waiting for the SD card. */
 static void gen3_trade_end_go_on(PokemonFap* pokemon_fap, bool end_anyway) {
     SceneManager* scene_manager = pokemon_fap->scene_manager;
     const uint32_t stop_link =

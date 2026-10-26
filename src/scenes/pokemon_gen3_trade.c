@@ -16,7 +16,7 @@
 /* The Gen III trade screen (Gen3Trade) and the app tick that runs a trade session behind every
  * Gen III scene (D1, D6). The session and the trade view are allocated together by Gen III ->
  * Trade, and freed together by the Gen III menu once no trade session runs. The sync is allocated
- * by the first Trade and kept until the app exits, so the block on a traded-away Pokemon (G15)
+ * by the first Trade and kept until the app exits, so the block on a traded-away Pokemon (O2)
  * outlives the session. */
 
 /* Ticks between two tries to reopen the bulk file for a NoData pickup retry (O2): 1 s. A corrupt
@@ -26,24 +26,25 @@
  * (TIM2 busy): 1 s */
 #define GEN3_TRADE_START_RETRY_TICKS 10
 
-/* R9: no app stack local over 128 bytes. These are the tick's buffers. */
+/* No app stack local over 128 bytes, and a Gen3ClubStatus never is one. These are the tick's
+ * buffers. */
 static uint8_t gen3_trade_received[GEN3_PARTY_SIZE];
 static Gen3TradeViewState gen3_trade_view_state;
 /* The status the guide is given: the session's, with last_result latched (below) */
 static Gen3ClubStatus gen3_trade_guide_status;
 
-/* T10 review (b): a "Link lost ..." row is about the trade that just ended. Once the GBA has
- * linked again after it, the row is stale: the guide gets last_result None from then on, until
- * the next trade is pending, the club's last_result changes, or the session starts again. */
+/* A "Link lost ..." row is about the trade that just ended. Once the GBA has linked again after
+ * it, the row is stale: the guide gets last_result None from then on, until the next trade is
+ * pending, the club's last_result changes, or the session starts again. */
 static bool gen3_trade_result_latched;
 static Gen3TradeResult gen3_trade_result_latched_value; /* the last_result latched */
 static uint8_t gen3_trade_bulk_wait;
 static uint8_t gen3_trade_start_wait;
 
 /* The current scene can change the editor's Pokemon: an editor scene, or Load. The sync holds the
- * offer meanwhile (D6), and the club's editing flag stays set (O1, G14). The trade screen, the
- * menu and the dialogs over them that neither change nor show the Pokemon (T12 review (b)) don't
- * edit; Save .pk3 does. */
+ * offer meanwhile (D6), and the club's editing flag stays set (O1). The trade screen, the menu
+ * and the dialogs over them that neither change nor show the Pokemon don't edit, so the trade
+ * screen stays up to date behind them; Save .pk3 does edit (it holds the sync). */
 static bool gen3_trade_editing(PokemonFap* pokemon_fap) {
     switch(scene_manager_get_current_scene(pokemon_fap->scene_manager)) {
     case PokemonSceneGen3Trade:
@@ -57,9 +58,9 @@ static bool gen3_trade_editing(PokemonFap* pokemon_fap) {
     }
 }
 
-/* A new club (a start) or none (a stop): the sync and the latch begin again (T10 review (d),
- * T11 review (g)). A restarted club has no offer and trades_done 0, which the sync's reset rule
- * alone doesn't make it publish again. The block on a traded-away Pokemon stays (G15). */
+/* A new club (a start) or none (a stop): the sync and the latch begin again. A restarted club
+ * has no offer and trades_done 0, which the sync's reset rule alone doesn't make it publish
+ * again. The block on a traded-away Pokemon stays (O2). */
 static void gen3_trade_reset(PokemonFap* pokemon_fap) {
     gen3_trade_sync_restart(pokemon_fap->gen3_trade_sync);
     gen3_trade_result_latched = false;
@@ -136,17 +137,20 @@ void gen3_trade_tick(PokemonFap* pokemon_fap) {
 
     /* 4. End: the GBA has walked out and closed the link (D9). left is sticky and says nothing
      * about a trade: it only ends the session, and only once the sync has every trade's Pokemon
-     * (T12 review). Save .pk3, Gen3Result and the editor's dialogs hold the sync without the
-     * club's editing flag, so a trade can finish there; stopping now would free the club with its
-     * received Pokemon, which the GBA has saved as traded. That Pokemon is picked up on the first
-     * tick back on a scene that doesn't edit, and the session stops then. Meanwhile the guide
-     * shows "Link ended". A NoData pickup keeps it up: End trade offers Retry / End anyway. */
+     * and no GBA is linked (gen3_trade_left_stop). Save .pk3, Gen3Result and the editor's
+     * dialogs hold the sync without the club's editing flag, so a trade can finish there;
+     * stopping now would free the club with its received Pokemon, which the GBA has saved as
+     * traded. That Pokemon is picked up on the first tick back on a scene that doesn't edit,
+     * and the session stops then. Meanwhile the guide shows "Link ended" (or the outcome of a
+     * trade lost in the GBA's save). A NoData pickup keeps it up: End trade offers Retry / End
+     * anyway. A GBA that walks back in meanwhile can't trade (the club no longer sits), and
+     * keeps it up until it has gone again: a stop in its link save would break R6. */
     if(trading && gen3_trade_left_stop(st, gen3_trade_sync_settled(sync, received_count))) {
         gen3_session_stop(s); /* the last status stays readable */
         gen3_trade_reset(pokemon_fap);
         pokemon_fap->gen3_trade_ended = true;
         trading = false;
-        /* T12 review (d): End trade goes from the menu shown, and Link Test comes back */
+        /* End trade goes from the menu shown, and Link Test comes back */
         if(scene_manager_get_current_scene(pokemon_fap->scene_manager) == PokemonSceneGen3Menu) {
             gen3_menu_rebuild(pokemon_fap);
         }
@@ -186,12 +190,12 @@ bool gen3_trade_begin_edit(PokemonFap* pokemon_fap) {
     return gen3_session_set_editing(s, true, sync->trades_seen);
 }
 
-/* T12 review (a): a running trade session gets one tick first. From a scene that doesn't edit,
- * its poll picks up a finished trade's Pokemon (and the tick may end the session itself, once
- * the GBA has left). Then *st gets the status, and only after it the received count is read: a
- * trade that ends after that status (its link lost after the sync-2 answer: Assumed, at Waiting)
- * is in the count, so the status never shows Waiting with its Pokemon unseen. Returns
- * gen3_trade_sync_settled, or true without a running trade session. */
+/* A running trade session gets one tick first. From a scene that doesn't edit, its poll picks up a
+ * finished trade's Pokemon (and the tick may end the session itself, once the GBA has left). Then
+ * *st gets the status, and only after it the received count is read: a trade that ends after that
+ * status (its link lost after the sync-2 answer: Assumed, at Waiting) is in the count, so the
+ * status never shows Waiting with its Pokemon unseen. Returns gen3_trade_sync_settled, or true
+ * without a running trade session. */
 static bool gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** st) {
     Gen3Session* s = pokemon_fap->gen3_session;
     Gen3TradeSync* sync = pokemon_fap->gen3_trade_sync;
@@ -217,8 +221,8 @@ Gen3TradeEndAction gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link
 void pokemon_scene_gen3_trade_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
 
-    /* Fix round 1: never switch to a trade view that is gone (the menu freed it with its
-     * session); the menu instead */
+    /* Never switch to a trade view that is gone (the menu freed it with its session): a crash.
+     * The menu instead */
     if(!pokemon_fap->gen3_trade_view || !pokemon_fap->gen3_session) {
         const bool found = scene_manager_search_and_switch_to_previous_scene(
             pokemon_fap->scene_manager, PokemonSceneGen3Menu);

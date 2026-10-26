@@ -15,7 +15,7 @@
  * (PokemonSceneNum), which applies the GBA player's OT in place. The spaces after each label line
  * the values up at the same pixel column in the submenu font, as in pokemon_gen.c. */
 
-/* The "Shiny lost" notice from "OT: use <NAME>" is up over this menu (R4) */
+/* The "Shiny lost" notice from "OT: use <NAME>" is up over this menu (D7) */
 static bool gen3_edit_notice_up = false;
 
 /* name_buf holds the species name too */
@@ -202,7 +202,7 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
         alias = PokemonSceneGen3Preset;
         break;
     case PokemonSceneNum:
-        /* "OT: use <NAME>" (D7, R4): the row goes once applied; keep the highlight next to it */
+        /* "OT: use <NAME>" (D7): the row goes once applied; keep the highlight next to it */
         scene_manager_set_scene_state(
             pokemon_fap->scene_manager, PokemonSceneGen3Edit, PokemonSceneGen3Sid);
         if(gen3_edit_use_trainer_ot(pokemon_fap->gen3_editor) == Gen3UseTrainerShinyLost) {

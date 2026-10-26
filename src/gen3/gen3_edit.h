@@ -13,7 +13,7 @@
  * Species names and default movesets come from the bulk file (gen3_data.h). A mutator that needs
  * one and can't read it fails closed: it returns false and the Pokemon is unchanged.
  *
- * pristine (plan 3 R4): true from a successful gen3_edit_init until a mutator (gen3_edit_load
+ * pristine (plan 3, D7): true from a successful gen3_edit_init until a mutator (gen3_edit_load
  * and gen3_edit_use_trainer_ot included) changes the Pokemon's bytes; nothing sets it again. A
  * call that refuses, fails or changes nothing keeps it, and gen3_edit_set_trainer never changes
  * it. */
@@ -53,7 +53,7 @@ typedef struct Gen3Editor {
     Gen3Preset preset;
     bool preset_applied; /* false after gen3_edit_load until a preset or species is chosen */
     Gen3Rng rng;
-    bool pristine; /* still the initial default (R4, see above) */
+    bool pristine; /* still the initial default (see above) */
     bool has_trainer;
     Gen3Trainer trainer; /* the GBA player, once has_trainer */
 } Gen3Editor;

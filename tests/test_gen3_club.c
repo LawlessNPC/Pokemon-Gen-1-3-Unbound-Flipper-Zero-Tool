@@ -293,8 +293,9 @@ TEST(test_club_checksum_error) {
 }
 
 TEST(test_club_checksum_error_mid_block) {
-    /* Review focus 3: a two-sided glitch while our trainer card streams. G errors and closes;
-     * the Disconnected reset flushes the rest of the card, so none of it goes to a gone GBA. */
+    /* Plan 1's Review Focus 3: a two-sided glitch while our trainer card streams. G errors and
+     * closes; the Disconnected reset flushes the rest of the card, so none of it goes to a gone
+     * GBA. */
     Bench b;
     bench_init(&b, GEN3_LINKTYPE_TRADE_SETUP);
     fake_ruby_open_link(&b.ruby);

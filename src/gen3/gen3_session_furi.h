@@ -11,7 +11,7 @@
  * club status. A "Gen3Log" thread drains the ring to APP_DATA_PATH("gen3_link.log") every 100 ms.
  * Every function here is an app-context call: use them from one thread, never from an ISR. The
  * app never touches the club itself: each hand-off call below runs its club call with every
- * interrupt masked (PRIMASK), copying at most 104 bytes and calling nothing that blocks (G5). */
+ * interrupt masked (PRIMASK), copying at most 104 bytes and calling nothing that blocks. */
 
 #define GEN3_TEST_TRAINER_NAME "FLIPPER"
 #define GEN3_TEST_TRAINER_TID  22222
@@ -59,9 +59,10 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool
  * status shows the change from the next frame on. ---- */
 
 /* gen3_club_set_offer: offer is the Flipper's one party Pokemon (game form, GEN3_PARTY_SIZE
- * bytes), or NULL for no offer. Copied unchecked (G6): publish only a Pokemon that passes
- * gen3_trade_offer_check. false and nothing changed if trades_seen isn't the club's trades_done
- * (D6), or if the session isn't running (the next start's club wouldn't have it). */
+ * bytes), or NULL for no offer. Copied unchecked, since a PRIMASK section may not decrypt: publish
+ * only a Pokemon that passes gen3_trade_offer_check (gen3_trade_sync_poll does). false and nothing
+ * changed if trades_seen isn't the club's trades_done (D6), or if the session isn't running (the
+ * next start's club wouldn't have it). */
 bool gen3_session_set_offer(Gen3Session* s, const uint8_t* offer, uint32_t trades_seen);
 /* gen3_club_get_received: the latest finalized trade's Pokemon (game form; zeros before any) and
  * trades_done (may be NULL). After a stop: the stopped run's; before the first start: zeros, 0. */

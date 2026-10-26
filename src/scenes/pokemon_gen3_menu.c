@@ -44,8 +44,8 @@ static void gen3_menu_item_callback(void* context, uint32_t index) {
  * (Back while not in the Cable Club, or "Stop") comes back to this menu, so it ends here. A trade
  * session and its trade screen live on behind every Gen III scene while it runs (D1), and end
  * here too once it doesn't (not started yet, or stopped: the GBA left, "Stop link?", End anyway),
- * or with End trade or Back while no GBA is linked (T13). The sync stays until the app exits,
- * restarted (it keeps the block on a traded-away Pokemon, G15). Call with neither view shown,
+ * or with End trade or Back while no GBA is linked (D9). The sync stays until the app exits,
+ * restarted (it keeps the block on a traded-away Pokemon, O2). Call with neither view shown,
  * and for a running trade session only on gen3_trade_end_decide's Stop (the sync has
  * every received Pokemon). */
 static void gen3_menu_end_session(PokemonFap* pokemon_fap) {
@@ -264,10 +264,10 @@ static void gen3_menu_open_editor(PokemonFap* pokemon_fap, uint32_t scene) {
     }
 }
 
-/* End trade, or Back, while a trade session may run (T13). With the GBA linked or saving, or a
- * received Pokemon waiting for the SD card, Gen3TradeEnd opens and this returns true. false:
- * stop and free the session now (Stop: no GBA is linked and the editor has every received
- * Pokemon), or it has stopped already (Menu). */
+/* End trade, or Back, while a trade session may run (D9, D10). With the GBA linked or saving, or a
+ * received Pokemon waiting for the SD card, Gen3TradeEnd opens and this returns true. false: stop
+ * and free the session now (Stop: no GBA is linked and the editor has every received Pokemon), or
+ * it has stopped already (Menu). */
 static bool gen3_menu_end_dialog(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_session) return false;
     const Gen3TradeEndAction action = gen3_trade_end_decide(pokemon_fap, false);
@@ -285,8 +285,8 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
      * Test closed may arrive here too; ignore it. */
     if(event.type == SceneManagerEventTypeCustom) {
         if(event.event == PokemonSceneGen3LinkTest) {
-            /* A trade session the tick stopped while this menu was shown is still here (T13):
-             * the Link Test makes its own */
+            /* A trade session the tick stopped while this menu was shown is still here: the
+             * Link Test makes its own */
             if(!gen3_session_trading(pokemon_fap->gen3_session)) {
                 gen3_menu_end_session(pokemon_fap);
                 scene_manager_next_scene(pokemon_fap->scene_manager, event.event);

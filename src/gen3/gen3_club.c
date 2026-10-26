@@ -295,7 +295,8 @@ static void leave_step(Gen3Club* club) {
     club->exit_sent = send_cmd(club, CMD_SEND_HELD_KEYS, KEY_CODE_EXIT_ROOM);
 }
 
-/* D9 (T8 ruling): the GBA's link is over for good, by its exit, a power-off or a pulled cable. */
+/* D9: the GBA's link is over for good, by its exit, a power-off or a pulled cable. Any of them
+ * ends the leave: there is no GBA left to walk out. */
 static void finish_leave(Gen3Club* club) {
     if(!club->leaving) return;
     club->leaving = false;
@@ -332,8 +333,8 @@ static void start_round(Gen3Club* club, uint8_t round) {
         memset(club->party_mon, 0, sizeof(club->party_mon));
     }
     /* R8: Ruby counts the Flipper's party up to the first species 0. The offer has a species
-     * (G6); without one the GBA's partner column is empty. The hasSpecies bit is required too
-     * (fix round 1): conservative, Ruby counts by the species alone. */
+     * (it passed gen3_trade_offer_check); without one the GBA's partner column is empty. The
+     * hasSpecies bit is required too: conservative, Ruby counts by the species alone. */
     if(round == 1) {
         club->party_shown = club->has_offer &&
                             (club->party_mon[PKM_FLAGS_OFF] & PKM_HAS_SPECIES) != 0;
@@ -408,7 +409,7 @@ static bool block_filed(const Gen3Club* club) {
 }
 
 /* §B3.3: the GBA's 20-byte blocks in the trade menu. menu_step answers each once. Only a block it
- * files, or a chunk of one, restarts the arbiter's delay (M1): the R-button debug block 0000
+ * files, or a chunk of one, restarts the arbiter's delay: the R-button debug block 0000
  * doesn't, nor a block in Starting or Leaving, where the GBA is on its way out. */
 static void on_menu_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     const Gen3BlockRxResult r = gen3_block_rx_feed(&club->block_rx, cmd);
@@ -424,12 +425,12 @@ static void on_menu_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     club->reply_due = true;
 }
 
-/* M2: Ruby sends a block's chunks on consecutive frames, the first one
- * GEN3_CLUB_BLOCK_HEADER_BURSTS after the header (LinkCB_BlockSendBegin). A block that stops
- * short, as with a glitched size, is dropped on the GEN3_CLUB_BLOCK_GAP_BURSTS-th burst in a row
- * without a chunk for it (GEN3_CLUB_BLOCK_HEADER_BURSTS more before the first chunk), so it can't
- * hold the arbiter; a chunk held back by up to GEN3_CLUB_BLOCK_GAP_BURSTS - 1 GBA lag frames still
- * counts. No full gen3_block_rx_reset (a 262-B memset) in the ISR: a later header restarts it. */
+/* Ruby sends a block's chunks on consecutive frames, the first one GEN3_CLUB_BLOCK_HEADER_BURSTS
+ * after the header (LinkCB_BlockSendBegin). A block that stops short, as with a glitched size, is
+ * dropped on the GEN3_CLUB_BLOCK_GAP_BURSTS-th burst in a row without a chunk for it
+ * (GEN3_CLUB_BLOCK_HEADER_BURSTS more before the first chunk), so it can't hold the arbiter; a
+ * chunk held back by up to GEN3_CLUB_BLOCK_GAP_BURSTS - 1 GBA lag frames still counts. No full
+ * gen3_block_rx_reset (a 262-B memset) in the ISR: a later header restarts it. */
 static void drop_stopped_block(Gen3Club* club) {
     if(!club->block_rx.active) return;
     const uint8_t limit =
@@ -445,7 +446,7 @@ static void drop_stopped_block(Gen3Club* club) {
  * than the one round 1 showed (party_mon), a checksum error counted in this 0x1122 session (a
  * block of the GBA's may be wrong in the club's copy), the app is editing, or a leave is asked.
  * Then every GBA block gets EEBB, never DDDD or CCDD (save safety, §B3.4), and with nothing
- * pending the GBA gets an unsolicited one. A 100-byte compare, no copy (G4). */
+ * pending the GBA gets an unsolicited one. A 100-byte compare, no copy (R2). */
 static bool offer_stale(const Gen3Club* club) {
     return !club->has_offer || club->tainted || club->editing || club->leaving ||
            memcmp(club->offer, club->party_mon, sizeof(club->offer)) != 0;
@@ -462,7 +463,7 @@ static uint16_t leave_menu(Gen3Club* club) {
 
 /* §B3.4 and D4, decided as the reply goes out: the code to send for the GBA's block, and the
  * arbiter's new state. Every reply's arg is 0 (the Flipper offers its slot 0). AABB is the one
- * decrypt of the frame (G4); an AABB while Offered is the GBA's new pick and is decided afresh. */
+ * decrypt of the frame (R2); an AABB while Offered is the GBA's new pick and is decided afresh. */
 static uint16_t menu_reply(Gen3Club* club) {
     const uint16_t slot = club->gba_arg;
     if(offer_stale(club)) return leave_menu(club);
@@ -520,12 +521,12 @@ static void send_reply(Gen3Club* club, uint16_t code) {
 
 /* §B3.4, D4: at most one arbiter block, once the queue is empty, no GBA block it would file is
  * coming in, and GEN3_CLUB_REPLY_DELAY_BURSTS idle bursts have passed since the last chunk of the
- * GBA's latest filed block, or the end of round 5 (M1). It is the reply to the GBA's block; else,
- * with nothing pending (Idle: not while the GBA confirms after a DDDD) and the offer stale, an
+ * GBA's latest filed block, or the end of round 5. It is the reply to the GBA's block; else, with
+ * nothing pending (Idle: not while the GBA confirms after a DDDD) and the offer stale, an
  * unsolicited EEBB; else, in Leaving, the EEBB again once GEN3_CLUB_EEBB_RETRY_BURSTS have passed
- * without the GBA's 5FFF (lost in its summary screen, T2). The GBA's 5FFF ends Menu
- * (on_command). A block it doesn't file may cross ours: Ruby reads the Flipper's blocks in any
- * menu state (§B3.3), and its own block is out long before an EEBB's fade ends (§B3.4). */
+ * without the GBA's 5FFF (lost in its summary screen, link-protocol-trade.md T2). The GBA's 5FFF
+ * ends Menu (on_command). A block it doesn't file may cross ours: Ruby reads the Flipper's blocks
+ * in any menu state (§B3.3), and its own block is out long before an EEBB's fade ends (§B3.4). */
 static void menu_step(Gen3Club* club) {
     if(club->phase != Gen3ClubPhaseMenu) return;
     const bool leaving = club->menu == Gen3ClubMenuLeaving;
@@ -580,7 +581,7 @@ static void on_save_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     if(club->save_syncs == GEN3_CLUB_SAVE_SYNCS) end_trade(club, Gen3TradeResultDone);
 }
 
-/* D5, §B5.3 (as ruled in fix round 1): the link is lost with a trade pending.
+/* D5, §B5.3: the link is lost with a trade pending.
  * - In the trade's own 0x1144 session, by the 2FFEs that reached the GBA: none, Canceled; sync 1
  *   only, RolledBack; sync 2 too, Assumed (it commits 1-2 frames after our answer). A sync-2
  *   answer still unconfirmed counts as not received.
@@ -730,8 +731,8 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
             on_link_lost(club);
             reset_session(club);
             club->phase = Gen3ClubPhaseWaiting; /* last_error is kept */
-            /* D9 (T8 ruling): unless the GBA is opening its next link (relink_due), its link is
-             * over: the leave is done */
+            /* D9: unless the GBA is opening its next link (relink_due), its link is over: the
+             * leave is done */
             club->relink_wait = 0;
             if(!club->relink_due) finish_leave(club);
             break;

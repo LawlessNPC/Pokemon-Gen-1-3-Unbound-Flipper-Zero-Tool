@@ -117,7 +117,8 @@
 /* The trade (§B4): sub_804B41C [CB2_LinkTrade] and sub_804DB84 [CB2_UpdateLinkTrade] */
 #define LINK_TRADE_DELAY_MAX 60 /* state 2 leaves once ++unk_00c0 > 60 */
 #define TRADE_PICS_FRAMES    25 /* states 5-12: both pictures, then the fade-in */
-#define TRADE_ANIM_FRAMES    600 /* sub_804C29C: not computed (T16); no traffic, no deadline */
+/* sub_804C29C's length isn't computed (link-protocol-trade.md T16); no traffic, no deadline */
+#define TRADE_ANIM_FRAMES    600
 #define TRADE_FRIENDSHIP     70 /* sub_804BA94 [TradeMons]: the received Pokemon's, if no egg */
 #define LP_NATIONAL_DEX      0x8000 /* sub_804BA64: the partner's lp_field_2 */
 
@@ -162,7 +163,8 @@
 #define SAVE_SYNC3_DELAY   60 /* state 5 leaves once ++unk_00c0 > 60 */
 #define SAVE_FADE_FRAMES   17 /* BeginNormalPaletteFade(0xFFFFFFFF, 0, 0, 16, 0) */
 #define SAVE_BGM_FRAMES    20 /* FadeOutBGM(3) until IsBGMStopped (not computed) */
-#define SECTOR_STALL       2 /* default main-loop stall per sector (T4: not measured) */
+/* Default main-loop stall per sector (not measured: link-protocol-trade.md T4) */
+#define SECTOR_STALL       2
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -1346,7 +1348,8 @@ static void trade_menu_update(FakeRuby* g) {
 /* callback2 while the summary screen shows (ShowPokemonSummaryScreen leaves callback1 alone, so
  * run_trade_menu still handles the Flipper's blocks). Closing it runs sub_80484F4
  * [CB2_ReturnToTradeMenu], whose state 0 sets unk_007b = 0: whatever a block set meanwhile is
- * lost, an EEBB's fade included (§B3.4, T2). The menu's rebuild isn't timed. */
+ * lost, an EEBB's fade included (§B3.4; link-protocol-trade.md T2). The menu's rebuild isn't
+ * timed. */
 static void run_summary(FakeRuby* g) {
     if(!g->summary_close_pending) return;
     g->summary_close_pending = false;
@@ -1563,7 +1566,7 @@ static void set_link_standby_callback(FakeRuby* g) {
     g->callback = FakeRubyCbStandby;
 }
 
-/* One flash write: IRQs stay on, the main loop stalls (§B5.2, T4). */
+/* One flash write: IRQs stay on, the main loop stalls (§B5.2; link-protocol-trade.md T4). */
 static void write_sector(FakeRuby* g) {
     g->save_dirty = true;
     g->stall = g->sector_stall;

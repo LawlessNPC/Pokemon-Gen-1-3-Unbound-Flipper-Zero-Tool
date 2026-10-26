@@ -45,11 +45,11 @@ typedef struct Gen3TradeSync {
 
 void gen3_trade_sync_init(Gen3TradeSync* sync);
 
-/* Every session stop or start (T12 review, G15 across sessions): as gen3_trade_sync_init, for a
- * fresh club (trades_seen 0, no offer taken, no trainer known), but the block on the traded-away
- * Pokemon stays: gone_valid, gone_pid, gone_ot_id and a BadData pickup_fail. A NoData retry still
- * waiting becomes BadData: its Pokemon went with the old club. Without a block, the same bytes as
- * gen3_trade_sync_init. */
+/* Every session stop or start: as gen3_trade_sync_init, for a fresh club (trades_seen 0, no offer
+ * taken, no trainer known), but the block on the traded-away Pokemon stays (O2: it is never
+ * offered again, also across sessions): gone_valid, gone_pid, gone_ot_id and a BadData
+ * pickup_fail. A NoData retry still waiting becomes BadData: its Pokemon went with the old club.
+ * Without a block, the same bytes as gen3_trade_sync_init. */
 void gen3_trade_sync_restart(Gen3TradeSync* sync);
 
 /* gen3_trade_sync_poll's result bits */
@@ -61,8 +61,9 @@ enum {
 };
 
 /* App thread, between UI events. received/received_count come from one
- * gen3_session_get_received. editing (the current scene is neither Gen3Trade nor Gen3Menu):
- * return 0 and do nothing (D6). Else, in order:
+ * gen3_session_get_received. editing (the current scene can change the Pokemon: any scene but
+ * Gen3Trade, Gen3Menu and the dialogs over them that don't edit, Gen3TradeEnd, Gen3NatDex and
+ * Gen3LinkExit): return 0 and do nothing (D6). Else, in order:
  * 1. Pickup, on a new trade (received_count > trades_seen) or to retry a NoData pickup.
  *    A new trade first notes the editor's PID and OT ID (gone_*) and sets trades_seen =
  *    received_count, whatever follows. Then gen3_pkm_decrypt and gen3_edit_load: PickedUp, with
@@ -74,9 +75,9 @@ enum {
  *    a set_trainer that changes the editor's PID or OT ID moves gone_* with it.
  * 3. A BadData pickup is cleared once the editor's PID or OT ID differs from gone_*. Then
  *    offer_refuse = gen3_trade_offer_check(&ed->pkm), offer_valid = offer_refuse None and no
- *    failed pickup, offer = the game form when valid (G6: only a Pokemon that passes the check is
- *    ever published). Offer if nothing was taken yet, or (offer_valid, offer) differs from what
- *    was taken. */
+ *    failed pickup, offer = the game form when valid (only a Pokemon that passes the check is
+ *    ever published: the club doesn't check, as it may not decrypt in a PRIMASK section). Offer
+ *    if nothing was taken yet, or (offer_valid, offer) differs from what was taken. */
 unsigned gen3_trade_sync_poll(
     Gen3TradeSync* sync,
     Gen3Editor* ed,
@@ -87,20 +88,20 @@ unsigned gen3_trade_sync_poll(
 /* The session accepted the offer (or "none"): gen3_session_set_offer returned true. */
 void gen3_trade_sync_offer_taken(Gen3TradeSync* sync);
 
-/* ---- Ending a trade session (T13: D1, D9, D10, R6) ---- */
+/* ---- Ending a trade session (D1, D9, D10, R6) ---- */
 
-/* The sync has every Pokemon the club received (received_count from gen3_session_get_received):
- * it is trades_seen, and no NoData pickup waits for a retry. A trade session may stop for good
- * only then, since its received Pokemon goes with the club (T12 review). A BadData pickup is
- * final. Poll first from a scene that doesn't edit, so a finished trade is seen. */
+/* The sync has every Pokemon the club received (received_count from gen3_session_get_received): it
+ * is trades_seen, and no NoData pickup waits for a retry. A trade session may stop for good only
+ * then, since its received Pokemon goes with the club. A BadData pickup is final. Poll first from
+ * a scene that doesn't edit, so a finished trade is seen. */
 bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count);
 
-/* R6 (as refined by the T6 review): the link may stop now. Not in the save window (D10), nor
- * while a trade is pending with the GBA linked. "Linked" here is a phase other than Waiting, or
- * Waiting with relinking (a relink's gap, T13 fix round 2). A pending trade whose 0x1144 relink
- * never came (the club's relink wait ran out) may stop: the GBA writes nothing before sync 1
- * (D1). left and leaving aren't read (left is no "trade resolved"). A Link Test session sets
- * neither flag. */
+/* R6: the link may stop now. Not in the save window (D10), nor while a trade is pending with the
+ * GBA linked. "Linked" here is a phase other than Waiting, or Waiting with relinking (a relink's
+ * gap: the GBA opens its next link within about 20 frames, and a stop then is a link error on it).
+ * A pending trade whose 0x1144 relink never came (the club's relink wait ran out) may stop: the
+ * GBA writes nothing before sync 1 (D1). left and leaving aren't read (left is no "trade
+ * resolved"). A Link Test session sets neither flag. */
 bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
 
 /* The app tick's own stop, once the GBA has walked out (left, D9): left, settled
@@ -111,7 +112,7 @@ bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
 bool gen3_trade_left_stop(const Gen3ClubStatus* st, bool settled);
 
 /* What ending a trade session takes now. Decided again from a fresh status on every button that
- * ends (fix round 1), never from what a dialog showed when it opened. */
+ * ends, never from what a dialog showed when it opened: the link may have moved on since. */
 typedef enum {
     Gen3TradeEndStop, /* stop and free it now: R6 allows it, and nothing is left to pick up */
     Gen3TradeEndSaving, /* the GBA is saving (D10): "The GBA is saving", OK only */

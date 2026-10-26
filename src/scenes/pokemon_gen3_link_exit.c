@@ -49,9 +49,10 @@ bool pokemon_scene_gen3_link_exit_on_event(void* context, SceneManagerEvent even
             /* Stay: back to the Link Test or the trade screen, whose session never stopped */
             consumed = scene_manager_previous_scene(pokemon_fap->scene_manager);
         } else if(event.event == DialogExResultRight) {
-            /* Decided now, from a fresh status (fix round 1). A trade session's received
-             * Pokemon is picked up first (T12 review (a)); a Link Test session is settled and
-             * sets neither flag R6 reads, so it always gets Stop. */
+            /* Decided now, from a fresh status: the link may have moved on while the dialog
+             * was up. A trade session's received Pokemon is picked up first, so no stop frees
+             * the club with it; a Link Test session is settled and sets neither flag R6
+             * reads, so it always gets Stop. */
             const Gen3TradeEndAction action = gen3_trade_end_decide(pokemon_fap, true);
             if(action == Gen3TradeEndSaving || action == Gen3TradeEndAsk) {
                 /* R6: the GBA is saving, or a trade is under way with it linked: as Stay */
@@ -59,8 +60,8 @@ bool pokemon_scene_gen3_link_exit_on_event(void* context, SceneManagerEvent even
             } else {
                 if(action == Gen3TradeEndStop) {
                     /* The Gen III menu frees the stopped session. For a trade session, ended
-                     * keeps the trade tick from starting it again meanwhile (T12 review (c));
-                     * the next Trade clears it. */
+                     * keeps the trade tick from starting it again meanwhile; the next Trade
+                     * clears it. */
                     gen3_session_stop(pokemon_fap->gen3_session);
                     pokemon_fap->gen3_trade_ended = true;
                 }
@@ -70,8 +71,8 @@ bool pokemon_scene_gen3_link_exit_on_event(void* context, SceneManagerEvent even
                 /* NOTE: The above should never fail */
                 furi_check(consumed);
                 if(action == Gen3TradeEndPickup) {
-                    /* T12 review (f): a received Pokemon waits for the SD card; never stop
-                     * silently. Retry / End anyway, over the menu. */
+                    /* A received Pokemon waits for the SD card: never stop silently, losing
+                     * it. Retry / End anyway, over the menu. */
                     gen3_trade_end_open(pokemon_fap, action, true);
                 }
             }

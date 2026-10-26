@@ -13,8 +13,8 @@ _Static_assert(GEN3_RUBY_ITEMS_COUNT == 349 && GEN3_ITEM_ENIGMA_BERRY == 175, "D
  * 100-byte imports, direct gen3_edit_load calls, GBA players (D7) and bulk reads that fail at
  * random after a good open; now and then a new editor replaces the old one. After every step the
  * editor's Pokemon must be game-valid (fuzz_valid), a call that refuses or fails must leave the
- * editor exactly as it was, and pristine must follow R4: cleared by a call that changed the
- * Pokemon's bytes, kept otherwise, and kept by set_trainer. The seed and step count are fixed,
+ * editor exactly as it was, and pristine must follow gen3_edit.h: cleared by a call that changed
+ * the Pokemon's bytes, kept otherwise, and kept by set_trainer. The seed and step count are fixed,
  * so a failure reproduces; the step number is printed with it. Other seeds can be tried with
  * -DFUZZ_SEED=... -DFUZZ_STEPS=... (the coverage counts at the end are for this seed). */
 
@@ -691,12 +691,12 @@ static bool step(Gen3Editor* ed) {
     }
     }
 
-    /* R4 */
+    /* pristine (gen3_edit.h) */
     bool same_pkm = memcmp(ed->pkm.raw, before.pkm.raw, GEN3_PARTY_SIZE) == 0;
     if(set_trainer)
         CHECK(ed->pristine == before.pristine, "set_trainer changed pristine");
     else if(!renewed)
-        CHECK(ed->pristine == (before.pristine && same_pkm), "pristine (R4)");
+        CHECK(ed->pristine == (before.pristine && same_pkm), "pristine");
 
     if(keep) {
         CHECK(editor_eq(ed, &before), "a refused, failed or no-op call changed the editor");

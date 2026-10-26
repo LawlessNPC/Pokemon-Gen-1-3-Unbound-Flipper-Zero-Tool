@@ -435,7 +435,7 @@ TEST(test_trade_exchange_empty_offer) {
 }
 
 TEST(test_trade_bad_offer_trips_fake) {
-    /* G6: the club trusts its offer; a bad checksum reaches Ruby as a Bad Egg. */
+    /* The club trusts its offer (the app checks it); a bad checksum reaches Ruby as a Bad Egg. */
     Bench b;
     uint8_t bad[GEN3_PARTY_SIZE];
     golden_game(bad);
@@ -1402,8 +1402,8 @@ static bool power_off_after_sync2_answer(Bench* b, uint32_t late) {
 }
 
 TEST(test_trade_sync2_answer_lost) {
-    /* D5 as ruled in fix round 1: the GBA goes before the burst that would carry the club's
-     * sync-2 answer. It never commits, so the club counts no trade: RolledBack */
+    /* D5: the GBA goes before the burst that would carry the club's sync-2 answer. It never
+     * commits, so the club counts no trade: RolledBack */
     Bench b;
     uint8_t got[GEN3_PARTY_SIZE];
     uint32_t done = 1;
@@ -1484,8 +1484,8 @@ static bool cut_sync2_answer_burst(Bench* b, uint8_t answered) {
 }
 
 TEST(test_trade_sync2_answer_partial_burst) {
-    /* Fix round 2: only a whole burst after the sync-2 answer confirms it. Cut after 1..8 of its
-     * 9 transfers, the GBA never took the answer: RolledBack. All 9: it committed, Assumed */
+    /* Only a whole burst after the sync-2 answer confirms it. Cut after 1..8 of its 9 transfers,
+     * the GBA never took the answer: RolledBack. All 9: it committed, Assumed */
     for(uint8_t answered = 1; answered <= MLINK_BURST_LEN; answered++) {
         Bench b;
         const bool whole = answered == MLINK_BURST_LEN;
@@ -1502,11 +1502,11 @@ TEST(test_trade_sync2_answer_partial_burst) {
 }
 
 TEST(test_trade_sync2_answer_checksum_error) {
-    /* Fix round 2: a burst that fails the checksum check doesn't confirm the sync-2 answer. One
-     * idle word of the GBA's sync-2 burst is glitched as the Flipper reads it, so the two sides'
-     * checksums of it differ: the GBA's check fails in the frame it takes our answer, and its
-     * CheckErrorStatus link-errors before callback2 can commit; the club reads that burst as a
-     * ChecksumError and keeps the answer unconfirmed */
+    /* A burst that fails the checksum check doesn't confirm the sync-2 answer. One idle word of
+     * the GBA's sync-2 burst is glitched as the Flipper reads it, so the two sides' checksums of
+     * it differ: the GBA's check fails in the frame it takes our answer, and its CheckErrorStatus
+     * link-errors before callback2 can commit; the club reads that burst as a ChecksumError and
+     * keeps the answer unconfirmed */
     Bench b;
     bench_init_trade(&b);
     ASSERT_TRUE(bench_reach_menu(&b));
@@ -1564,9 +1564,9 @@ TEST(test_trade_early_2ffe_trips_fake) {
 }
 
 TEST(test_trade_offer_without_species_bit) {
-    /* R8 (fix round 1): round 1 counts as showing a Pokemon only with its hasSpecies bit (byte
-     * 0x13 bit 1, outside the encryption). Without it the GBA's AABB gets DDEE, never DDDD.
-     * Conservative: Ruby counts by species and still shows this one. */
+    /* R8: round 1 counts as showing a Pokemon only with its hasSpecies bit (byte 0x13 bit 1,
+     * outside the encryption). Without it the GBA's AABB gets DDEE, never DDDD. Conservative: Ruby
+     * counts by species and still shows this one. */
     Bench b;
     uint8_t mon[GEN3_PARTY_SIZE];
     tm_make(252, 5, 21, mon);
@@ -1673,8 +1673,8 @@ TEST(test_trade_close_skipped_trips_fake) {
 }
 
 TEST(test_trade_lost_before_menu_close) {
-    /* Fix round 1: the GBA is lost after CCDD, before the club answered its 5FFF: it never left
-     * the trade menu, so the trade never began on it (Canceled) */
+    /* The GBA is lost after CCDD, before the club answered its 5FFF: it never left the trade menu,
+     * so the trade never began on it (Canceled) */
     Bench b;
     uint8_t offer[GEN3_PARTY_SIZE];
     tm_make(252, 5, 21, offer);
@@ -1755,9 +1755,9 @@ TEST(test_trade_sync2_answer_framing_error) {
 }
 
 TEST(test_trade_sync2_answer_still_queued) {
-    /* T6 carry-over, pinning the queue clause: a command queued ahead of the sync-2 answer keeps
-     * it in the queue through the next clean burst, so it is still unconfirmed; the GBA is gone
-     * before the answer leaves, never commits, and the club counts RolledBack */
+    /* The queue clause: a command queued ahead of the sync-2 answer keeps it in the queue through
+     * the next clean burst, so it is still unconfirmed; the GBA is gone before the answer leaves,
+     * never commits, and the club counts RolledBack */
     Bench b;
     MlinkTx tx;
     bench_init_trade(&b);
@@ -2003,8 +2003,9 @@ TEST(test_trade_two_round_trips) {
 }
 
 TEST(test_trade_eebb_retry_after_summary) {
-    /* Review Focus 4, §B3.4 (T2): an EEBB that arrives while the GBA shows a summary is lost; the
-     * club resends it once GEN3_CLUB_EEBB_RETRY_BURSTS pass without the GBA's 5FFF */
+    /* Review Focus 4, §B3.4 (link-protocol-trade.md T2): an EEBB that arrives while the GBA shows
+     * a summary is lost; the club resends it once GEN3_CLUB_EEBB_RETRY_BURSTS pass without the
+     * GBA's 5FFF */
     Bench b;
     uint8_t z[GEN3_PARTY_SIZE];
     make_z(z);
@@ -2144,8 +2145,8 @@ TEST(test_trade_empty_offer_eebb) {
 }
 
 TEST(test_trade_editing_sends_eebb) {
-    /* O1 (G14): the app opens the editor while the GBA browses. One EEBB; the GBA re-sits, but
-     * the Flipper doesn't sit until the edit is done, then joins it (R5) */
+    /* O1: the app opens the editor while the GBA browses. One EEBB; the GBA re-sits, but the
+     * Flipper doesn't sit until the edit is done, then joins it (R5) */
     Bench b;
     uint8_t offer[GEN3_PARTY_SIZE];
     tm_make(252, 5, 21, offer); /* bench_init_trade's offer */
@@ -2226,8 +2227,8 @@ TEST(test_trade_editing_blocks_ccdd) {
         ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
     }
     {
-        /* M4: editing begins once the AABB is in and filed, before its reply: the reply, decided
-         * as it goes out, is the EEBB, with the usual delay */
+        /* Editing begins once the AABB is in and filed, before its reply: the reply, decided as it
+         * goes out, is the EEBB, with the usual delay */
         Bench b;
         uint16_t codes[8];
         bench_init_trade(&b);
@@ -2282,13 +2283,13 @@ TEST(test_trade_editing_refused_while_pending) {
     ASSERT_TRUE(!club_status(&b).editing);
 }
 
-/* ---- The arbiter and the GBA's other blocks; context that outlives a session (T7 review) ---- */
+/* ---- The arbiter and the GBA's other blocks; context that outlives a session ---- */
 
 TEST(test_trade_r_mash_eebb) {
-    /* M1: only a block the arbiter files (or a chunk of one) restarts its delay. The GBA player
-     * mashes R every 5 frames (the debug block 0000, §B3.2; each press overwrites the previous
-     * block's last chunk, as InitBlockSend's BuildSendCmd does on Ruby) while an EEBB is due: the
-     * EEBB still goes out */
+    /* Only a block the arbiter files (or a chunk of one) restarts its delay. The GBA player mashes
+     * R every 5 frames (the debug block 0000, §B3.2; each press overwrites the previous block's
+     * last chunk, as InitBlockSend's BuildSendCmd does on Ruby) while an EEBB is due: the EEBB
+     * still goes out */
     Bench b;
     uint8_t z[GEN3_PARTY_SIZE];
     uint32_t headers = 0;
@@ -2321,8 +2322,8 @@ TEST(test_trade_r_mash_eebb) {
 }
 
 TEST(test_trade_broken_block_released) {
-    /* M2 (fix round 1): a GBA block that stops short is dropped on the 6th burst in a row without
-     * a chunk for it (GEN3_CLUB_REPLY_DELAY_BURSTS), so it can't hold the arbiter */
+    /* A GBA block that stops short is dropped on the 6th burst in a row without a chunk for it
+     * (GEN3_CLUB_REPLY_DELAY_BURSTS), so it can't hold the arbiter */
     {
         /* A glitched size (0x34 > 28): the block can't complete. The Flipper counted a checksum
          * error, so the tainted session's EEBB goes out (a 52-byte block is never filed, so it
@@ -2369,8 +2370,8 @@ TEST(test_trade_broken_block_released) {
         ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
         const BenchBlock* eebb = trade_block(b.f_blocks, b.n_f_blocks, 0);
         ASSERT_TRUE(trade_block_is(eebb, GEN3_TRADE_BOTH_CANCEL, 0));
-        /* The chunk restarted the delay (M1) and the block held it until the drop, on the 6th
-         * burst after the chunk: then 6 idle bursts */
+        /* The chunk restarted the delay and the block held it until the drop, on the 6th burst
+         * after the chunk: then 6 idle bursts */
         ASSERT_TRUE(eebb->first_burst >= chunk + 13);
         ASSERT_TRUE(eebb->first_burst <= chunk + 14);
         ASSERT_EQ(club_status(&b).menu, Gen3ClubMenuLeaving);
@@ -2379,8 +2380,8 @@ TEST(test_trade_broken_block_released) {
 }
 
 TEST(test_trade_lagged_block_answered) {
-    /* M2 (fix round 1): a filed AABB whose second chunk comes after GBA lag frames (2, and 5,
-     * the most the drop allows) is still complete, and gets its one DDDD with the usual delay */
+    /* A filed AABB whose second chunk comes after GBA lag frames (2, and 5, the most the drop
+     * allows) is still complete, and gets its one DDDD with the usual delay */
     static const uint8_t lags[] = {2, 5};
     for(size_t i = 0; i < sizeof(lags); i++) {
         Bench b;
@@ -2406,8 +2407,8 @@ TEST(test_trade_lagged_block_answered) {
 }
 
 TEST(test_trade_resit_needed_survives_disconnect) {
-    /* M6: resit_needed is about the GBA's avatar, which a lost link doesn't move: it stays set
-     * through a Disconnected (only the GBA's CAFE 0016 or a 0x1133 linkup clears it) */
+    /* resit_needed is about the GBA's avatar, which a lost link doesn't move: it stays set through
+     * a Disconnected (only the GBA's CAFE 0016 or a 0x1133 linkup clears it) */
     Bench b;
     uint8_t z[GEN3_PARTY_SIZE];
     make_z(z);
@@ -2424,9 +2425,9 @@ TEST(test_trade_resit_needed_survives_disconnect) {
 }
 
 TEST(test_trade_return_due_consumed) {
-    /* M6: the 0x1111 the Flipper's EEBB announced is followed only by the GBA's next
-     * LinkPlayerBlock, whatever its type. Here the GBA restarts after the EEBB and walks in with
-     * 0x1133; a stray 0x1111 later gets 0x1133 and Error/Unexpected (D2) */
+    /* The 0x1111 the Flipper's EEBB announced is followed only by the GBA's next LinkPlayerBlock,
+     * whatever its type. Here the GBA restarts after the EEBB and walks in with 0x1133; a stray
+     * 0x1111 later gets 0x1133 and Error/Unexpected (D2) */
     Bench b;
     uint8_t z[GEN3_PARTY_SIZE];
     make_z(z);
@@ -2761,8 +2762,8 @@ TEST(test_leave_in_relink_gap) {
 }
 
 TEST(test_leave_gba_gone) {
-    /* D9 (T8 ruling): the link lost for good while leaving is left too: a power-off with the GBA
-     * linked at once, and in a relink's gap after GEN3_CLUB_RELINK_WAIT_FRAMES */
+    /* D9: the link lost for good while leaving is left too: a power-off with the GBA linked at
+     * once, and in a relink's gap after GEN3_CLUB_RELINK_WAIT_FRAMES */
     {
         Bench b;
         bench_init_trade(&b);
@@ -2816,10 +2817,10 @@ TEST(test_leave_gba_gone) {
 }
 
 TEST(test_status_relinking) {
-    /* T13 fix round 2: Waiting in a relink's gap is no "no GBA linked". status.relinking shows
-     * it from the club's 5FFF answer until the GBA connects again, or until the relink wait runs
-     * out (the GBA gone), and the end decisions read it: End trade asks, "Stop link?" is refused
-     * while the trade is pending, and both stop once the wait has run out (D1). */
+    /* Waiting in a relink's gap is no "no GBA linked". status.relinking shows it from the club's
+     * 5FFF answer until the GBA connects again, or until the relink wait runs out (the GBA gone),
+     * and the end decisions read it: End trade asks, "Stop link?" is refused while the trade is
+     * pending, and both stop once the wait has run out (D1). */
     {
         /* The 0x1144 gap after CCDD, the relink made */
         Bench b;
@@ -2915,10 +2916,10 @@ static bool guide_step(Bench* b, GuideWatch* w) {
     } while(0)
 
 TEST(test_guide_through_relinks) {
-    /* T14 (from the T13 fix round 2): every normal relink has a gap of about 20 frames in
-     * Waiting. The guide reads it as linked: "Linking...", or "Trading..." for the trade's own
-     * relink, never "Go to the Cable Club". Five gaps: the sit, the trade's 0x1144, the post-save
-     * 0x1122, the EEBB's 0x1111 back to the room, the re-sit. */
+    /* Every normal relink has a gap of about 20 frames in Waiting. The guide reads it as linked:
+     * "Linking...", or "Trading..." for the trade's own relink, never "Go to the Cable Club". Five
+     * gaps: the sit, the trade's 0x1144, the post-save 0x1122, the EEBB's 0x1111 back to the room,
+     * the re-sit. */
     Bench b;
     GuideWatch w = {0};
     uint8_t z[GEN3_PARTY_SIZE];
@@ -3042,7 +3043,7 @@ static bool leave_with_queued(Bench* b, bool gba_leaves, uint32_t request_at, Le
 }
 
 TEST(test_leave_queue_busy) {
-    /* D9 (fix round 1): the 0017 goes out only from an empty queue (leave_step) */
+    /* D9: the 0017 goes out only from an empty queue (leave_step) */
     {
         /* With a command queued in the frame it is due, it goes out exactly one burst later, and
          * only once */
@@ -3083,8 +3084,8 @@ TEST(test_leave_queue_busy) {
 }
 
 TEST(test_leave_during_linkup) {
-    /* D9 (fix round 1): asked in each Part A linkup phase, the leave waits: the linkup ends, the
-     * GBA walks in to the room, then the one 0017 walks it out, with no link error */
+    /* D9: asked in each Part A linkup phase, the leave waits: the linkup ends, the GBA walks in to
+     * the room, then the one 0017 walks it out, with no link error */
     static const Gen3ClubPhase phases[] = {
         Gen3ClubPhaseLinked,
         Gen3ClubPhasePlayers,

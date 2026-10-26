@@ -1341,9 +1341,8 @@ TEST(test_edit_trainer_pristine) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
-/* T9 review (b): the default's PID is shiny under the player's OT (sid = pid_hi ^ pid_lo ^ tid).
- * set_trainer finds a new PID with the same nature, gender and ability, and the editor stays
- * pristine. */
+/* The default's PID is shiny under the player's OT (sid = pid_hi ^ pid_lo ^ tid). set_trainer
+ * finds a new PID with the same nature, gender and ability, and the editor stays pristine. */
 TEST(test_edit_trainer_pristine_refinds_pid) {
     Gen3Editor ed;
     ASSERT_TRUE(gen3_edit_init(&ed, 7));
@@ -1371,8 +1370,8 @@ TEST(test_edit_trainer_pristine_refinds_pid) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
-/* T9 review (d): any non-zero gender is stored as 1, the OT gender bit's value, so the OT still
- * reads as the trainer's */
+/* Any non-zero gender is stored as 1, the OT gender bit's value, so the OT still reads as the
+ * trainer's */
 TEST(test_edit_trainer_gender_normalised) {
     Gen3Editor ed;
     ASSERT_TRUE(gen3_edit_init(&ed, 7));
@@ -1544,8 +1543,8 @@ TEST(test_edit_use_trainer_ot) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
-/* T9 review (c): the no-op guard. A loaded, hurt Pokemon that already carries the trainer's OT is
- * left exactly as it is (ed_commit would heal it). */
+/* The no-op guard. A loaded, hurt Pokemon that already carries the trainer's OT is left exactly as
+ * it is (ed_commit would heal it). */
 TEST(test_edit_use_trainer_ot_noop_keeps_hp) {
     Gen3Editor ed;
     ASSERT_TRUE(gen3_edit_init(&ed, 7));
@@ -1599,8 +1598,8 @@ TEST(test_edit_trainer_raw_bytes) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
-/* R4: pristine until a call changes the Pokemon's bytes. A call that refuses, fails or changes
- * nothing keeps it; set_trainer keeps it although it rewrites the OT. */
+/* Pristine (D7, gen3_edit.h) until a call changes the Pokemon's bytes. A call that refuses, fails
+ * or changes nothing keeps it; set_trainer keeps it although it rewrites the OT. */
 TEST(test_edit_pristine_flags) {
     Gen3Editor ed;
     Gen3Pkm golden, egg;
