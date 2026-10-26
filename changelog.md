@@ -5,6 +5,12 @@
 - Add `Gen III  (GBA non-JPN)` menu with a Link Test: the Flipper joins Pokemon Ruby's Cable Club Trade Center as a second player and logs the link to `apps_data/pokemon/gen3_link.log`
 - See `docs/gen3/hardware-test-1.md`
 
+**Gen III Pokemon editor and .pk3 load/save (experimental)**
+- Add `Edit Pokemon` to the Gen III menu: species, nickname, level, EV/IV preset, nature, ability, shininess, gender, Unown form, moves, held item, Pokerus, ball and OT
+- Add `Load .pk3` and `Save .pk3` for PKHeX `.pk3` files in `apps_data/pokemon/gen3/`
+- `files/gen3_bulk.bin` (species names and learnsets) ships as an app asset; if the editor says `Data missing`, delete `apps_assets/pokemon` on the SD card and reopen
+- See `docs/gen3/editor-test.md`
+
 ## Version 2.3
 - Fix potential bug in copying incoming trade data to the live working struct
 

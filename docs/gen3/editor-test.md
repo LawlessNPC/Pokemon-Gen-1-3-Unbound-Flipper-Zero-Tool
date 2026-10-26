@@ -37,6 +37,8 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 5. **Nickname kept.** Set the nickname to `X`, then pick TREECKO again → the nickname is still `X`.
 6. **Unown.** Pick UNOWN → an `Unown Form` row appears. Set `?` → the row shows `?`.
 7. **Stress.** Switch #251 <-> #252 <-> #001 20 times → no crash.
+8. **Back.** Open the `Pokemon` row, move to another species, press Back → the Pokemon is unchanged.
+9. **Same species.** Open the `Pokemon` row and press OK on the species already shown → nothing changes (nickname, moves and the other rows stay).
 
 ## C. Moves, item, Pokerus
 
@@ -49,6 +51,7 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 7. **Held item.** `Held Item` → `L` → LEFTOVERS → the row shows `LEFTOVERS`. `Held Item` → `No Item` → the row shows `No Item`.
 8. **Item filters.** Letter `E` has no ENIGMA BERRY, and `M` has no MACH BIKE (nor any Mail).
 9. **Pokerus.** Strain `A`, days `3` → the row shows `Infected`. Days `0` → `Cured`. Strain `None` → `Clean`, and Days is hidden. Back and reopen → the strain and days are as left.
+10. **Empty letter.** On a move slot, a letter whose only move is in another slot shows an empty list. That is expected; press Back.
 
 ## D. Files
 
@@ -69,7 +72,15 @@ The species names and learnsets are not in the app's memory. They are in `gen3_b
    - Start the app → Gen III → `Edit Pokemon` → a dialog `Data missing` with `Gen III data file missing.` / `Delete apps_assets/pokemon` / `on the SD card, then reopen.` and an `OK` button. OK returns to the Gen III menu; open `Edit Pokemon` again and press Back, which also returns to the Gen III menu (not the main menu). `Link Test` still opens.
    - Exit the app. In qFlipper, delete the whole folder `apps_assets/pokemon`. Start the app → the Flipper unpacks its files again (the folder is back, with `gen3_bulk.bin` and `all_sprites.fxbm`) → Gen III → `Edit Pokemon` opens the editor with `Pokemon: BULBASAUR`, and the species picker shows sprites.
 
+## Memory
+
+1. Open Gen III → `Edit Pokemon`. In qFlipper's CLI (or `ufbt cli`), run `free` and record `Free heap size`. It should be at least 20,000.
+2. If it is lower, or the app does not start, report the number.
+
 ## Results
+
+On any failure, report the step, what the screen showed, and the `.pk3` file involved. Fill in the table.
+
 
 | Step | Pass / fail | What the Flipper showed |
 |---|---|---|
@@ -93,6 +104,8 @@ The species names and learnsets are not in the app's memory. They are in `gen3_b
 | B5 Nickname kept | | |
 | B6 Unown | | |
 | B7 Stress | | |
+| B8 Back | | |
+| B9 Same species | | |
 | C1 Moves | | |
 | C2 Remove a move | | |
 | C3 No duplicates | | |
@@ -102,6 +115,7 @@ The species names and learnsets are not in the app's memory. They are in `gen3_b
 | C7 Held item | | |
 | C8 Item filters | | |
 | C9 Pokerus | | |
+| C10 Empty letter | | |
 | D1 Save | | |
 | D2 Overwrite | | |
 | D3 Load | | |
@@ -110,3 +124,4 @@ The species names and learnsets are not in the app's memory. They are in `gen3_b
 | D6 No SD card | | |
 | D7 Data missing | | |
 | E1 Data missing | | |
+| Memory: free heap (bytes) | | |

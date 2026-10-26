@@ -17,6 +17,7 @@ The video below trades a Bulbasaur from the Flipper to a Game Boy Color with Pok
     - [Modifying Traded Pokemon](#modifying-traded-pokemon)
     - [Reset Trade Connection State](#reset-trade-connection-state)
 - [Gen III (experimental): link test](#gen-iii-experimental-link-test)
+- [Gen III (experimental): Pokemon editor and .pk3 files](#gen-iii-experimental-pokemon-editor-and-pk3-files)
 - [How it Works / Build your own Interface](#how-does-it-work)
 
 
@@ -397,6 +398,30 @@ The main menu has a `Gen III  (GBA non-JPN)` entry with a `Link Test`. The Flipp
 Plug one end of the GBA link cable into the Flipper's module first, with the other end free, and open the Link Test. The screen shows `Cable: plug in/swap ends` until the right plug is in the Flipper, because a missing and a reversed cable look the same; if it does, put the cable's other plug into the Flipper instead. Once it reads `Cable: OK`, plug the other end into the GBA. Note which plug works for you. The cable line stays live: if it shows `Cable: plug in/swap ends` during the test, the Flipper pauses its transfers.
 
 A log is written to `apps_data/pokemon/gen3_link.log` on the SD card (overwritten each time the Link Test is opened). See the [hardware test checklist](docs/gen3/hardware-test-1.md).
+
+## Gen III (experimental): Pokemon editor and .pk3 files
+The `Gen III  (GBA non-JPN)` menu has `Edit Pokemon`, `Load .pk3`, `Save .pk3` and `Link Test`. Trading a Pokemon to a GBA comes in a later update; for now the editor only builds a Pokemon and saves it to a file.
+
+`Edit Pokemon` can change:
+
+- Pokemon (all 386 species; species 252-386 show a `?` image instead of a sprite)
+- Nickname
+- Level
+- EV/IV preset (Max EV means 85 per stat, 510 in total)
+- Nature
+- Ability (only for species with two abilities)
+- Shininess
+- Gender
+- Unown form
+- Moves
+- Held item
+- Pokerus
+- Poke ball
+- OT name, OT TID and OT SID
+
+Files are PKHeX `.pk3` files in `apps_data/pokemon/gen3/` on the SD card. `Save .pk3` writes 80 bytes; `Load .pk3` reads 80 or 100 bytes. A loaded file is checked and tidied so the Pokemon is valid in game (stats recalculated, duplicate moves and move gaps removed, a held Mail item removed), and the result says what was fixed.
+
+The species names and learnsets are in `files/gen3_bulk.bin`, which ships inside the `.fap` as an asset and is unpacked to `apps_assets/pokemon/` on the SD card. If the editor says `Data missing`, delete the `apps_assets/pokemon` folder on the SD card and reopen the app. See the [editor test checklist](docs/gen3/editor-test.md).
 
 ## How Does it Work?
 
