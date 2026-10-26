@@ -1,0 +1,347 @@
+#include <src/gen3/mlink_hw_furi.h>
+
+#include <string.h>
+
+#include <furi.h>
+#include <furi_hal.h>
+#include <stm32wbxx_ll_tim.h>
+
+/* ---- Tunables for the hardware test (docs/gen3/link-protocol.md A2 "Wire level", U1, U2) ---- */
+
+/* Order of the 16 data bits on SD (GBATEK: LSB first; U1). If every received word comes back
+ * bit-reversed (e.g. 059D instead of B9A0), set this to 0. Applies to sending and receiving. */
+#define MLINK_LSB_FIRST 1
+
+/* DWT->CYCCNT and TIM2 both count the 64 MHz core clock. */
+#define MLINK_CPU_HZ 64000000u
+#define MLINK_BAUD 115200u
+
+/* Bit timing. Every edge is computed from one reference time, so rounding never accumulates.
+ * One bit = 64000000 / 115200 = 555.56 cycles = 8.68 us.
+ * MLINK_EDGE_CYCLES(n): whole-bit edge n. MLINK_HALF_BIT_CYCLES(h): h half bits (odd h = the
+ * centre of a bit); MLINK_HALF_BIT_CYCLES(2 * n) == MLINK_EDGE_CYCLES(n). */
+#define MLINK_EDGE_CYCLES(n) (((n) * MLINK_CPU_HZ + MLINK_BAUD / 2u) / MLINK_BAUD)
+#define MLINK_HALF_BIT_CYCLES(h) (((h) * (MLINK_CPU_HZ / 2u) + MLINK_BAUD / 2u) / MLINK_BAUD)
+
+#define MLINK_DATA_BITS 16u
+#define MLINK_FRAME_BITS 18u /* start 0, 16 data bits, stop 1 */
+
+/* Parent's word: SC low at edge 0, start bit at edge 1 (one bit after SC low), stop bit ends at
+ * edge 19 = 10556 cycles = 164.9 us. */
+#define MLINK_TX_LEAD_BITS 1u
+
+/* Child's word, in half bits from its start edge: data bit k sampled at 3 + 2k (1.5 + k bits),
+ * stop bit at 35 (17.5 bits). SC goes high at 36, the end of the child's stop bit
+ * (10000 cycles = 156.25 us). */
+#define MLINK_RX_FIRST_SAMPLE_HALF 3u
+#define MLINK_RX_STOP_SAMPLE_HALF 35u
+#define MLINK_RX_END_HALF 36u
+
+/* After SO goes low, how long the child gets to start its word (U1). */
+#define MLINK_CHILD_TIMEOUT_US 100u
+#define MLINK_CHILD_TIMEOUT_CYCLES (MLINK_CHILD_TIMEOUT_US * (MLINK_CPU_HZ / 1000000u)) /* 6400 */
+
+/* TIM2 tick: (PSC + 1) * (ARR + 1) = 48096 cycles = 751.5 us, the GBA's in-burst gap (U2).
+ * One transfer per tick, measured start to start. To change the gap, change MLINK_TIM_ARR and
+ * MLINK_TICK_DECI_US together (checked below). */
+#define MLINK_TIM_PRESCALER 0u
+#define MLINK_TIM_ARR 48095u
+
+/* Frame cadence in 0.1 us: +7515 per tick; when the sum reaches 167400 (16.740 ms = 59.74 Hz,
+ * a hair faster than the GBA's 59.7275 Hz), subtract it and start a frame. That is 22.3 ticks
+ * per frame; frames start on tick boundaries, 22 or 23 ticks apart. */
+#define MLINK_TICK_DECI_US 7515u
+#define MLINK_FRAME_DECI_US 167400u
+
+/* mlink_hw_check_cable: settle time for SI's pull-up before reading it. */
+#define MLINK_CABLE_SETTLE_US 1000u
+
+#define MLINK_GPIO_SPEED GpioSpeedVeryHigh
+
+#define MLINK_TIM TIM2
+#define MLINK_TIM_BUS FuriHalBusTIM2
+#define MLINK_TIM_IRQ FuriHalInterruptIdTIM2
+
+_Static_assert(
+    (MLINK_TIM_PRESCALER + 1u) * (MLINK_TIM_ARR + 1u) * 10u ==
+        MLINK_TICK_DECI_US * (MLINK_CPU_HZ / 1000000u),
+    "MLINK_TICK_DECI_US must match the TIM2 period");
+_Static_assert(
+    (MLINK_BURST_LEN * MLINK_TICK_DECI_US) < MLINK_FRAME_DECI_US,
+    "a burst must fit in one frame");
+/* The interrupts-masked part of a transfer (parent word + longest wait + child word,
+ * 26956 cycles = 421 us at the defaults) must end well before the next tick. */
+_Static_assert(
+    MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS + MLINK_FRAME_BITS) + MLINK_CHILD_TIMEOUT_CYCLES +
+            MLINK_HALF_BIT_CYCLES(MLINK_RX_END_HALF) <
+        (MLINK_TIM_PRESCALER + 1u) * (MLINK_TIM_ARR + 1u),
+    "one transfer must fit in one tick");
+_Static_assert(MLINK_BURST_LEN <= 16, "timeout_mask and framing_mask are 16 bits");
+
+struct MlinkHw {
+    MlinkPins pins;
+    MlinkFrameCallback cb;
+    void* ctx;
+    bool running;
+
+    /* Owned by the TIM2 ISR while running. */
+    bool in_frame;
+    uint8_t transfer; /* next transfer of the current frame */
+    uint32_t frame_acc; /* 0.1 us, see MLINK_FRAME_DECI_US */
+    MlinkTx tx; /* frame being sent */
+    MlinkTx next; /* callback output, copied into tx */
+    MlinkRx rx; /* frame being received */
+};
+
+static FURI_ALWAYS_INLINE uint16_t mlink_data_bit(uint32_t k) {
+#if MLINK_LSB_FIRST
+    return (uint16_t)(1u << k);
+#else
+    return (uint16_t)(0x8000u >> k);
+#endif
+}
+
+static void mlink_load_tx(MlinkTx* dst, const MlinkTx* src) {
+    uint8_t count = src->count;
+    if(count < 1) count = 1;
+    if(count > MLINK_BURST_LEN) count = MLINK_BURST_LEN;
+    *dst = *src;
+    dst->count = count;
+}
+
+/* Line levels of one word in send order, bit 0 first: start 0, 16 data bits, stop 1. */
+static uint32_t mlink_frame_levels(uint16_t word) {
+    uint32_t levels = 1u << (MLINK_FRAME_BITS - 1u);
+    for(uint32_t k = 0; k < MLINK_DATA_BITS; k++) {
+        if(word & mlink_data_bit(k)) levels |= 1u << (k + 1u);
+    }
+    return levels;
+}
+
+/* Pin access and waits inside the masked window. furi_hal_gpio_read/write are static inline, but
+ * -Os outlines the read; these are always inlined so every edge has the same fixed latency. */
+static FURI_ALWAYS_INLINE void mlink_pin_write(const GpioPin* pin, bool high) {
+    pin->port->BSRR = high ? pin->pin : ((uint32_t)pin->pin << 16); /* upper half = reset */
+}
+
+static FURI_ALWAYS_INLINE bool mlink_pin_read(const GpioPin* pin) {
+    return (pin->port->IDR & pin->pin) != 0;
+}
+
+static FURI_ALWAYS_INLINE void mlink_wait_until(uint32_t t0, uint32_t cycles) {
+    while(DWT->CYCCNT - t0 < cycles) {
+    }
+}
+
+/* The firmware starts the cycle counter at boot; gblink and furi_delay_us rely on it. Make sure
+ * the same way the firmware does it: every wait in a transfer spins on it with interrupts off. */
+static void mlink_cyccnt_ensure(void) {
+    if(!(DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk)) {
+        CoreDebug->DEMCR |= CoreDebug_DEMCR_TRCENA_Msk;
+        DWT->CTRL |= DWT_CTRL_CYCCNTENA_Msk;
+    }
+    furi_check(DWT->CTRL & DWT_CTRL_CYCCNTENA_Msk);
+}
+
+/* One transfer: the parent's word on SD, hand-over on SO, then the child's word on SD. Every
+ * interrupt is masked from SC low to SC high: 265 us with no child, 321 us plus the child's
+ * reply delay with one, 421 us at most. */
+static void mlink_hw_transfer(MlinkHw* hw, uint8_t t) {
+    const GpioPin* sc = hw->pins.sc;
+    const GpioPin* sd = hw->pins.sd;
+    const GpioPin* so = hw->pins.so;
+    const uint32_t levels = mlink_frame_levels(hw->tx.word[t]);
+    uint16_t word = 0;
+    bool answered = false;
+    bool stop_high = false;
+
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+
+    const uint32_t t0 = DWT->CYCCNT;
+    mlink_pin_write(sc, false);
+    for(uint32_t b = 0; b < MLINK_FRAME_BITS; b++) {
+        const bool level = (levels >> b) & 1u;
+        mlink_wait_until(t0, MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS + b));
+        mlink_pin_write(sd, level);
+    }
+    mlink_wait_until(t0, MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS + MLINK_FRAME_BITS));
+    mlink_pin_write(sd, true); /* release (open drain) */
+    mlink_pin_write(so, false); /* child's SI low: its turn */
+
+    const uint32_t t_so = DWT->CYCCNT;
+    uint32_t c0 = t_so;
+    for(;;) {
+        const uint32_t now = DWT->CYCCNT;
+        if(!mlink_pin_read(sd)) {
+            c0 = now;
+            answered = true;
+            break;
+        }
+        if(now - t_so >= MLINK_CHILD_TIMEOUT_CYCLES) break;
+    }
+    if(answered) {
+        for(uint32_t k = 0; k < MLINK_DATA_BITS; k++) {
+            mlink_wait_until(c0, MLINK_HALF_BIT_CYCLES(MLINK_RX_FIRST_SAMPLE_HALF + 2u * k));
+            if(mlink_pin_read(sd)) word |= mlink_data_bit(k);
+        }
+        mlink_wait_until(c0, MLINK_HALF_BIT_CYCLES(MLINK_RX_STOP_SAMPLE_HALF));
+        stop_high = mlink_pin_read(sd);
+        mlink_wait_until(c0, MLINK_HALF_BIT_CYCLES(MLINK_RX_END_HALF));
+    }
+
+    mlink_pin_write(sc, true);
+    mlink_pin_write(so, true);
+    __set_PRIMASK(primask);
+
+    if(answered) {
+        hw->rx.word[t] = word;
+        if(!stop_high) hw->rx.framing_mask |= (uint16_t)(1u << t);
+    } else {
+        hw->rx.word[t] = MLINK_NO_DATA;
+        hw->rx.timeout_mask |= (uint16_t)(1u << t);
+    }
+}
+
+static void mlink_hw_isr(void* context) {
+    MlinkHw* hw = context;
+
+    if(!LL_TIM_IsActiveFlag_UPDATE(MLINK_TIM)) return;
+    /* Clear first, so a tick that comes due while this one runs long stays pending. */
+    LL_TIM_ClearFlag_UPDATE(MLINK_TIM);
+
+    hw->frame_acc += MLINK_TICK_DECI_US;
+    if(!hw->in_frame) {
+        if(hw->frame_acc < MLINK_FRAME_DECI_US) return;
+        hw->frame_acc -= MLINK_FRAME_DECI_US;
+        hw->in_frame = true;
+        hw->transfer = 0;
+        hw->rx.count = hw->tx.count;
+        for(uint8_t i = 0; i < MLINK_BURST_LEN; i++) {
+            hw->rx.word[i] = MLINK_NO_DATA;
+        }
+        hw->rx.timeout_mask = 0;
+        hw->rx.framing_mask = 0;
+    }
+
+    mlink_hw_transfer(hw, hw->transfer);
+    hw->transfer++;
+    if(hw->transfer < hw->tx.count) return;
+
+    /* Frame done. Interrupts are enabled again here. */
+    hw->in_frame = false;
+    hw->next = hw->tx;
+    hw->cb(hw->ctx, &hw->rx, &hw->next);
+    mlink_load_tx(&hw->tx, &hw->next);
+}
+
+/* Each output gets its idle level before it becomes an output, so nothing glitches low. */
+static void mlink_pins_run(const MlinkPins* pins) {
+    furi_hal_gpio_write(pins->so, true); /* the GBA's SI must idle high */
+    furi_hal_gpio_init(pins->so, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
+    furi_hal_gpio_write(pins->sc, true);
+    furi_hal_gpio_init(pins->sc, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
+    furi_hal_gpio_write(pins->sd, true);
+    furi_hal_gpio_init(pins->sd, GpioModeOutputOpenDrain, GpioPullUp, MLINK_GPIO_SPEED);
+    furi_hal_gpio_init(pins->si, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
+}
+
+static void mlink_pins_off(const MlinkPins* pins) {
+    furi_hal_gpio_init_simple(pins->sd, GpioModeAnalog);
+    furi_hal_gpio_init_simple(pins->sc, GpioModeAnalog);
+    furi_hal_gpio_init_simple(pins->so, GpioModeAnalog);
+    furi_hal_gpio_init_simple(pins->si, GpioModeAnalog);
+}
+
+MlinkHw* mlink_hw_alloc(const MlinkPins* pins) {
+    furi_check(pins);
+    furi_check(pins->sc && pins->sd && pins->so && pins->si);
+
+    MlinkHw* hw = malloc(sizeof(MlinkHw));
+    memset(hw, 0, sizeof(*hw));
+    hw->pins = *pins;
+    return hw;
+}
+
+void mlink_hw_free(MlinkHw* hw) {
+    furi_check(hw);
+    mlink_hw_stop(hw);
+    free(hw);
+}
+
+MlinkCable mlink_hw_check_cable(MlinkHw* hw) {
+    furi_check(hw);
+    const GpioPin* si = hw->pins.si;
+    bool si_high;
+
+    if(hw->running) {
+        si_high = furi_hal_gpio_read(si);
+    } else {
+        furi_hal_gpio_init(si, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
+        furi_delay_us(MLINK_CABLE_SETTLE_US);
+        si_high = furi_hal_gpio_read(si);
+        furi_hal_gpio_init_simple(si, GpioModeAnalog);
+    }
+    return si_high ? MlinkCableReversed : MlinkCableOk;
+}
+
+bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx* first) {
+    furi_check(hw);
+    furi_check(cb);
+    furi_check(first);
+    mlink_cyccnt_ensure();
+
+    /* TIM2 first: if gblink holds it, it may be using SI too, so don't touch any pin. */
+    if(hw->running || furi_hal_bus_is_enabled(MLINK_TIM_BUS)) return false;
+    if(mlink_hw_check_cable(hw) != MlinkCableOk) return false;
+
+    /* Claim TIM2 atomically: furi_hal_bus_enable crashes if the bus is already on. */
+    FURI_CRITICAL_ENTER();
+    const bool busy = furi_hal_bus_is_enabled(MLINK_TIM_BUS);
+    if(!busy) furi_hal_bus_enable(MLINK_TIM_BUS);
+    FURI_CRITICAL_EXIT();
+    if(busy) return false;
+
+    hw->cb = cb;
+    hw->ctx = ctx;
+    mlink_load_tx(&hw->tx, first);
+    hw->next = hw->tx;
+    memset(&hw->rx, 0, sizeof(hw->rx));
+    hw->in_frame = false;
+    hw->transfer = 0;
+    hw->frame_acc = 0; /* first frame after 23 ticks (17.3 ms) of idle lines */
+
+    mlink_pins_run(&hw->pins);
+    /* Stop mode would halt TIM2; plain WFI sleep keeps it running. */
+    furi_hal_power_insomnia_enter();
+
+    LL_TIM_InitTypeDef tim = {0};
+    tim.Prescaler = MLINK_TIM_PRESCALER;
+    tim.CounterMode = LL_TIM_COUNTERMODE_UP;
+    tim.Autoreload = MLINK_TIM_ARR;
+    tim.ClockDivision = LL_TIM_CLOCKDIVISION_DIV1;
+    LL_TIM_Init(MLINK_TIM, &tim);
+    /* LL_TIM_Init forces an update event to load the prescaler; drop its flag. */
+    LL_TIM_ClearFlag_UPDATE(MLINK_TIM);
+
+    hw->running = true;
+    furi_hal_interrupt_set_isr(MLINK_TIM_IRQ, mlink_hw_isr, hw);
+    LL_TIM_EnableIT_UPDATE(MLINK_TIM);
+    LL_TIM_EnableCounter(MLINK_TIM);
+    return true;
+}
+
+void mlink_hw_stop(MlinkHw* hw) {
+    furi_check(hw);
+    if(!hw->running) return;
+
+    LL_TIM_DisableIT_UPDATE(MLINK_TIM);
+    LL_TIM_DisableCounter(MLINK_TIM);
+    furi_hal_interrupt_set_isr(MLINK_TIM_IRQ, NULL, NULL);
+    LL_TIM_ClearFlag_UPDATE(MLINK_TIM);
+    furi_hal_bus_disable(MLINK_TIM_BUS);
+    furi_hal_power_insomnia_exit();
+
+    mlink_pins_off(&hw->pins);
+    hw->running = false;
+}
