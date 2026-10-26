@@ -36,7 +36,7 @@ static void pokemon_tick_event_callback(void* context) {
     furi_assert(context);
     PokemonFap* pokemon_fap = context;
 
-    pokemon_gen3_trade_tick(pokemon_fap);
+    gen3_trade_tick(pokemon_fap);
 }
 
 

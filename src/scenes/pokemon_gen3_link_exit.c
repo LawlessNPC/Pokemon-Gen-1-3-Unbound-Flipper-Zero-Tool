@@ -52,7 +52,7 @@ bool pokemon_scene_gen3_link_exit_on_event(void* context, SceneManagerEvent even
             /* Decided now, from a fresh status (fix round 1). A trade session's received
              * Pokemon is picked up first (T12 review (a)); a Link Test session is settled and
              * sets neither flag R6 reads, so it always gets Stop. */
-            const Gen3TradeEndAction action = pokemon_gen3_trade_end_decide(pokemon_fap, true);
+            const Gen3TradeEndAction action = gen3_trade_end_decide(pokemon_fap, true);
             if(action == Gen3TradeEndSaving || action == Gen3TradeEndAsk) {
                 /* R6: the GBA is saving, or a trade is under way with it linked: as Stay */
                 consumed = scene_manager_previous_scene(pokemon_fap->scene_manager);
@@ -72,7 +72,7 @@ bool pokemon_scene_gen3_link_exit_on_event(void* context, SceneManagerEvent even
                 if(action == Gen3TradeEndPickup) {
                     /* T12 review (f): a received Pokemon waits for the SD card; never stop
                      * silently. Retry / End anyway, over the menu. */
-                    pokemon_gen3_trade_end_open(pokemon_fap, action, true);
+                    gen3_trade_end_open(pokemon_fap, action, true);
                 }
             }
         }

@@ -82,7 +82,7 @@ static const Gen3ClubStatus* gen3_trade_latch_result(const Gen3ClubStatus* st) {
     return &gen3_trade_guide_status;
 }
 
-void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap) {
+void gen3_trade_tick(PokemonFap* pokemon_fap) {
     Gen3Session* s = pokemon_fap->gen3_session;
     Gen3TradeSync* sync = pokemon_fap->gen3_trade_sync;
     Gen3Editor* ed = pokemon_fap->gen3_editor;
@@ -173,14 +173,14 @@ void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap) {
     gen3_trade_view_update(pokemon_fap->gen3_trade_view, view_state);
 }
 
-bool pokemon_gen3_trade_begin_edit(PokemonFap* pokemon_fap) {
+bool gen3_trade_begin_edit(PokemonFap* pokemon_fap) {
     Gen3Session* s = pokemon_fap->gen3_session;
     Gen3TradeSync* sync = pokemon_fap->gen3_trade_sync;
 
     if(!gen3_session_trading(s) || !sync) return true;
 
     /* A trade that just finished is picked up first, so the edit starts from its Pokemon */
-    pokemon_gen3_trade_tick(pokemon_fap);
+    gen3_trade_tick(pokemon_fap);
     if(sync->pickup_fail == Gen3PickupNoData) return false;
     /* Not running any more (the tick ended it): true */
     return gen3_session_set_editing(s, true, sync->trades_seen);
@@ -197,14 +197,14 @@ static bool gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** s
     Gen3TradeSync* sync = pokemon_fap->gen3_trade_sync;
     uint32_t received_count = 0;
 
-    if(gen3_session_trading(s) && sync) pokemon_gen3_trade_tick(pokemon_fap);
+    if(gen3_session_trading(s) && sync) gen3_trade_tick(pokemon_fap);
     *st = gen3_menu_status(pokemon_fap, NULL, NULL);
     if(!gen3_session_trading(s) || !sync) return true; /* the tick may have ended it, all seen */
     gen3_session_get_received(s, gen3_trade_received, &received_count);
     return gen3_trade_sync_settled(sync, received_count);
 }
 
-Gen3TradeEndAction pokemon_gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link) {
+Gen3TradeEndAction gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link) {
     const Gen3ClubStatus* st;
     const bool settled = gen3_trade_settled(pokemon_fap, &st);
     /* After the tick: a session it stopped reads as not running (Menu) */
@@ -227,7 +227,7 @@ void pokemon_scene_gen3_trade_on_enter(void* context) {
         return;
     }
 
-    pokemon_gen3_trade_tick(pokemon_fap);
+    gen3_trade_tick(pokemon_fap);
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewGen3Trade);
 }
 
@@ -261,7 +261,7 @@ bool pokemon_scene_gen3_trade_on_event(void* context, SceneManagerEvent event) {
 
     if(!gen3_menu_editor_ready(pokemon_fap)) {
         gen3_menu_show_data_missing(pokemon_fap);
-    } else if(pokemon_gen3_trade_begin_edit(pokemon_fap)) {
+    } else if(gen3_trade_begin_edit(pokemon_fap)) {
         /* Same handler as begin_edit: no tick runs before the editor is the current scene */
         scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Edit);
     }

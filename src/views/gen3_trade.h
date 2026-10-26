@@ -6,7 +6,7 @@
 #include <src/gen3/gen3_trade_sync.h>
 
 /* Gen III trade screen: what gen3_trade_view_update was last given. No timer of its own: the app
- * tick (pokemon_gen3_trade_tick) refreshes it. */
+ * tick (gen3_trade_tick) refreshes it. */
 
 typedef struct {
     char guide[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];

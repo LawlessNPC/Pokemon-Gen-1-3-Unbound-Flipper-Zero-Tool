@@ -4,6 +4,12 @@
 #include <src/gen3/gen3_club.h>
 #include <src/gen3/gen3_trade_sync.h>
 
+/* The Gen III scenes' shared header. The scene files have no header each, so what one of them
+ * exports to the others is declared here: the menu's own helpers (pokemon_gen3_menu.c), and a few
+ * from other scene files, each saying which file defines it. Every name is gen3_<scene>_..., after
+ * the scene it belongs to, like the scene files' static helpers. The trade tick and
+ * gen3_trade_begin_edit are declared in pokemon_app.h instead, with the app that calls the tick. */
+
 /* Copies the session's latest status (gen3_session_status; log_ok and cable_ok may be NULL) into
  * one static buffer and returns it. Gen3ClubStatus is never a stack local (no app stack local is
  * over 128 bytes). App thread only; pokemon_fap->gen3_session must exist. The next call
@@ -33,8 +39,9 @@ void gen3_menu_show_data_missing(PokemonFap* pokemon_fap);
 void gen3_menu_show_notice(PokemonFap* pokemon_fap, const char* header, const char* text);
 
 /* Header (up to 24 characters) and text (up to 96) of the Gen3Result scene, copied; set them
- * before scene_manager_next_scene(..., PokemonSceneGen3Result). */
-void pokemon_scene_gen3_result_set(const char* header, const char* text);
+ * before scene_manager_next_scene(..., PokemonSceneGen3Result). Defined in pokemon_gen3_pk3.c,
+ * with the scene. */
+void gen3_result_set(const char* header, const char* text);
 
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
  * file, so it is created only once the file reads, and Trade, Edit, Load and Save need the file:
@@ -55,16 +62,13 @@ bool gen3_menu_editor_ready(PokemonFap* pokemon_fap);
  * gen3_trade_end_action (End trade, menu Back). A running Link Test session gets Stop with
  * stop_link (Gen3LinkExit's only use for it); without stop_link its linked phases give Ask, but
  * no caller asks that for a Link Test. Defined in pokemon_gen3_trade.c. */
-Gen3TradeEndAction pokemon_gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link);
+Gen3TradeEndAction gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link);
 
 /* Opens Gen3TradeEnd over the Gen III menu (the current scene, or the one under Gen3LinkExit,
  * which must switch to it first) showing action: Saving, Ask or Pickup. stop_link: the user
  * confirmed "Stop link?", so its buttons re-decide with gen3_trade_stop_link_action. Defined in
  * pokemon_gen3_trade_end.c. */
-void pokemon_gen3_trade_end_open(
-    PokemonFap* pokemon_fap,
-    Gen3TradeEndAction action,
-    bool stop_link);
+void gen3_trade_end_open(PokemonFap* pokemon_fap, Gen3TradeEndAction action, bool stop_link);
 
 /* Rebuilds the Gen III menu's items for the session and settings as they are now, keeping the
  * highlighted item (or the first one, if it has gone), and frees nothing. Call while Gen3Menu is

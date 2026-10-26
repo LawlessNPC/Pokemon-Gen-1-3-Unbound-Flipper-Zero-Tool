@@ -83,10 +83,7 @@ void pokemon_scene_gen3_trade_end_on_enter(void* context) {
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
 }
 
-void pokemon_gen3_trade_end_open(
-    PokemonFap* pokemon_fap,
-    Gen3TradeEndAction action,
-    bool stop_link) {
+void gen3_trade_end_open(PokemonFap* pokemon_fap, Gen3TradeEndAction action, bool stop_link) {
     scene_manager_set_scene_state(
         pokemon_fap->scene_manager,
         PokemonSceneGen3TradeEnd,
@@ -101,7 +98,7 @@ static void gen3_trade_end_go_on(PokemonFap* pokemon_fap, bool end_anyway) {
     const uint32_t stop_link =
         scene_manager_get_scene_state(scene_manager, PokemonSceneGen3TradeEnd) &
         GEN3_TRADE_END_STOP_LINK;
-    Gen3TradeEndAction action = pokemon_gen3_trade_end_decide(pokemon_fap, stop_link != 0);
+    Gen3TradeEndAction action = gen3_trade_end_decide(pokemon_fap, stop_link != 0);
 
     if(end_anyway && action == Gen3TradeEndPickup) action = Gen3TradeEndStop;
     switch(action) {

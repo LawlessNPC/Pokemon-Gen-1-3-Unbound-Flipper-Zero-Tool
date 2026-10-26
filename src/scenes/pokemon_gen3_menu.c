@@ -46,7 +46,7 @@ static void gen3_menu_item_callback(void* context, uint32_t index) {
  * here too once it doesn't (not started yet, or stopped: the GBA left, "Stop link?", End anyway),
  * or with End trade or Back while no GBA is linked (T13). The sync stays until the app exits,
  * restarted (it keeps the block on a traded-away Pokemon, G15). Call with neither view shown,
- * and for a running trade session only on pokemon_gen3_trade_end_decide's Stop (the sync has
+ * and for a running trade session only on gen3_trade_end_decide's Stop (the sync has
  * every received Pokemon). */
 static void gen3_menu_end_session(PokemonFap* pokemon_fap) {
     if(pokemon_fap->gen3_session) {
@@ -257,7 +257,7 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
 static void gen3_menu_open_editor(PokemonFap* pokemon_fap, uint32_t scene) {
     if(!gen3_menu_editor_ready(pokemon_fap)) {
         gen3_menu_show_data_missing(pokemon_fap);
-    } else if(pokemon_gen3_trade_begin_edit(pokemon_fap)) {
+    } else if(gen3_trade_begin_edit(pokemon_fap)) {
         scene_manager_next_scene(pokemon_fap->scene_manager, scene);
     } else {
         scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Trade);
@@ -270,10 +270,10 @@ static void gen3_menu_open_editor(PokemonFap* pokemon_fap, uint32_t scene) {
  * Pokemon), or it has stopped already (Menu). */
 static bool gen3_menu_end_dialog(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_session) return false;
-    const Gen3TradeEndAction action = pokemon_gen3_trade_end_decide(pokemon_fap, false);
+    const Gen3TradeEndAction action = gen3_trade_end_decide(pokemon_fap, false);
     if(action == Gen3TradeEndStop || action == Gen3TradeEndMenu) return false;
 
-    pokemon_gen3_trade_end_open(pokemon_fap, action, false);
+    gen3_trade_end_open(pokemon_fap, action, false);
     return true;
 }
 

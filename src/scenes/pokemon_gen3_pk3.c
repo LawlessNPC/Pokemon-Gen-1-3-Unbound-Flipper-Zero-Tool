@@ -30,13 +30,13 @@ static void gen3_pk3_dialog_callback(DialogExResult result, void* context) {
     view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, result);
 }
 
-void pokemon_scene_gen3_result_set(const char* header, const char* text) {
+void gen3_result_set(const char* header, const char* text) {
     snprintf(gen3_result_header, sizeof(gen3_result_header), "%s", header);
     snprintf(gen3_result_text, sizeof(gen3_result_text), "%s", text);
 }
 
 static void gen3_pk3_show_result(PokemonFap* pokemon_fap, const char* header, const char* text) {
-    pokemon_scene_gen3_result_set(header, text);
+    gen3_result_set(header, text);
     scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Result);
 }
 
