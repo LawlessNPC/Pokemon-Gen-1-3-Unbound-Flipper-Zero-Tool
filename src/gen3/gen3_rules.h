@@ -57,8 +57,8 @@ uint32_t gen3_rng_next(Gen3Rng* rng);
 /* Finds a PID for species `national` (1..386) and OT ot_id whose traits equal want, after
  * normalising want: gender is ignored for ratios 0/254/255, ability_slot for one-ability
  * species, unown_letter unless Unown. false (and *pid untouched) for an unknown species, an
- * out-of-range want (nature >= 25, ability_slot > 1, unown_letter >= 28, gender None on a
- * two-gender species; no iteration), or after GEN3_PID_MAX_TRIES. */
+ * out-of-range want (nature >= 25; ability_slot > 1 on a two-ability species; unown_letter
+ * >= 28 on Unown; gender None on a gendered species; no iteration), or after GEN3_PID_MAX_TRIES. */
 bool gen3_pid_find(
     Gen3Rng* rng,
     uint16_t national,

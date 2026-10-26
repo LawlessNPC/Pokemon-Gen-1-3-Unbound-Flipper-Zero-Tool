@@ -177,10 +177,12 @@ bool gen3_pid_find(
     else if(info->gender_ratio == 255)
         gender = Gen3GenderNone;
     /* Unsatisfiable wants fail fast instead of spinning through GEN3_PID_MAX_TRIES. */
-    if(want->nature >= 25 || want->ability_slot > 1 || want->unown_letter >= 28) return false;
-    if(gender == Gen3GenderNone && info->gender_ratio != 255) return false;
     bool two_abilities = info->ability[1] != 0;
     bool unown = national == GEN3_NATIONAL_UNOWN;
+    if(want->nature >= 25) return false;
+    if(two_abilities && want->ability_slot > 1) return false;
+    if(unown && want->unown_letter >= 28) return false;
+    if(gender == Gen3GenderNone && info->gender_ratio != 255) return false;
     uint32_t tid_sid = (ot_id & 0xFFFF) ^ (ot_id >> 16);
 
     for(uint32_t i = 0; i < GEN3_PID_MAX_TRIES; i++) {

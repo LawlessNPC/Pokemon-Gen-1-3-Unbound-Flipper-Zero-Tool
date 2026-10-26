@@ -195,6 +195,15 @@ TEST(test_pid_find_ignores_letter_off_unown) {
     check_find(&rng, 1, 0x1234ABCDu, &want);
 }
 
+TEST(test_pid_find_normalises_out_of_range) {
+    Gen3Rng rng;
+    gen3_rng_seed(&rng, 11);
+    Gen3Traits one_ab = {3, Gen3GenderFemale, false, 2, 0};
+    check_find(&rng, 1, 0x1234ABCDu, &one_ab); /* one ability: slot forced to 0 */
+    Gen3Traits letter = {9, Gen3GenderMale, true, 0, 30};
+    check_find(&rng, 1, 0x1234ABCDu, &letter); /* non-Unown: letter ignored */
+}
+
 TEST(test_pid_find_rejects_bad_want) {
     Gen3Rng rng;
     gen3_rng_seed(&rng, 7);
@@ -259,6 +268,7 @@ int main(void) {
     RUN(test_rng);
     RUN(test_pid_find_matrix);
     RUN(test_pid_find_ignores_letter_off_unown);
+    RUN(test_pid_find_normalises_out_of_range);
     RUN(test_pid_find_rejects_bad_want);
     RUN(test_pid_find_deterministic);
     RUN(test_default_moves);
