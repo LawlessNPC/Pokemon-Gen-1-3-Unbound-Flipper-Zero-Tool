@@ -11,7 +11,7 @@ all: $(addprefix run-,$(TESTS))
 $(BUILD):
 	mkdir -p $(BUILD)
 
-$(BUILD)/%: %.c test.h $(SRCS) $(wildcard ../src/gen3/*.h) | $(BUILD)
+$(BUILD)/%: %.c $(wildcard *.h) $(SRCS) $(wildcard ../src/gen3/*.h) | $(BUILD)
 	$(CC) $(CFLAGS) -DTEST_NAME='"$*"' $< $(SRCS) -o $@
 
 run-%: $(BUILD)/%
