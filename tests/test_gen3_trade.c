@@ -1725,7 +1725,8 @@ TEST(test_trade_sync2_answer_framing_error) {
     /* A stop-bit error on the GBA's word in the burst that carried the club's sync-2 answer, every
      * transfer answered: the burst still confirms the answer. Ruby took it and commits, so a link
      * lost the next frame counts as Assumed. Reporting RolledBack there would lose the GBA's
-     * traded Pokemon on both sides; the opposite misreport only clones the Flipper's offer */
+     * traded Pokemon on both sides; the opposite misreport clones the GBA's Pokemon and loses
+     * only the Flipper's offer, which can be made again */
     Bench b;
     MlinkTx tx;
     bench_init_trade(&b);

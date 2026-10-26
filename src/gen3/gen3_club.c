@@ -703,8 +703,10 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
          * command only after all 8, so a partial burst means the GBA never got our word. No
          * checksum error: a mismatch both sides see makes the GBA's CheckErrorStatus link-error
          * before its commit. A stop-bit error alone on the GBA's word doesn't hold it back: when
-         * unsure, Assumed (a clone of the Flipper's offer, which can be made again) is the safer
-         * misreport than RolledBack (the GBA's traded Pokemon lost on both sides). */
+         * unsure, Assumed is the safer misreport. If the GBA in fact kept its old save, the
+         * Flipper holds a clone of the GBA's Pokemon, which the GBA still has, and has lost its
+         * own offer, which can be made again. RolledBack when the GBA did save loses the GBA's
+         * traded Pokemon on both sides. */
         if((event == Gen3LinkEventNone || event == Gen3LinkEventCommand) &&
            rx->timeout_mask == 0 && gen3_link_queued(&club->link) == 0) {
             club->sync2_unconfirmed = false;
