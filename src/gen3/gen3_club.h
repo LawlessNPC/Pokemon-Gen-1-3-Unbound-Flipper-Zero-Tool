@@ -103,7 +103,7 @@ typedef struct {
      * no Flipper Pokemon (R8) */
     Gen3Refuse refused;
     bool trade_pending; /* CCDD sent; until done or lost */
-    uint8_t save_syncs; /* GBA 2FFEs answered in this link save, 0..3 */
+    uint8_t save_syncs; /* GBA 2FFEs answered in this link save, 0..3; zeroed at CCDD */
     bool save_window; /* sync 1 answered, sync 3 not yet seen: don't stop the link (D10) */
     Gen3TradeResult last_result; /* how the latest pending trade ended; None before any */
 } Gen3ClubStatus;
@@ -160,7 +160,9 @@ struct Gen3Club {
     uint8_t gba_party[GEN3_CLUB_GBA_PARTY][GEN3_PARTY_SIZE]; /* game form, rounds 1-3 */
     bool trade_pending;
     uint8_t pending_mon[GEN3_PARTY_SIZE]; /* the GBA mon the pending trade takes, game form */
-    uint8_t save_syncs; /* GBA 2FFEs answered in this link save; the 0x1144 block zeroes it */
+    uint8_t save_syncs; /* GBA 2FFEs answered in this link save; zeroed at CCDD */
+    /* The sync-2 answer is queued, and no burst since has shown the GBA there to take it */
+    bool sync2_unconfirmed;
     bool save_window;
     Gen3TradeResult last_result;
     uint8_t received[GEN3_PARTY_SIZE]; /* the latest finalized trade's Pokemon, game form */

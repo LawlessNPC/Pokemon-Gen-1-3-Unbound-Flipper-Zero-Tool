@@ -321,13 +321,21 @@ FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
  * Ruby animates a party icon it never made, R8), "unexpected dddd" (a DDDD unless this GBA waits
  * in Link standby after its own AABB), "bad ccdd" (a CCDD unless this GBA's AABB, the Flipper's
  * DDDD and this GBA's BBBB were the latest blocks, in that order: Ruby trades whatever its cursor
- * holds, §B3.4), "ccdd hang" / "eebb hang" (the SetCloseLinkCallback after CCDD's or EEBB's fade
- * ignored while gLinkCallback is busy: Ruby hangs in trade-menu state 13 or 12; a stray Flipper
- * CCCC that would keep it busy trips "stale block" or "stale card" first, a stray 2222 doesn't),
- * "early dcba" (a DCBA before this GBA sent its ABCD: Ruby skips TradeMons and saves the untraded
- * party, §B4.3), "flipper mail" (the Flipper's traded Pokemon has a mail index: Ruby gives it
- * mail data the Flipper never sent, §B4.4), "stray 2ffe" (a Flipper 2FFE while this GBA isn't in a
- * standby sync: its flag would let a later sync finish without the Flipper, §B5.3) */
+ * holds, §B3.4), "ccdd hang" / "eebb hang" (CCDD's or EEBB's fade ended while gLinkCallback was
+ * busy, so its SetCloseLinkCallback was ignored and the link stays open: Ruby hangs in trade-menu
+ * state 13 or 12. Only a stray Flipper command that makes this GBA send a block gets here, near
+ * the fade's end: a 2222 (it resends its LinkPlayerBlock) or a CCCC. An earlier round-type CCCC
+ * trips "stale block" first, 3 frames after it arrives; a card CCCC (type 2) doesn't, since the
+ * card stays ready after the counter), "early dcba" (a DCBA before this GBA sent its ABCD: Ruby
+ * skips TradeMons and saves the untraded party, §B4.3), "flipper mail" (the Flipper's traded
+ * Pokemon has a mail index: Ruby gives it mail data the Flipper never sent, §B4.4), "stray 2ffe"
+ * (a Flipper 2FFE that isn't the answer to this GBA's own, sent and back as its echo: the flag
+ * would let a sync finish without the Flipper, §B5.3), "sync skipped" (a link-save sync began
+ * while gLinkCallback was busy, so SetLinkStandbyCallback ignored it, or a block send replaced
+ * the standby callback: either way the sync passes without the Flipper), "close skipped" (the
+ * link save's SetCloseLinkCallback ignored while gLinkCallback was busy: Ruby hangs in
+ * sub_804DC88 state 9). Like the hangs, these two need a stray Flipper command that makes this
+ * GBA send a block (a 2222, or a CCCC) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as Ruby parsed it */
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);

@@ -362,6 +362,13 @@ static void link_main1(FakeRuby* g) {
  * to the master's SendBlockRequest, not to the receiver of 0x2222/0xCCCC (§A4). */
 static bool init_block_send(FakeRuby* g, const uint8_t* src, uint16_t size) {
     if(g->block_send_active) return false;
+    if(g->phase == FakeRubySave &&
+       (g->callback == FakeRubyCbStandby || g->callback == FakeRubyCbStandbyForAll)) {
+        /* In the link save the replaced standby ends with the block, so its sync passes without
+         * the Flipper, as with an ignored SetLinkStandbyCallback */
+        set_error(g, "sync skipped");
+        return false;
+    }
     g->block_send_active = true;
     g->block_send_size = size;
     g->block_send_pos = 0;
@@ -464,11 +471,11 @@ static void process_recv_cmds(FakeRuby* g) {
             send_link_player_block(g);
             break;
         case CMD_READY_EXIT_STANDBY:
-            /* The flag persists until a sync completes, so the Flipper's 2FFE outside one would
-             * let this GBA's next sync finish without the Flipper (§B5.3). Ruby keeps it
-             * silently. */
-            if(i != LOCAL_ID && g->callback != FakeRubyCbStandby &&
-               g->callback != FakeRubyCbStandbyForAll) {
+            /* The flag persists until a sync completes, so a Flipper 2FFE that isn't the answer to
+             * this GBA's own (sent, and back as its echo) would let a sync finish without the
+             * Flipper (§B5.3). Ruby keeps it silently. */
+            if(i != LOCAL_ID &&
+               (g->callback != FakeRubyCbStandbyForAll || !g->ready_standby[LOCAL_ID])) {
                 set_error(g, "stray 2ffe");
                 return;
             }
@@ -1437,9 +1444,15 @@ static void run_trade_evolution(FakeRuby* g) {
 
 /* ---- The link save (trade.c sub_804DC88, save.c, §B5) ---- */
 
-/* sub_80084A4 [SetLinkStandbyCallback]: only while gLinkCallback is NULL */
+/* sub_80084A4 [SetLinkStandbyCallback]: ignored while gLinkCallback is busy. The save's wait
+ * (IsLinkTaskFinished) then ends with the busy callback, and the sync passes without the
+ * Flipper: an error here. */
 static void set_link_standby_callback(FakeRuby* g) {
-    if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbStandby;
+    if(g->callback != FakeRubyCbNone) {
+        set_error(g, "sync skipped");
+        return;
+    }
+    g->callback = FakeRubyCbStandby;
 }
 
 /* One flash write: IRQs stay on, the main loop stalls (§B5.2, T4). */
@@ -1533,9 +1546,12 @@ static void run_save(FakeRuby* g) {
         g->cb2_frame = g->frame;
         g->cb2_state = SAVE_CLOSE;
         break;
-    case SAVE_CLOSE: /* SetCloseLinkCallback, ignored while busy as on Ruby: then a hang */
+    case SAVE_CLOSE:
         if(g->frame - g->cb2_frame < SAVE_BGM_FRAMES) break;
-        set_close_link_callback(g);
+        if(!set_close_link_callback(g)) {
+            set_error(g, "close skipped"); /* the link stays open: state 9 never ends */
+            return;
+        }
         g->cb2_state = SAVE_CLOSED;
         break;
     case SAVE_CLOSED:

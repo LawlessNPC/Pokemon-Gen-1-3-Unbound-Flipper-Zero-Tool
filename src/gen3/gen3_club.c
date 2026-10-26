@@ -20,6 +20,11 @@
 #define FLIPPER_MULTIPLAYER_ID 0 /* slot 0: block headers carry 0x80 */
 #define NAME_MAX_CHARS         7
 
+/* Byte 0x13 of a Pokemon, game form or not (the header is never encrypted): bit 1 is hasSpecies
+ * (pokeruby BoxPokemon, PKHeX PK3; Gen3FieldHasSpecies in gen3_pkm.c) */
+#define PKM_FLAGS_OFF   0x13
+#define PKM_HAS_SPECIES 0x02
+
 static bool send_cmd(Gen3Club* club, uint16_t w0, uint16_t w1) {
     uint16_t cmd[GEN3_CMD_LEN] = {0};
     cmd[0] = w0;
@@ -183,7 +188,6 @@ static void on_player_block(Gen3Club* club) {
             /* §B4.1: the pending trade's animation, then the GBA's ABCD and its link save */
             club->partner_valid = true;
             club->phase = Gen3ClubPhaseTrade;
-            club->save_syncs = 0;
         } else if(is_trade_link_type(lp.link_type)) {
             /* A Cable Club trade type the club doesn't follow: the 0x1133 block stalls the GBA. */
             set_error(club, Gen3ClubErrorUnexpected);
@@ -269,8 +273,12 @@ static void start_round(Gen3Club* club, uint8_t round) {
         memset(club->party_mon, 0, sizeof(club->party_mon));
     }
     /* R8: Ruby counts the Flipper's party up to the first species 0. The offer has a species
-     * (G6); without one the GBA's partner column is empty. */
-    if(round == 1) club->party_shown = club->has_offer;
+     * (G6); without one the GBA's partner column is empty. The hasSpecies bit is required too
+     * (fix round 1): conservative, Ruby counts by the species alone. */
+    if(round == 1) {
+        club->party_shown = club->has_offer &&
+                            (club->party_mon[PKM_FLAGS_OFF] & PKM_HAS_SPECIES) != 0;
+    }
     gen3_trade_round_block(round, round == 1 ? club->party_mon : NULL, club->round_block);
     send_cmd(club, CMD_SEND_BLOCK_REQ, gen3_trade_round_request(round));
     gen3_block_send(
@@ -367,6 +375,8 @@ static uint16_t menu_reply(Gen3Club* club) {
         if(club->menu != Gen3ClubMenuOffered) break;
         memcpy(club->pending_mon, club->gba_party[club->gba_slot], sizeof(club->pending_mon));
         club->trade_pending = true;
+        club->save_syncs = 0; /* no earlier trade's syncs through this one */
+        club->sync2_unconfirmed = false;
         club->menu = Gen3ClubMenuStarting;
         return GEN3_TRADE_START;
     case MenuCodeCancel:
@@ -433,20 +443,30 @@ static void on_save_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     if(club->save_syncs >= GEN3_CLUB_SAVE_SYNCS) return;
     club->save_syncs++;
     if(club->save_syncs == 1) club->save_window = true;
+    if(club->save_syncs == 2) club->sync2_unconfirmed = true; /* until a burst carries it */
     if(club->save_syncs == GEN3_CLUB_SAVE_SYNCS) end_trade(club, Gen3TradeResultDone);
 }
 
-/* D5, §B5.3: the link is lost. Only the pending trade's own 0x1144 session decides it here, by
- * the 2FFEs the club had answered; in any other session a pending trade waits for the GBA's next
- * LinkPlayerBlock (D3). */
+/* D5, §B5.3 (as ruled in fix round 1): the link is lost with a trade pending.
+ * - In the trade's own 0x1144 session, by the 2FFEs that reached the GBA: none, Canceled; sync 1
+ *   only, RolledBack; sync 2 too, Assumed (it commits 1-2 frames after our answer). A sync-2
+ *   answer still unconfirmed counts as not received.
+ * - In the 0x1122 session of its CCDD, before its 5FFF close was answered: the GBA can't have
+ *   left the trade menu (it closes only after our 5FFF), so the trade never began: Canceled.
+ * - Elsewhere (the normal relink between the two) it waits for the GBA's next LinkPlayerBlock
+ *   (D3). */
 static void on_link_lost(Gen3Club* club) {
-    if(!club->trade_pending || club->link_type != GEN3_LINKTYPE_TRADE_DISCONNECTED) return;
-    if(club->save_syncs == 0) {
+    if(!club->trade_pending) return;
+    if(club->link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED) {
+        if(club->save_syncs == 0) {
+            end_trade(club, Gen3TradeResultCanceled);
+        } else if(club->save_syncs == 1 || club->sync2_unconfirmed) {
+            end_trade(club, Gen3TradeResultRolledBack);
+        } else {
+            end_trade(club, Gen3TradeResultAssumed);
+        }
+    } else if(club->link_type == GEN3_LINKTYPE_TRADE_CONNECTING && !club->close_answered) {
         end_trade(club, Gen3TradeResultCanceled);
-    } else if(club->save_syncs == 1) {
-        end_trade(club, Gen3TradeResultRolledBack);
-    } else {
-        end_trade(club, Gen3TradeResultAssumed);
     }
 }
 
@@ -526,7 +546,13 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     club->frames++;
     if(rx) {
         uint16_t cmd[GEN3_CMD_LEN];
-        switch(gen3_link_rx(&club->link, rx, cmd)) {
+        const Gen3LinkEvent event = gen3_link_rx(&club->link, rx, cmd);
+        /* The last burst was a simultaneous exchange: unless the GBA has gone, it got every word
+         * we sent so far, the sync-2 answer too once nothing is left queued */
+        if(event != Gen3LinkEventDisconnected && gen3_link_queued(&club->link) == 0) {
+            club->sync2_unconfirmed = false;
+        }
+        switch(event) {
         case Gen3LinkEventNone:
             break;
         case Gen3LinkEventConnected:
