@@ -287,6 +287,29 @@ TEST(test_fake_corrupt_next) {
     ASSERT_STR_EQ(fake_ruby_error(&g), "checksum");
 }
 
+TEST(test_fake_corrupt_next_checksum) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkTx tx;
+    MlinkRx rx;
+    uint16_t cmd[GEN3_CMD_LEN];
+    fake_init(&g);
+    ASSERT_TRUE(master_to_room(&l, &g));
+    fake_ruby_corrupt_next_checksum(&g);
+    gen3_link_tx(&l, &tx);
+    fake_ruby_frame(&g, &tx, &rx);
+    /* the master's check of G's checksum fails */
+    ASSERT_EQ(gen3_link_rx(&l, &rx, cmd), Gen3LinkEventChecksumError);
+    ASSERT_EQ(rx.word[1], 0xCAFE); /* the burst's own command words are intact */
+    for(int i = 0; i < 60; i++) {
+        gen3_link_tx(&l, &tx);
+        fake_ruby_frame(&g, &tx, &rx);
+        ASSERT_TRUE(gen3_link_rx(&l, &rx, cmd) != Gen3LinkEventChecksumError); /* one burst */
+    }
+    ASSERT_TRUE(fake_ruby_error(&g) == NULL); /* G's own check passed: it stays healthy */
+    ASSERT_EQ(fake_ruby_phase(&g), FakeRubyRoom);
+}
+
 int main(void) {
     RUN(test_fake_handshake_timeline);
     RUN(test_fake_checksum_checked);
@@ -298,5 +321,6 @@ int main(void) {
     RUN(test_fake_leave_waits_for_partner);
     RUN(test_fake_leave_drops_hasty_answer);
     RUN(test_fake_corrupt_next);
+    RUN(test_fake_corrupt_next_checksum);
     TEST_EXIT();
 }

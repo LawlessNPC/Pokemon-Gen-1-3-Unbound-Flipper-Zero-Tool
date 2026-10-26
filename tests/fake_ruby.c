@@ -719,6 +719,10 @@ void fake_ruby_corrupt_next(FakeRuby* g) {
     g->corrupt_pending = true;
 }
 
+void fake_ruby_corrupt_next_checksum(FakeRuby* g) {
+    g->corrupt_checksum_pending = true;
+}
+
 void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx) {
     memset(rx, 0, sizeof(*rx));
     rx->count = tx->count;
@@ -727,12 +731,20 @@ void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx) {
         if(g->powered && g->serial_on) {
             uint16_t own = g->sio_send;
             rx->word[t] = own;
-            /* send_index 1..8: transfers #2..#9 carry command words (0 is the checksum slot) */
-            if(g->corrupt_pending && g->state == FakeRubyLinkConnected && g->send_index != 0) {
-                rx->word[t] ^= CORRUPT_BIT; /* the Flipper reads a glitched word ... */
+            /* The Flipper may read a glitched word, while this GBA's ISR below sums and checks
+             * the word it sent. send_index 1..8: transfers #2..#9 carry command words; 0 is the
+             * checksum slot, checked by the Flipper once checksum_available. */
+            const bool connected = g->state == FakeRubyLinkConnected;
+            if(g->corrupt_pending && connected && g->send_index != 0) {
+                rx->word[t] ^= CORRUPT_BIT;
                 g->corrupt_pending = false;
+            } else if(
+                g->corrupt_checksum_pending && connected && g->send_index == 0 &&
+                g->checksum_available) {
+                rx->word[t] ^= CORRUPT_BIT;
+                g->corrupt_checksum_pending = false;
             }
-            serial_irq(g, tx->word[t], own); /* ... while this GBA sums the word it sent */
+            serial_irq(g, tx->word[t], own);
         } else {
             rx->word[t] = MLINK_NO_DATA;
             rx->timeout_mask |= (uint16_t)(1u << t);

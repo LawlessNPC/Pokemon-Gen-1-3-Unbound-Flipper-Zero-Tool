@@ -90,7 +90,9 @@ static Gen3LinkEvent burst_rx(Gen3Link* link, const MlinkRx* rx, uint16_t cmd_ou
     link->checksum = sum;
     link->checksum_valid = true;
 
+    /* Transfer #1 checks the previous burst, not this one: hand this burst's words over anyway. */
     if(bad) {
+        memcpy(cmd_out, g, GEN3_CMD_LEN * sizeof(uint16_t));
         link->stats.checksum_errors++;
         return Gen3LinkEventChecksumError;
     }

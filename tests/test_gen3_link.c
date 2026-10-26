@@ -89,6 +89,25 @@ TEST(test_checksum_mismatch) {
     ASSERT_EQ(st.checksum_errors, 1);
 }
 
+TEST(test_checksum_mismatch_keeps_command) {
+    /* Transfer #1 checks the previous burst: this burst's command is handed over anyway. */
+    Gen3Link l;
+    gen3_link_init(&l);
+    connect(&l);
+    ASSERT_TRUE(send_checksum_burst(&l));
+    MlinkTx tx;
+    uint16_t g[9] = {0x1234, 0x2FFE, 0x0001};
+    uint16_t cmd[GEN3_CMD_LEN] = {0};
+    ASSERT_EQ(burst(&l, &tx, g, cmd), Gen3LinkEventChecksumError);
+    ASSERT_MEM_EQ(cmd, &g[1], sizeof(cmd));
+    const uint16_t none[9] = {0x1234};
+    ASSERT_EQ(burst(&l, &tx, none, cmd), Gen3LinkEventChecksumError);
+    for(int i = 0; i < GEN3_CMD_LEN; i++) ASSERT_EQ(cmd[i], 0); /* no command: all zero */
+    Gen3LinkStats st;
+    gen3_link_stats(&l, &st);
+    ASSERT_EQ(st.checksum_errors, 2);
+}
+
 TEST(test_command_received) {
     Gen3Link l;
     gen3_link_init(&l);
@@ -201,6 +220,7 @@ int main(void) {
     RUN(test_checksum_value);
     RUN(test_checksum_match);
     RUN(test_checksum_mismatch);
+    RUN(test_checksum_mismatch_keeps_command);
     RUN(test_command_received);
     RUN(test_queue_one_per_burst);
     RUN(test_queue_full);

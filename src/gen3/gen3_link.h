@@ -40,7 +40,9 @@ typedef struct Gen3Link {
 
 void gen3_link_init(Gen3Link* link);
 bool gen3_link_connected(const Gen3Link* link);
-/* Process the previous frame's result. On Gen3LinkEventCommand, cmd_out holds the GBA's 8 words. */
+/* Process the previous frame's result. On Gen3LinkEventCommand, cmd_out holds the GBA's 8 words.
+ * On Gen3LinkEventChecksumError it holds them too, all zero if the GBA sent no command: the
+ * failed check is about the previous burst, so this burst's command still counts. */
 Gen3LinkEvent gen3_link_rx(Gen3Link* link, const MlinkRx* rx, uint16_t cmd_out[GEN3_CMD_LEN]);
 /* Build this frame's transfers. Call exactly once per frame, after gen3_link_rx (or right after init). */
 void gen3_link_tx(Gen3Link* link, MlinkTx* tx);

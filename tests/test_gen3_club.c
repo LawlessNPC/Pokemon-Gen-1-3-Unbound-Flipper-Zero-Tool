@@ -245,27 +245,34 @@ TEST(test_club_gba_reset) {
 }
 
 TEST(test_club_checksum_error) {
+    /* A glitch in G's command words: both checksums diverge (§A2). The club keeps its phase and
+     * its queue; G fails its own check and closes the link, which reads as Disconnected. */
     Bench b;
     ASSERT_TRUE(reach_room(&b));
     fake_ruby_corrupt_next(&b.ruby);
-    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 10));
+    bool waiting = false;
+    for(int i = 0; i < 10 && !waiting; i++) {
+        step(&b);
+        Gen3ClubPhase phase = club_status(&b).phase;
+        ASSERT_TRUE(phase == Gen3ClubPhaseRoom || phase == Gen3ClubPhaseWaiting);
+        waiting = phase == Gen3ClubPhaseWaiting;
+    }
+    ASSERT_TRUE(waiting);
     Gen3ClubStatus st = club_status(&b);
     ASSERT_EQ(st.last_error, Gen3ClubErrorChecksum);
     ASSERT_EQ(st.link.checksum_errors, 1);
     ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
     ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "checksum");
     ASSERT_EQ(gen3_link_queued(&b.club.link), 0);
-    fake_ruby_power_off(&b.ruby);
-    run(&b, 120);
-    st = club_status(&b);
-    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
-    ASSERT_EQ(st.last_error, Gen3ClubErrorChecksum);
     ruby_relink(&b); /* the player restarts the GBA: the same club links again */
     ASSERT_TRUE(run_until_room(&b, 400));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_EQ(club_status(&b).last_error, Gen3ClubErrorChecksum); /* survives the relink */
 }
 
 TEST(test_club_checksum_error_mid_block) {
-    /* Review focus 3: a glitch while our trainer card streams drops the rest of the block. */
+    /* Review focus 3: a two-sided glitch while our trainer card streams. G errors and closes;
+     * the Disconnected reset flushes the rest of the card, so none of it goes to a gone GBA. */
     Bench b;
     bench_init(&b, GEN3_LINKTYPE_TRADE_SETUP);
     fake_ruby_open_link(&b.ruby);
@@ -273,14 +280,125 @@ TEST(test_club_checksum_error_mid_block) {
     ASSERT_EQ(b.sent_cccc, 1);
     uint32_t chunks_before = b.sent_8888;
     fake_ruby_corrupt_next(&b.ruby);
-    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 10));
-    ASSERT_EQ(club_status(&b).last_error, Gen3ClubErrorChecksum);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 10));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "checksum");
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorChecksum);
+    ASSERT_EQ(st.link.checksum_errors, 1);
     ASSERT_EQ(gen3_link_queued(&b.club.link), 0);
     uint32_t chunks_sent = b.sent_8888 - chunks_before;
     ASSERT_TRUE(chunks_sent < 8); /* the card is 8 chunks: it was cut short */
     run(&b, 30);
     ASSERT_EQ(b.sent_8888 - chunks_before, chunks_sent);
     ASSERT_EQ(club_status(&b).phase, Gen3ClubPhaseWaiting);
+}
+
+TEST(test_club_checksum_one_sided) {
+    /* A glitch on G's transfer #1 only (§A2: not summed): G is healthy and must not be stranded. */
+    Bench b;
+    ASSERT_TRUE(reach_room(&b));
+    fake_ruby_corrupt_next_checksum(&b.ruby);
+    run(&b, 5);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorChecksum);
+    ASSERT_EQ(st.link.checksum_errors, 1);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseRoom);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_TRUE(leave_room(&b));
+    run(&b, 120);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_EQ(b.sent_cafe17, 1);
+    ASSERT_EQ(b.sent_5fff, 1);
+    st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorChecksum);
+    ASSERT_EQ(st.link.checksum_errors, 1);
+}
+
+TEST(test_club_checksum_one_sided_other_room) {
+    /* In the Error phase a checksum error is counted but keeps the error on screen, and G's 5FFF
+     * is still answered. */
+    Bench b;
+    bench_init(&b, 0x2233);
+    fake_ruby_open_link(&b.ruby);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 400));
+    fake_ruby_corrupt_next_checksum(&b.ruby);
+    run(&b, 400);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_EQ(b.sent_5fff, 1);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.link.checksum_errors, 1);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorOtherRoom);
+}
+
+/* Fresh bench; a one-sided glitch on G's checksum `delay` frames after the club linked. True if
+ * both sides still reach the room with no GBA error, the glitch counted once, 2FFE answered. */
+static bool linkup_with_one_sided_glitch(uint32_t delay) {
+    Bench b;
+    bench_init(&b, GEN3_LINKTYPE_TRADE_SETUP);
+    fake_ruby_open_link(&b.ruby);
+    if(!run_until_phase(&b, Gen3ClubPhaseLinked, 100)) return false;
+    run(&b, delay);
+    fake_ruby_corrupt_next_checksum(&b.ruby);
+    if(!run_until_room(&b, 400) || fake_ruby_error(&b.ruby) != NULL) return false;
+    run(&b, 5);
+    Gen3ClubStatus st = club_status(&b);
+    return st.phase == Gen3ClubPhaseRoom && st.link.checksum_errors == 1 &&
+           st.last_error == Gen3ClubErrorChecksum && b.sent_2ffe == 1 && b.sent_cccc == 1;
+}
+
+TEST(test_club_checksum_one_sided_linkup) {
+    /* Every burst from the first checked one to the room, the walk-in and G's 2FFE included: a
+     * burst whose checksum word reads wrong still carries G's command, which must not be lost. */
+    Bench ref;
+    bench_init(&ref, GEN3_LINKTYPE_TRADE_SETUP);
+    fake_ruby_open_link(&ref.ruby);
+    ASSERT_TRUE(run_until_phase(&ref, Gen3ClubPhaseLinked, 100));
+    uint32_t linkup = 0;
+    for(; linkup < 400 && fake_ruby_phase(&ref.ruby) != FakeRubyRoom; linkup++) step(&ref);
+    ASSERT_TRUE(linkup > 30 && linkup < 400); /* the walk-in alone is 30 frames */
+    for(uint32_t delay = 0; delay < linkup; delay++) {
+        if(!linkup_with_one_sided_glitch(delay)) {
+            printf("    glitch %u frames after linking\n", (unsigned)delay);
+            ASSERT_TRUE(false);
+        }
+    }
+}
+
+/* Room reached, the GBA player leaves; a one-sided glitch on G's checksum `delay` frames later.
+ * True if both sides still finish cleanly: G closed with no error, the club back to Waiting. */
+static bool leave_with_one_sided_glitch(uint32_t delay) {
+    Bench b;
+    if(!reach_room(&b)) return false;
+    fake_ruby_leave_room(&b.ruby);
+    run(&b, delay);
+    fake_ruby_corrupt_next_checksum(&b.ruby);
+    if(!run_until_phase(&b, Gen3ClubPhaseWaiting, 600)) return false;
+    run(&b, 60);
+    Gen3ClubStatus st = club_status(&b);
+    return fake_ruby_phase(&b.ruby) == FakeRubyClosed && fake_ruby_error(&b.ruby) == NULL &&
+           st.phase == Gen3ClubPhaseWaiting && st.link.checksum_errors == 1 &&
+           b.sent_cafe17 == 1 && b.sent_5fff == 1;
+}
+
+TEST(test_club_checksum_one_sided_leaving) {
+    /* Every burst of the exit (§B7) while G is still linked, its CAFE 0017 and 5FFF included. */
+    Bench ref;
+    ASSERT_TRUE(reach_room(&ref));
+    fake_ruby_leave_room(&ref.ruby);
+    uint32_t leaving = 0;
+    for(; leaving < 600 && fake_ruby_phase(&ref.ruby) != FakeRubyClosed; leaving++) step(&ref);
+    ASSERT_TRUE(leaving > 120 && leaving < 600); /* the prompt and message alone are 120 */
+    for(uint32_t delay = 0; delay < leaving; delay++) {
+        if(!leave_with_one_sided_glitch(delay)) {
+            printf("    glitch %u frames into the exit\n", (unsigned)delay);
+            ASSERT_TRUE(false);
+        }
+    }
 }
 
 int main(void) {
@@ -295,5 +413,9 @@ int main(void) {
     RUN(test_club_gba_reset);
     RUN(test_club_checksum_error);
     RUN(test_club_checksum_error_mid_block);
+    RUN(test_club_checksum_one_sided);
+    RUN(test_club_checksum_one_sided_other_room);
+    RUN(test_club_checksum_one_sided_linkup);
+    RUN(test_club_checksum_one_sided_leaving);
     TEST_EXIT();
 }

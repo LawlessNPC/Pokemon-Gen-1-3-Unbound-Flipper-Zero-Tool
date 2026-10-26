@@ -23,6 +23,15 @@ static void send_cmd(Gen3Club* club, uint16_t w0, uint16_t w1) {
     gen3_link_send(&club->link, cmd);
 }
 
+/* Any non-zero word, as for Gen3LinkEventCommand (an all-zero burst is no command, §A2). */
+static bool is_command(const uint16_t cmd[GEN3_CMD_LEN]) {
+    for(size_t i = 0; i < GEN3_CMD_LEN; i++) {
+        if(cmd[i] != 0) return true;
+    }
+    return false;
+}
+
+/* Bad player block or other room. A checksum error never stops the club: see gen3_club_frame. */
 static void set_error(Gen3Club* club, Gen3ClubError error) {
     club->phase = Gen3ClubPhaseError;
     club->last_error = error;
@@ -180,8 +189,12 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
             on_command(club, cmd);
             break;
         case Gen3LinkEventChecksumError:
-            gen3_link_flush(&club->link); /* never keep streaming a half-sent block */
-            set_error(club, Gen3ClubErrorChecksum);
+            /* Transfer #1 carries each side's checksum and is not summed (§A2). A glitch on G's
+             * word fails only our check: G is healthy and still expects every answer, so keep
+             * the phase and the queue. If G's check failed too, G closes the link and its slot
+             * reads 0xFFFF: Disconnected resets us. An Error phase keeps the error it shows. */
+            if(club->phase != Gen3ClubPhaseError) club->last_error = Gen3ClubErrorChecksum;
+            if(is_command(cmd)) on_command(club, cmd); /* e.g. G's one 2FFE or CAFE 0017 */
             break;
         case Gen3LinkEventDisconnected:
             reset_session(club);

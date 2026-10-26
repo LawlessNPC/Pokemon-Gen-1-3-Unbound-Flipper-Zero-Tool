@@ -20,12 +20,12 @@ typedef enum {
     Gen3ClubPhaseCards,
     Gen3ClubPhaseRoom,
     Gen3ClubPhaseClosing,
-    Gen3ClubPhaseError,
+    Gen3ClubPhaseError, /* bad player block or other room: only the GBA's 5FFF is answered */
 } Gen3ClubPhase;
 
 typedef enum {
     Gen3ClubErrorNone,
-    Gen3ClubErrorChecksum,
+    Gen3ClubErrorChecksum, /* recorded only: the phase goes on (the GBA may be fine) */
     Gen3ClubErrorBadPlayerBlock,
     Gen3ClubErrorOtherRoom,
 } Gen3ClubError;

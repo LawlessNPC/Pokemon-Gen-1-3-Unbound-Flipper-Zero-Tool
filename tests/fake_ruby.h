@@ -152,6 +152,7 @@ struct FakeRuby {
     uint16_t script_updates; /* game updates left in the current script step */
 
     bool corrupt_pending; /* fake_ruby_corrupt_next: glitch the next command word */
+    bool corrupt_checksum_pending; /* fake_ruby_corrupt_next_checksum: glitch the next checksum */
 };
 
 /* me.link_type picks the counter */
@@ -167,6 +168,11 @@ void fake_ruby_leave_room(FakeRuby* g);
 /* Flips one bit of the next command word this GBA puts on the wire, as the Flipper reads it.
  * This GBA sums its own word, so both checksums diverge, as with a glitch at the receiver. */
 void fake_ruby_corrupt_next(FakeRuby* g);
+/* Flips one bit of the next checked checksum word (transfer #1, not the first burst's stale
+ * 0xB9A0) this GBA puts on the wire, as the Flipper reads it. Transfer #1 is not summed (§A2) and
+ * this GBA checks the Flipper's word and the one it sent, so only the Flipper sees a mismatch:
+ * this GBA stays healthy, as with a glitch at the Flipper's receiver. */
+void fake_ruby_corrupt_next_checksum(FakeRuby* g);
 /* simulates one frame of transfers */
 void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx);
 FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
