@@ -11,7 +11,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 - **The log** is `apps_data/pokemon/gen3_link.log`. It is overwritten each time a Trade or Link Test link starts, so after a failed run copy it off the SD card before you start another one. It grows by about 8 KB/s while you are in the Trade Center. Each line carries the link phase as `p0` to `p10`: `p0` waiting for the GBA, `p1`-`p3` linking, `p4` Trade Center room, `p5` closing, `p6` error, `p7` trade menu loading, `p8` trade menu, `p9` trade animation, `p10` the GBA's link save.
 - **The trade screen** shows `Gen III Trade` on top, three lines that say what is happening and what to do on the GBA, then `Flipper: <NICKNAME>`, the Pokemon the Flipper offers. `E<n>` at the top right counts checksum errors on the link; it should never appear. `Edit` at the bottom (the OK button) opens the editor; it is hidden while a trade is under way.
 - **The link runs behind every Gen III screen** once `Trade` has started it: the editor, its keyboards and lists, the species picker, `.pk3` load and save. `Trade` in the Gen III menu returns to the trade screen. While the link runs, the Gen III menu has `End trade` in place of `Link Test`.
-- **Between the GBA's links** (sitting down, the trade, after the save, back to the room) the trade screen shows `Linking...` for a moment, or `Trading...` during a trade. While you stay in the Trade Center it never shows `Go to the Cable Club`.
+- **Between the GBA's links** (sitting down, the trade, after the save, back to the room) the trade screen shows `Please wait...` as a link closes (also just after the save), then `Linking...`, each for a moment; during a trade it shows `Trading...` instead. While you stay in the Trade Center it never shows `Go to the Cable Club`.
 - The trade screen's texts are shown on three lines; this checklist writes them on one, except where it quotes the lines.
 - On any failure, report the step, what each screen showed (Flipper and GBA, including any `E<n>`), and the log file.
 
@@ -50,7 +50,12 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
    Hold Up for one step, then Down for one step. If Up is blocked, try Down then Up, and note it. The trade menu opens with TREECKO on the Flipper side.
 4. **Trade back.** Trade any of yours for TREECKO. Ruby: TREECKO is in your party with you as OT; it obeys in battle and gets no "boosted" Exp.
 5. **Again.** Repeat C and D once without leaving the room.
-6. **Edit while the GBA asks.** With the GBA in the trade menu, press TRADE on one of yours and, before the Flipper answers, press OK (`Edit`) on the Flipper. The GBA goes back to the room and no trade starts. On the Flipper, Back to the trade screen without changes. Sit again: the menu opens and trading works.
+6. **Edit while the GBA asks.** With the GBA in the trade menu:
+   1. On the GBA, choose one of yours → TRADE. The Flipper answers within about 0.2 s, and Ruby asks "Is this trade okay?". Ruby waits at that prompt for as long as you take.
+   2. While the prompt is up, press OK (`Edit`) on the Flipper: the editor opens. Ruby stays at its prompt.
+   3. With the Flipper's editor still open, answer YES on the GBA.
+
+   Expected: no trade starts, and Ruby goes back to the room. On the Flipper, Back to the trade screen, then sit again: the menu opens and trading works. (If you close the editor without a change before answering, YES trades exactly the Pokemon Ruby showed, which is safe. To check this step, keep the editor open until you have answered.)
 
 ## E. Background link while you work (Review Focus 5)
 
@@ -82,7 +87,7 @@ With the GBA in the Trade Center (opening the editor sends it from the trade men
 1. **Summary.** In the trade menu, open SUMMARY of any Pokemon on the GBA. On the Flipper, press OK (`Edit`), change the level, and Back to the trade screen. Close the summary on the GBA: within about 3 s Ruby leaves the menu for the room. Sit again; the menu opens with the new level.
 2. **Back during the save.** Pick a trade on the GBA, and before answering YES go Back to the Gen III menu on the Flipper. Answer YES. During "SAVING...", press Back on the Gen III menu: `The GBA is saving` / `Wait until it's done, then end the trade.` with only `OK`, and the link keeps running. `OK` returns to the menu; after the save the trade finished normally on both sides.
 3. **End during a trade** (R6). Pick a trade and answer YES on the GBA. While `Trading...` shows, go Back to the Gen III menu → `End trade` → `End`: the trade screen shows `Ending: the GBA walks out of the Trade Center by itself.` Press Back on the trade screen during the animation (it goes to the Gen III menu; `Trade` returns) and during the save (nothing happens): `Stop link?` never appears, also not in the moment before the animation while the GBA relinks for it. `End trade` in that moment, or in the one after the save while the GBA relinks for the trade menu, shows `End trade?` (or `The GBA is saving`), never ends the link at once. After the save Ruby returns to the room and walks out by itself, and the trade went through on both sides. If you were on the Gen III menu when Ruby walked out, `End trade` went from the menu by itself and `Link Test` came back.
-4. **A dialog left open while the trade ends** (fix round 1). Do G.3 again up to `End`, then go Back to the Gen III menu during the animation and choose `End trade` again: `End trade?` shows. Leave it open. Press `End` once during "SAVING...": the dialog becomes `The GBA is saving` (no End while it saves). `OK` returns to the menu. Once Ruby is back in the trade menu or the room after the save, choose `End trade` again and leave `End trade?` open. Wait until Ruby has saved, gone back to the room and walked out, then press `End`. Expected: the Gen III menu, with `Link Test` and no `End trade`; no crash; Edit Pokemon shows the Pokemon you just received.
+4. **A dialog left open while the trade ends.** Do G.3 again up to `End`, then go Back to the Gen III menu during the animation and choose `End trade` again: `End trade?` shows. Leave it open. Press `End` once during "SAVING...": the dialog becomes `The GBA is saving` (no End while it saves). `OK` returns to the menu. Once Ruby is back in the trade menu or the room after the save, choose `End trade` again and leave `End trade?` open. Wait until Ruby has saved, gone back to the room and walked out, then press `End`. Expected: the Gen III menu, with `Link Test` and no `End trade`; no crash; Edit Pokemon shows the Pokemon you just received.
 
 ## H. End trade
 
@@ -102,7 +107,7 @@ With the GBA in the Trade Center (opening the editor sends it from the trade men
 
 1. **Use your OT.** With a trade session running and the GBA in the Trade Center, Edit Pokemon → `OT TID` → any number but yours (say `12345`). After `OT SID` a row `OT: use <your Ruby name>` appears. Choose it: `OT Name`, `OT TID` and `OT SID` are yours again, `Shiny` is unchanged, and the row goes. If the Pokemon can't stay shiny under your OT ID, `Shiny lost` / `No shiny PID for this OT ID.` shows first; `OK` returns to the editor with your OT.
 2. **A loaded Pokemon.** Gen III → `Load .pk3` → `enigma-berry` (its OT is `FLIPPER`, TID `22222`). Edit Pokemon shows `OT: use <your Ruby name>`; choose it, and the OT rows are yours. Like any edit, this recalculates the stats, so a loaded Pokemon that was hurt comes back with full HP. That is by design.
-3. **Remembered after End trade.** Gen III menu → `End trade` → `End`, and wait for `Link ended`. Edit Pokemon → `Pokemon` → pick another species: `OT Name`, `OT TID` and `OT SID` are still yours. The Flipper remembers the last GBA player until the app exits.
+3. **Remembered after End trade.** Gen III menu → `End trade` → `End`, and wait for `Link ended`. Gen III → `Load .pk3` → `enigma-berry` again: its OT is `FLIPPER`, TID `22222`; don't use the `OT: use` row this time. Edit Pokemon → `Pokemon` → pick another species: `OT Name`, `OT TID` and `OT SID` become yours. The Flipper remembers the last GBA player until the app exits.
 
 ## K. Memory
 
