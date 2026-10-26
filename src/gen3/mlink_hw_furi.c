@@ -169,9 +169,9 @@ static MlinkModer mlink_moder_of(const GpioPin* pin) {
     return (MlinkModer){.keep = ~(3u << shift), .out = 1u << shift};
 }
 
-/* Cable guard tripped: SC and SO to input with pull-up, as SD is between transfers, so neither
- * fights a GBA that drives SC as multiplayer master. ODR goes high first, as before every mode
- * switch of these pins, so whatever switches them back drives them high. ISR context; a few
+/* SI seen high (cable guard): SC and SO to input with pull-up, as SD is between transfers, so
+ * neither fights a GBA that drives SC as multiplayer master. ODR goes high first, as before every
+ * mode switch of these pins, so whatever switches them back drives them high. ISR context; a few
  * register writes. */
 static void mlink_lines_release(const MlinkHw* hw) {
     const GpioPin* sc = hw->pins.sc;
@@ -309,8 +309,16 @@ static void mlink_hw_isr(void* context) {
         if(hw->frame_acc < MLINK_FRAME_DECI_US) {
             /* Idle tick, no transfer: latch SI high for the next frame start. A GBA master's SO
              * (on our SI) idles high but dips low in its own transfers, so one read per frame
-             * can miss it. One pin read and one byte store, nothing else. */
-            if(mlink_pin_read(hw->pins.si)) hw->si_seen_high = 1;
+             * can miss it. Usually one pin read, nothing else. The tick that first latches it
+             * also releases SC and SO at once, so they stop fighting a GBA master within a tick
+             * (~1 ms) rather than at the next frame start (~15 ms): at most one release per
+             * frame, only while SI reads high. Safe: no transfer runs until a frame start, that
+             * start trips on the latch (its release repeats the same writes), and every start
+             * that passes drives SC and SO again. */
+            if(mlink_pin_read(hw->pins.si) && !hw->si_seen_high) {
+                hw->si_seen_high = 1;
+                mlink_lines_release(hw);
+            }
             return;
         }
         hw->frame_acc -= MLINK_FRAME_DECI_US;

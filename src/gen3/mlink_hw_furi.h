@@ -16,11 +16,12 @@
  * read again at each frame start, before any line moves. High means the cable is out or reversed
  * (a reversed cable can read low until the GBA opens its link, so a check at start is not enough;
  * a GBA master's SO, on our SI, dips low during its own transfers, so one read per frame can miss
- * it). If SI is high at the frame start or was latched since the previous one, the frame runs no
- * transfer at all: SC and SO are released to input with pull-up (SD already is, between
- * transfers), and the callback gets the frame at once, every word MLINK_NO_DATA and every
- * timeout_mask bit set, as if the GBA never answered. The next frame that runs transfers first
- * makes SC and SO push-pull outputs again, driven high.
+ * it). The idle tick that first latches it releases SC and SO to input with pull-up at once (SD
+ * already is, between transfers). If SI is high at the frame start or was latched since the
+ * previous one, the frame runs no transfer at all: SC and SO are released (again), and the
+ * callback gets the frame at once, every word MLINK_NO_DATA and every timeout_mask bit set, as if
+ * the GBA never answered. The next frame that runs transfers first makes SC and SO push-pull
+ * outputs again, driven high.
  *
  * alloc/free/check_cable/start/stop are app-context calls; use them from one thread, never from
  * the frame callback. mlink_hw_cable_ok may be called from any thread. */
