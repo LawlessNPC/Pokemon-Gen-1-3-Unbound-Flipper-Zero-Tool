@@ -12,21 +12,28 @@
  * frame, t < tx.count. After a frame's last transfer the frame callback runs, in the TIM2
  * interrupt with interrupts enabled. It gets that frame's result and fills the next frame's tx.
  *
- * Cable guard: at each frame start, before any line moves, SI is read. High means the cable is
- * out or reversed (a reversed cable can read low until the GBA opens its link, so a check at
- * start is not enough). Such a frame runs no transfer at all: the callback gets it at once, every
- * word MLINK_NO_DATA and every timeout_mask bit set, as if the GBA never answered.
+ * Cable guard: SI is read on every idle tick (one that runs no transfer) and latched if high, and
+ * read again at each frame start, before any line moves. High means the cable is out or reversed
+ * (a reversed cable can read low until the GBA opens its link, so a check at start is not enough;
+ * a GBA master's SO, on our SI, dips low during its own transfers, so one read per frame can miss
+ * it). If SI is high at the frame start or was latched since the previous one, the frame runs no
+ * transfer at all: SC and SO are released to input with pull-up (SD already is, between
+ * transfers), and the callback gets the frame at once, every word MLINK_NO_DATA and every
+ * timeout_mask bit set, as if the GBA never answered. The next frame that runs transfers first
+ * makes SC and SO push-pull outputs again, driven high.
  *
  * alloc/free/check_cable/start/stop are app-context calls; use them from one thread, never from
  * the frame callback. mlink_hw_cable_ok may be called from any thread. */
 
 typedef struct {
-    const GpioPin* sc; /* SC: frame clock, driven by the parent */
+    /* SC: frame clock, driven by the parent: push-pull output, idle high. SC and SO keep their
+     * pull-up on and are released to input with pull-up while the cable guard trips. */
+    const GpioPin* sc;
     /* SD: shared data line, pulled up. Pushed and pulled only for the Flipper's own word, then
      * released to input with pull-up (MLINK_SD_PUSH_PULL 1, the default); or open drain the whole
      * time (MLINK_SD_PUSH_PULL 0). */
     const GpioPin* sd;
-    const GpioPin* so; /* SO: goes to the GBA's SI */
+    const GpioPin* so; /* SO: goes to the GBA's SI; push-pull output, idle high, released as SC */
     const GpioPin* si; /* SI: grounded by the cable's parent plug */
 } MlinkPins;
 
@@ -56,9 +63,10 @@ MlinkCable mlink_hw_check_cable(MlinkHw* hw);
  * 1..MLINK_BURST_LEN. */
 bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx* first);
 
-/* The cable guard's latest reading: true from mlink_hw_start (its own check passed) until a frame
- * start reads SI high, and again once one reads it low. Keeps its value when stopped; false
- * before the first start. */
+/* The cable guard's latest decision: true from mlink_hw_start (its own check passed) until a frame
+ * start finds SI high (read then, or latched on an idle tick since the previous frame start), and
+ * true again once a frame start finds it low with nothing latched. Keeps its value when stopped;
+ * false before the first start. */
 bool mlink_hw_cable_ok(const MlinkHw* hw);
 
 /* Pins back to GpioModeAnalog, TIM2 off, ISR cleared. Does nothing if not running. */

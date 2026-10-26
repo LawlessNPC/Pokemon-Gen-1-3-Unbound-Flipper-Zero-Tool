@@ -88,16 +88,24 @@ _Static_assert(
     "one transfer must fit in one tick");
 _Static_assert(MLINK_BURST_LEN <= 16, "timeout_mask and framing_mask are 16 bits");
 
+/* One pin's 2-bit MODER field, for mlink_moder_write. */
+typedef struct {
+    uint32_t keep; /* the port's MODER with this pin's field cleared (= input) */
+    uint32_t out; /* this pin's field set to 01 (output) */
+} MlinkModer;
+
 struct MlinkHw {
     MlinkPins pins;
-    uint32_t sd_moder_keep; /* SD's port MODER with SD's 2-bit field cleared (= input) */
-    uint32_t sd_moder_out; /* SD's MODER field set to 01 (output) */
+    MlinkModer sd_moder;
+    MlinkModer sc_moder;
+    MlinkModer so_moder;
     MlinkFrameCallback cb;
     void* ctx;
     bool running;
     volatile bool cable_ok; /* written by the ISR at each frame start, read by any thread */
 
     /* Owned by the TIM2 ISR while running. */
+    volatile uint8_t si_seen_high; /* 1: an idle tick read SI high since the last frame start */
     bool in_frame;
     uint8_t transfer; /* next transfer of the current frame */
     uint32_t frame_acc; /* 0.1 us, see MLINK_FRAME_DECI_US */
@@ -146,12 +154,50 @@ static FURI_ALWAYS_INLINE void mlink_wait_until(uint32_t t0, uint32_t cycles) {
     }
 }
 
-/* MLINK_SD_PUSH_PULL: switch SD between input (MODER 00, pull-up) and output (MODER 01; OTYPER is
- * already push-pull, so it drives ODR). One read-modify-write of MODER, about 4 cycles; safe
- * because every interrupt is masked while it runs. */
+/* Switch one pin between input (MODER 00, with the pull-up mlink_pins_run set) and output
+ * (MODER 01; OTYPER is already push-pull, so it drives ODR). Used for SD's own word
+ * (MLINK_SD_PUSH_PULL) and for SC and SO when the cable guard releases them. One
+ * read-modify-write of MODER, about 4 cycles; callers mask every interrupt around it, so no
+ * other write to the same port's MODER can land in between. */
 static FURI_ALWAYS_INLINE void
     mlink_moder_write(GPIO_TypeDef* port, uint32_t keep_mask, uint32_t field) {
     port->MODER = (port->MODER & keep_mask) | field;
+}
+
+static MlinkModer mlink_moder_of(const GpioPin* pin) {
+    const uint32_t shift = 2u * (uint32_t)__builtin_ctz(pin->pin);
+    return (MlinkModer){.keep = ~(3u << shift), .out = 1u << shift};
+}
+
+/* Cable guard tripped: SC and SO to input with pull-up, as SD is between transfers, so neither
+ * fights a GBA that drives SC as multiplayer master. ODR goes high first, as before every mode
+ * switch of these pins, so whatever switches them back drives them high. ISR context; a few
+ * register writes. */
+static void mlink_lines_release(const MlinkHw* hw) {
+    const GpioPin* sc = hw->pins.sc;
+    const GpioPin* so = hw->pins.so;
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    mlink_pin_write(sc, true);
+    mlink_pin_write(so, true);
+    mlink_moder_write(sc->port, hw->sc_moder.keep, 0);
+    mlink_moder_write(so->port, hw->so_moder.keep, 0);
+    __set_PRIMASK(primask);
+}
+
+/* A frame is about to run transfers: SC and SO back to push-pull outputs at their idle level.
+ * ODR high first, then MODER 01, so each comes back driven high and never glitches low. Already
+ * outputs (the usual case), they just stay high. ISR context; a few register writes. */
+static void mlink_lines_drive(const MlinkHw* hw) {
+    const GpioPin* sc = hw->pins.sc;
+    const GpioPin* so = hw->pins.so;
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    mlink_pin_write(sc, true);
+    mlink_pin_write(so, true);
+    mlink_moder_write(sc->port, hw->sc_moder.keep, hw->sc_moder.out);
+    mlink_moder_write(so->port, hw->so_moder.keep, hw->so_moder.out);
+    __set_PRIMASK(primask);
 }
 
 /* The firmware starts the cycle counter at boot; gblink and furi_delay_us rely on it. Make sure
@@ -167,7 +213,8 @@ static void mlink_cyccnt_ensure(void) {
 /* One transfer: the parent's word on SD, hand-over on SO, then the child's word on SD. Every
  * interrupt is masked from SC low to SC high: 265 us with no child, 321 us plus the child's
  * reply delay with one, 421 us at most. SD is released (input with pull-up, or open drain high)
- * before SO goes low, and stays released when this returns. */
+ * before SO goes low, and stays released when this returns. SC and SO are push-pull outputs
+ * here (mlink_lines_drive at the frame start) and are high again when this returns. */
 static void mlink_hw_transfer(MlinkHw* hw, uint8_t t) {
     const GpioPin* sc = hw->pins.sc;
     const GpioPin* sd = hw->pins.sd;
@@ -175,8 +222,8 @@ static void mlink_hw_transfer(MlinkHw* hw, uint8_t t) {
     const uint32_t levels = mlink_frame_levels(hw->tx.word[t]);
 #if MLINK_SD_PUSH_PULL
     GPIO_TypeDef* const sd_port = sd->port;
-    const uint32_t sd_keep = hw->sd_moder_keep;
-    const uint32_t sd_out = hw->sd_moder_out;
+    const uint32_t sd_keep = hw->sd_moder.keep;
+    const uint32_t sd_out = hw->sd_moder.out;
 #endif
     uint16_t word = 0;
     bool answered = false;
@@ -259,7 +306,13 @@ static void mlink_hw_isr(void* context) {
 
     hw->frame_acc += MLINK_TICK_DECI_US;
     if(!hw->in_frame) {
-        if(hw->frame_acc < MLINK_FRAME_DECI_US) return;
+        if(hw->frame_acc < MLINK_FRAME_DECI_US) {
+            /* Idle tick, no transfer: latch SI high for the next frame start. A GBA master's SO
+             * (on our SI) idles high but dips low in its own transfers, so one read per frame
+             * can miss it. One pin read and one byte store, nothing else. */
+            if(mlink_pin_read(hw->pins.si)) hw->si_seen_high = 1;
+            return;
+        }
         hw->frame_acc -= MLINK_FRAME_DECI_US;
         hw->transfer = 0;
         hw->rx.count = hw->tx.count;
@@ -269,16 +322,20 @@ static void mlink_hw_isr(void* context) {
         hw->rx.timeout_mask = 0;
         hw->rx.framing_mask = 0;
 
-        /* Cable guard, one pin read before any line moves (interrupts on). The parent plug
-         * grounds SI; high through the pull-up means no cable or a reversed one. Skip the
-         * frame: no SC, SD or SO activity, and the callback sees a GBA that never answered. */
-        const bool cable_ok = !mlink_pin_read(hw->pins.si);
+        /* Cable guard, before any line moves (interrupts on). The parent plug grounds SI; high
+         * through the pull-up, now or on an idle tick since the last frame start, means no
+         * cable or a reversed one. Skip the frame: SC and SO released (SD already is), no
+         * transfer, and the callback sees a GBA that never answered. */
+        const bool cable_ok = !mlink_pin_read(hw->pins.si) && !hw->si_seen_high;
+        hw->si_seen_high = 0;
         hw->cable_ok = cable_ok;
         if(!cable_ok) {
+            mlink_lines_release(hw);
             hw->rx.timeout_mask = (uint16_t)((1u << hw->rx.count) - 1u); /* count is 1..9 */
             mlink_frame_done(hw);
             return;
         }
+        mlink_lines_drive(hw); /* undoes a skipped frame's release; else SC and SO stay high */
         hw->in_frame = true;
     }
 
@@ -288,12 +345,14 @@ static void mlink_hw_isr(void* context) {
     mlink_frame_done(hw);
 }
 
-/* Each output gets its idle level before it becomes an output, so nothing glitches low. */
+/* Each output gets its idle level before it becomes an output, so nothing glitches low.
+ * SC and SO get their pull-up now, though it does nothing while they drive: the cable guard
+ * releases them by MODER alone (mlink_lines_release), and that makes them inputs with pull-up. */
 static void mlink_pins_run(const MlinkPins* pins) {
     furi_hal_gpio_write(pins->so, true); /* the GBA's SI must idle high */
-    furi_hal_gpio_init(pins->so, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
+    furi_hal_gpio_init(pins->so, GpioModeOutputPushPull, GpioPullUp, MLINK_GPIO_SPEED);
     furi_hal_gpio_write(pins->sc, true);
-    furi_hal_gpio_init(pins->sc, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
+    furi_hal_gpio_init(pins->sc, GpioModeOutputPushPull, GpioPullUp, MLINK_GPIO_SPEED);
     furi_hal_gpio_write(pins->sd, true);
 #if MLINK_SD_PUSH_PULL
     /* Released between transfers: input with pull-up. OTYPER push-pull only takes effect while
@@ -319,14 +378,14 @@ static void mlink_pins_off(const MlinkPins* pins) {
 MlinkHw* mlink_hw_alloc(const MlinkPins* pins) {
     furi_check(pins);
     furi_check(pins->sc && pins->sd && pins->so && pins->si);
-    furi_check(pins->sd->pin != 0);
+    furi_check(pins->sd->pin != 0 && pins->sc->pin != 0 && pins->so->pin != 0);
 
     MlinkHw* hw = malloc(sizeof(MlinkHw));
     memset(hw, 0, sizeof(*hw));
     hw->pins = *pins;
-    const uint32_t sd_shift = 2u * (uint32_t)__builtin_ctz(pins->sd->pin);
-    hw->sd_moder_keep = ~(3u << sd_shift);
-    hw->sd_moder_out = 1u << sd_shift;
+    hw->sd_moder = mlink_moder_of(pins->sd);
+    hw->sc_moder = mlink_moder_of(pins->sc);
+    hw->so_moder = mlink_moder_of(pins->so);
     return hw;
 }
 
@@ -377,7 +436,8 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
     hw->in_frame = false;
     hw->transfer = 0;
     hw->frame_acc = 0; /* first frame after 16 ticks (17.2 ms) of idle lines */
-    hw->cable_ok = true; /* checked above; the ISR re-reads SI at every frame start */
+    hw->si_seen_high = 0;
+    hw->cable_ok = true; /* checked above; the ISR re-checks SI at every frame start */
 
     mlink_pins_run(&hw->pins);
     /* Stop mode would halt TIM2; plain WFI sleep keeps it running. */
