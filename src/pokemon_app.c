@@ -9,6 +9,7 @@
 #include <src/scenes/include/pokemon_scene.h>
 
 #include <gblink/include/gblink_pinconf.h>
+#include <src/gen3/gen3_pins_furi.h>
 #include <gblink.h>
 
 bool pokemon_custom_event_callback(void* context, uint32_t event) {
@@ -68,6 +69,7 @@ PokemonFap* pokemon_alloc() {
     // Allocate gblink before going to main menu
     pokemon_fap->gblink_handle = gblink_alloc();
     gblink_pinconf_load(pokemon_fap->gblink_handle);
+    gen3_sd_pin_load(pokemon_fap->gblink_handle);
 
     return pokemon_fap;
 }
