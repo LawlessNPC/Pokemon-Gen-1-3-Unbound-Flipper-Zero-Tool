@@ -948,9 +948,11 @@ TEST(test_club_confirm_while_idle) {
     /* §B3.4: a BBBB with no DDDD of the Flipper's before it gets DDEE, never CCDD (Ruby never
      * sends one; a scripted GBA does) */
     Bench b;
+    BenchRawGba g;
     bench_init_trade(&b);
     ASSERT_TRUE(bench_reach_menu(&b));
-    bench_raw_gba_block(&b, GEN3_TRADE_CONFIRM, 0, 30);
+    raw_gba_init(&g, &b, GEN3_TRADE_CONFIRM, 0);
+    raw_gba_run(&g, &b, 30);
     ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 1);
     ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
     const BenchBlock* ddee = trade_block(b.f_blocks, b.n_f_blocks, 0);
@@ -966,9 +968,11 @@ TEST(test_club_ready_past_party) {
     /* An AABB for slot 6 or later (past any GBA party, as a scripted GBA sends it): refused as
      * Empty, DDEE */
     Bench b;
+    BenchRawGba g;
     bench_init_trade(&b);
     ASSERT_TRUE(bench_reach_menu(&b));
-    bench_raw_gba_block(&b, GEN3_TRADE_READY, 6, 30);
+    raw_gba_init(&g, &b, GEN3_TRADE_READY, 6);
+    raw_gba_run(&g, &b, 30);
     ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
     const BenchBlock* ddee = trade_block(b.f_blocks, b.n_f_blocks, 0);
     ASSERT_TRUE(trade_block_is(ddee, GEN3_TRADE_PLAYER_CANCEL, 0));
@@ -2313,80 +2317,23 @@ TEST(test_trade_r_mash_eebb) {
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
 }
 
-/* A scripted GBA in the trade menu, as bench_raw_gba_block (club_bench.h) but resumable: it sends
- * one broken 20-byte block {code, arg}, then idle bursts. The header's size word reads wire_size
- * at the Flipper while this GBA sums the 0x14 it sent (a glitch at the Flipper's receiver: the
- * Flipper alone counts a checksum error, as this GBA doesn't check the Flipper's word), and only
- * `chunks` (0..2) of the block's two chunks follow. The fake isn't stepped from here on. */
-typedef struct {
-    uint16_t cmds[3][GEN3_CMD_LEN];
-    uint16_t wire_size;
-    uint8_t chunks;
-    uint32_t sent; /* bursts so far */
-    uint16_t sum; /* this GBA's checksum of its latest burst */
-} RawGba;
-
-static void raw_gba_init(
-    RawGba* g,
-    const Bench* b,
-    uint16_t code,
-    uint16_t arg,
-    uint16_t wire_size,
-    uint8_t chunks) {
-    uint8_t block[GEN3_TRADE_BLOCK_SIZE];
-    memset(g, 0, sizeof(*g));
-    g->cmds[0][0] = 0xBBBB;
-    g->cmds[0][1] = GEN3_TRADE_BLOCK_SIZE;
-    g->cmds[0][2] = 0x81;
-    g->cmds[1][0] = 0x8888;
-    g->cmds[2][0] = 0x8888;
-    gen3_trade_block_build(code, arg, block);
-    for(size_t i = 0; i < GEN3_TRADE_BLOCK_SIZE / 2; i++) {
-        g->cmds[1 + i / 7][1 + i % 7] = (uint16_t)(block[2 * i] | (block[2 * i + 1] << 8));
-    }
-    g->wire_size = wire_size;
-    g->chunks = chunks;
-    for(size_t i = 1; i < MLINK_BURST_LEN; i++) {
-        g->sum = (uint16_t)(g->sum + b->last_tx.word[i] + b->rx.word[i]);
-    }
-}
-
-/* `frames` more bursts. The club takes burst k's commands in the frame after it. */
-static void raw_gba_run(RawGba* g, Bench* b, uint32_t frames) {
-    for(uint32_t f = 0; f < frames; f++, g->sent++) {
-        MlinkTx tx;
-        gen3_club_frame(&b->club, &b->rx, &tx);
-        count_sent(b, &tx);
-        memset(&b->rx, 0, sizeof(b->rx));
-        b->rx.count = tx.count;
-        b->rx.word[0] = g->sum;
-        const uint16_t* own = g->sent <= g->chunks ? g->cmds[g->sent] : NULL;
-        if(own) memcpy(&b->rx.word[1], own, sizeof(g->cmds[0]));
-        if(g->sent == 0) b->rx.word[2] = g->wire_size;
-        g->sum = 0;
-        for(size_t i = 1; i < MLINK_BURST_LEN; i++) {
-            g->sum = (uint16_t)(g->sum + tx.word[i] + (own ? own[i - 1] : 0));
-        }
-        bench_record(b, &tx);
-    }
-}
-
 TEST(test_trade_broken_block_released) {
-    /* M2: Ruby sends a block's chunks on consecutive frames. A GBA block that stops short is
-     * dropped on the second burst in a row without a chunk for it, so it can't hold the arbiter */
+    /* M2 (fix round 1): a GBA block that stops short is dropped on the 6th burst in a row without
+     * a chunk for it (GEN3_CLUB_REPLY_DELAY_BURSTS), so it can't hold the arbiter */
     {
         /* A glitched size (0x34 > 28): the block can't complete. The Flipper counted a checksum
          * error, so the tainted session's EEBB goes out (a 52-byte block is never filed, so it
          * doesn't hold the arbiter), and the block is dropped */
         Bench b;
-        RawGba g;
+        BenchRawGba g;
         bench_init_trade(&b);
         ASSERT_TRUE(bench_reach_menu(&b));
-        raw_gba_init(&g, &b, GEN3_TRADE_READY, 2, 0x34, 2);
-        raw_gba_run(&g, &b, 5); /* the club has the header and both chunks, then an idle burst */
+        raw_gba_init(&g, &b, GEN3_TRADE_READY, 2);
+        g.wire_size = 0x34;
+        raw_gba_run(&g, &b, 9); /* the club has the header, both chunks and 5 idle bursts */
         ASSERT_TRUE(b.club.block_rx.active); /* 28 of 52 bytes */
         raw_gba_run(&g, &b, 1);
-        ASSERT_TRUE(!b.club.block_rx.active); /* the second burst without a chunk */
+        ASSERT_TRUE(!b.club.block_rx.active); /* the 6th burst without a chunk */
         Gen3ClubStatus st = club_status(&b);
         ASSERT_EQ(st.link.checksum_errors, 1);
         ASSERT_TRUE(st.offer_stale);
@@ -2399,17 +2346,18 @@ TEST(test_trade_broken_block_released) {
         /* A 20-byte AABB whose second chunk never comes, with an EEBB due (the offer changed
          * meanwhile): the block holds the arbiter until it is dropped, then the EEBB goes out */
         Bench b;
-        RawGba g;
+        BenchRawGba g;
         uint8_t z[GEN3_PARTY_SIZE];
         make_z(z);
         bench_init_trade(&b);
         ASSERT_TRUE(bench_reach_menu(&b));
-        raw_gba_init(&g, &b, GEN3_TRADE_READY, 2, GEN3_TRADE_BLOCK_SIZE, 1);
+        raw_gba_init(&g, &b, GEN3_TRADE_READY, 2);
+        g.chunks = 1;
         const uint32_t chunk = b.bursts + 2; /* the burst of the one chunk */
         raw_gba_run(&g, &b, 2); /* the club has the header */
         ASSERT_TRUE(b.club.block_rx.active);
         ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 0));
-        raw_gba_run(&g, &b, 2); /* the chunk, then one burst without */
+        raw_gba_run(&g, &b, 6); /* the chunk, then 5 bursts without */
         ASSERT_TRUE(b.club.block_rx.active);
         ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 0);
         raw_gba_run(&g, &b, 1);
@@ -2418,10 +2366,39 @@ TEST(test_trade_broken_block_released) {
         ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
         const BenchBlock* eebb = trade_block(b.f_blocks, b.n_f_blocks, 0);
         ASSERT_TRUE(trade_block_is(eebb, GEN3_TRADE_BOTH_CANCEL, 0));
-        ASSERT_TRUE(eebb->first_burst >= chunk + 7);
-        ASSERT_TRUE(eebb->first_burst <= chunk + 12);
+        /* The chunk restarted the delay (M1) and the block held it until the drop, on the 6th
+         * burst after the chunk: then 6 idle bursts */
+        ASSERT_TRUE(eebb->first_burst >= chunk + 13);
+        ASSERT_TRUE(eebb->first_burst <= chunk + 14);
         ASSERT_EQ(club_status(&b).menu, Gen3ClubMenuLeaving);
         ASSERT_EQ(club_status(&b).link.checksum_errors, 0);
+    }
+}
+
+TEST(test_trade_lagged_block_answered) {
+    /* M2 (fix round 1): a filed AABB whose second chunk comes after GBA lag frames (2, and 5,
+     * the most the drop allows) is still complete, and gets its one DDDD with the usual delay */
+    static const uint8_t lags[] = {2, 5};
+    for(size_t i = 0; i < sizeof(lags); i++) {
+        Bench b;
+        BenchRawGba g;
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        raw_gba_init(&g, &b, GEN3_TRADE_READY, 2);
+        g.lag = lags[i];
+        raw_gba_run(&g, &b, 30);
+        ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 1);
+        const BenchBlock* aabb = trade_block(b.g_blocks, b.n_g_blocks, 0);
+        ASSERT_TRUE(trade_block_is(aabb, GEN3_TRADE_READY, 2));
+        ASSERT_EQ(aabb->last_burst, aabb->first_burst + 2u + lags[i]);
+        ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+        const BenchBlock* dddd = trade_block(b.f_blocks, b.n_f_blocks, 0);
+        ASSERT_TRUE(trade_block_is(dddd, GEN3_TRADE_SET_MONS, 0));
+        ASSERT_TRUE(replied_after(aabb, dddd));
+        const Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.menu, Gen3ClubMenuOffered);
+        ASSERT_EQ(st.gba_slot, 2);
+        ASSERT_EQ(st.link.checksum_errors, 0);
     }
 }
 
@@ -2811,6 +2788,108 @@ TEST(test_leave_and_gba_exit) {
     }
 }
 
+/* reach_room, then: with gba_leaves, the GBA player walks out at once (fake_ruby_leave_room);
+ * with request_at 0 the leave is asked at once, else just before the step that sends burst
+ * request_at, together with a CAFE 0011 queued on the club's link (bench_inject_cmd). Runs until
+ * left (false on a fake error or after 800 frames), noting the bursts of the Flipper's first
+ * 0017 and 0011 and of the GBA's first 0017 (0 for none). */
+typedef struct {
+    uint32_t f_exit, f_idle, g_exit;
+} LeaveBursts;
+
+static bool leave_with_queued(Bench* b, bool gba_leaves, uint32_t request_at, LeaveBursts* out) {
+    memset(out, 0, sizeof(*out));
+    if(!reach_room(b)) return false;
+    if(gba_leaves) fake_ruby_leave_room(&b->ruby);
+    if(request_at == 0) gen3_club_request_leave(&b->club);
+    for(int i = 0; i < 800 && !club_status(b).left; i++) {
+        if(request_at != 0 && b->bursts + 1 == request_at) {
+            gen3_club_request_leave(&b->club);
+            bench_inject_cmd(b, 0xCAFE, 0x0011);
+        }
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        const uint16_t* f = &b->last_tx.word[1];
+        const uint16_t* g = &b->rx.word[1];
+        if(f[0] == 0xCAFE && f[1] == 0x0017 && !out->f_exit) out->f_exit = b->bursts;
+        if(f[0] == 0xCAFE && f[1] == 0x0011 && !out->f_idle) out->f_idle = b->bursts;
+        if(g[0] == 0xCAFE && g[1] == 0x0017 && !out->g_exit) out->g_exit = b->bursts;
+    }
+    return club_status(b).left;
+}
+
+TEST(test_leave_queue_busy) {
+    /* D9 (fix round 1): the 0017 goes out only from an empty queue (leave_step) */
+    {
+        /* With a command queued in the frame it is due, it goes out exactly one burst later, and
+         * only once */
+        Bench b;
+        LeaveBursts ref;
+        LeaveBursts got;
+        ASSERT_TRUE(leave_with_queued(&b, false, 0, &ref));
+        ASSERT_TRUE(ref.f_exit != 0);
+        ASSERT_EQ(ref.f_idle, 0);
+        ASSERT_TRUE(leave_with_queued(&b, false, ref.f_exit, &got));
+        ASSERT_EQ(got.f_idle, ref.f_exit);
+        ASSERT_EQ(got.f_exit, ref.f_exit + 1);
+        ASSERT_EQ(b.sent_cafe17, 1);
+        ASSERT_TRUE(stays_left(&b));
+    }
+    {
+        /* The case it guards: the GBA's own 0017 comes in that very burst. Waiting, the club sees
+         * it first and answers it (the one 0017); a 0017 queued behind the command would follow
+         * the GBA's in the next burst, which the GBA drops (sub_8054FF8): it would wait forever */
+        Bench b;
+        LeaveBursts got;
+        uint32_t g_exit = 0;
+        ASSERT_TRUE(reach_room(&b)); /* the same run with no request: when the GBA sends 0017 */
+        fake_ruby_leave_room(&b.ruby);
+        for(int i = 0; i < 400 && !g_exit; i++) {
+            step(&b);
+            if(b.rx.word[1] == 0xCAFE && b.rx.word[2] == 0x0017) g_exit = b.bursts;
+        }
+        ASSERT_TRUE(g_exit != 0);
+        ASSERT_TRUE(leave_with_queued(&b, true, g_exit, &got));
+        ASSERT_EQ(got.g_exit, g_exit);
+        ASSERT_EQ(got.f_idle, g_exit);
+        ASSERT_TRUE(got.f_exit > g_exit + 1); /* the answer, after the GBA's next command */
+        ASSERT_EQ(b.sent_cafe17, 1);
+        ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
+        ASSERT_TRUE(stays_left(&b));
+    }
+}
+
+TEST(test_leave_during_linkup) {
+    /* D9 (fix round 1): asked in each Part A linkup phase, the leave waits: the linkup ends, the
+     * GBA walks in to the room, then the one 0017 walks it out, with no link error */
+    static const Gen3ClubPhase phases[] = {
+        Gen3ClubPhaseLinked,
+        Gen3ClubPhasePlayers,
+        Gen3ClubPhaseCards,
+    };
+    for(size_t i = 0; i < sizeof(phases) / sizeof(phases[0]); i++) {
+        Bench b;
+        bench_init_trade(&b);
+        fake_ruby_open_link(&b.ruby);
+        ASSERT_TRUE(run_until_phase(&b, phases[i], 400));
+        gen3_club_request_leave(&b.club);
+        Gen3ClubStatus st = club_status(&b);
+        ASSERT_TRUE(st.leaving);
+        ASSERT_TRUE(!st.left);
+        ASSERT_TRUE(run_until_room(&b, 420));
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        ASSERT_EQ(b.sent_cafe17, 0);
+        st = club_status(&b);
+        ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE_SETUP);
+        ASSERT_TRUE(st.leaving);
+        ASSERT_TRUE(run_until_closed_then_left(&b, 600));
+        ASSERT_EQ(b.sent_cafe17, 1);
+        ASSERT_TRUE(b.g_cafe_seen & (1u << 0x17));
+        ASSERT_EQ(b.sent_cafe16, 0);
+        ASSERT_TRUE(stays_left(&b));
+    }
+}
+
 TEST(test_club_size) {
     ASSERT_TRUE(sizeof(Gen3Club) <= 2600);
 }
@@ -2900,6 +2979,7 @@ int main(void) {
     RUN(test_trade_editing_refused_while_pending);
     RUN(test_trade_r_mash_eebb);
     RUN(test_trade_broken_block_released);
+    RUN(test_trade_lagged_block_answered);
     RUN(test_trade_resit_needed_survives_disconnect);
     RUN(test_trade_return_due_consumed);
     RUN(test_leave_from_room);
@@ -2912,6 +2992,8 @@ int main(void) {
     RUN(test_leave_in_relink_gap);
     RUN(test_leave_gba_gone);
     RUN(test_leave_and_gba_exit);
+    RUN(test_leave_queue_busy);
+    RUN(test_leave_during_linkup);
     RUN(test_club_size);
     TEST_EXIT();
 }

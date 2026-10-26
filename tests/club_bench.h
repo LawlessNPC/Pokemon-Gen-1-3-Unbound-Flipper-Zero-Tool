@@ -360,33 +360,68 @@ static inline bool bench_trade(Bench* b, uint8_t gba_slot) {
     return false;
 }
 
-/* From here the fake isn't stepped: for `frames` frames a scripted GBA link layer answers the
+/* From raw_gba_init on, the fake isn't stepped: raw_gba_run's scripted GBA link layer answers the
  * club instead, on the same checksum chain (transfer #1 carries the previous burst's sum, §A2),
- * sending the 20-byte block {code, arg, 0...} as slot 1, then idle bursts. For club branches a
- * Ruby-faithful fake never reaches. Both sides' blocks are logged as usual. */
-static inline void bench_raw_gba_block(Bench* b, uint16_t code, uint16_t arg, uint32_t frames) {
-    uint16_t cmds[3][GEN3_CMD_LEN] = {{0xBBBB, GEN3_TRADE_BLOCK_SIZE, 0x81}, {0x8888}, {0x8888}};
+ * for club branches a Ruby-faithful fake never reaches. It sends one 20-byte block
+ * {code, arg, 0...} as slot 1, then idle bursts; both sides' blocks are logged as usual. A test
+ * may break the block after raw_gba_init:
+ * - wire_size: the header's size word as the Flipper reads it, while this GBA sums the 0x14 it
+ *   sent (a glitch at the Flipper's receiver: the Flipper alone counts a checksum error, as this
+ *   GBA doesn't check the Flipper's word);
+ * - chunks: how many of the block's two chunks it sends (0..2);
+ * - lag: idle bursts before the second chunk (GBA lag frames; Ruby otherwise sends a block's
+ *   chunks on consecutive frames). */
+typedef struct {
+    uint16_t cmds[3][GEN3_CMD_LEN]; /* header, chunk 1, chunk 2 */
+    uint16_t wire_size;
+    uint8_t chunks;
+    uint8_t lag;
+    uint32_t sent; /* bursts so far */
+    uint16_t sum; /* this GBA's checksum of its latest burst */
+} BenchRawGba;
+
+static inline void raw_gba_init(BenchRawGba* g, const Bench* b, uint16_t code, uint16_t arg) {
     uint8_t block[GEN3_TRADE_BLOCK_SIZE];
+    memset(g, 0, sizeof(*g));
+    g->cmds[0][0] = 0xBBBB;
+    g->cmds[0][1] = GEN3_TRADE_BLOCK_SIZE;
+    g->cmds[0][2] = 0x81;
+    g->cmds[1][0] = 0x8888;
+    g->cmds[2][0] = 0x8888;
     gen3_trade_block_build(code, arg, block);
     for(size_t i = 0; i < GEN3_TRADE_BLOCK_SIZE / 2; i++) {
-        const uint16_t w = (uint16_t)(block[2 * i] | (block[2 * i + 1] << 8));
-        cmds[1 + i / 7][1 + i % 7] = w;
+        g->cmds[1 + i / 7][1 + i % 7] = (uint16_t)(block[2 * i] | (block[2 * i + 1] << 8));
     }
-    uint16_t sum = 0;
+    g->wire_size = GEN3_TRADE_BLOCK_SIZE;
+    g->chunks = 2;
     for(size_t i = 1; i < MLINK_BURST_LEN; i++) {
-        sum = (uint16_t)(sum + b->last_tx.word[i] + b->rx.word[i]);
+        g->sum = (uint16_t)(g->sum + b->last_tx.word[i] + b->rx.word[i]);
     }
-    for(uint32_t f = 0; f < frames; f++) {
+}
+
+/* The command this GBA sends in its burst s, or NULL for an idle burst. */
+static inline const uint16_t* raw_gba_cmd(const BenchRawGba* g, uint32_t s) {
+    if(s == 0) return g->cmds[0];
+    if(s == 1) return g->chunks >= 1 ? g->cmds[1] : NULL;
+    if(s == 2u + g->lag) return g->chunks >= 2 ? g->cmds[2] : NULL;
+    return NULL;
+}
+
+/* `frames` more bursts. The club takes burst s's command in the frame after it. */
+static inline void raw_gba_run(BenchRawGba* g, Bench* b, uint32_t frames) {
+    for(uint32_t f = 0; f < frames; f++, g->sent++) {
         MlinkTx tx;
         gen3_club_frame(&b->club, &b->rx, &tx);
         count_sent(b, &tx);
         memset(&b->rx, 0, sizeof(b->rx));
         b->rx.count = tx.count;
-        b->rx.word[0] = sum;
-        if(f < 3) memcpy(&b->rx.word[1], cmds[f], sizeof(cmds[f]));
-        sum = 0;
+        b->rx.word[0] = g->sum;
+        const uint16_t* own = raw_gba_cmd(g, g->sent);
+        if(own) memcpy(&b->rx.word[1], own, sizeof(g->cmds[0]));
+        if(g->sent == 0) b->rx.word[2] = g->wire_size;
+        g->sum = 0;
         for(size_t i = 1; i < MLINK_BURST_LEN; i++) {
-            sum = (uint16_t)(sum + tx.word[i] + b->rx.word[i]);
+            g->sum = (uint16_t)(g->sum + tx.word[i] + (own ? own[i - 1] : 0));
         }
         bench_record(b, &tx);
     }

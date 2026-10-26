@@ -425,8 +425,9 @@ static void on_menu_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
 /* M2: Ruby sends a block's chunks on consecutive frames, the first one
  * GEN3_CLUB_BLOCK_HEADER_BURSTS after the header (LinkCB_BlockSendBegin). A block that stops
  * short, as with a glitched size, is dropped on the GEN3_CLUB_BLOCK_GAP_BURSTS-th burst in a row
- * without a chunk for it (or that many more after the header), so it can't hold the arbiter. No
- * full gen3_block_rx_reset (a 262-B memset) in the ISR: a later header restarts it. */
+ * without a chunk for it (GEN3_CLUB_BLOCK_HEADER_BURSTS more before the first chunk), so it can't
+ * hold the arbiter; a chunk held back by up to GEN3_CLUB_BLOCK_GAP_BURSTS - 1 GBA lag frames still
+ * counts. No full gen3_block_rx_reset (a 262-B memset) in the ISR: a later header restarts it. */
 static void drop_stopped_block(Gen3Club* club) {
     if(!club->block_rx.active) return;
     const uint8_t limit =

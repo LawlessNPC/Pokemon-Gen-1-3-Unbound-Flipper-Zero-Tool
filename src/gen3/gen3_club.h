@@ -32,16 +32,19 @@
 #define GEN3_CLUB_REPLY_DELAY_BURSTS  6
 #define GEN3_CLUB_SAVE_SYNCS          3 /* the GBA's 2FFEs in one link save (§B5.1) */
 #define GEN3_CLUB_EEBB_RETRY_BURSTS   180 /* resend an EEBB without the GBA's 5FFF (T2: ~3 s) */
-/* Menu: an incomplete GBA block is dropped after GEN3_CLUB_BLOCK_GAP_BURSTS bursts in a row with
- * no chunk for it, as Ruby sends a block's chunks on consecutive frames; after its header, the
- * GEN3_CLUB_BLOCK_HEADER_BURSTS that LinkCB_BlockSendBegin waits before the first chunk come on
- * top. A glitched size header then can't hold the arbiter forever. */
-#define GEN3_CLUB_BLOCK_GAP_BURSTS    2
+/* Menu: an incomplete GBA block is dropped on the GEN3_CLUB_BLOCK_GAP_BURSTS-th burst in a row
+ * with no chunk for it, or that many plus GEN3_CLUB_BLOCK_HEADER_BURSTS after its header (the
+ * frames LinkCB_BlockSendBegin waits before the first chunk). Ruby sends a block's chunks on
+ * consecutive frames: the margin lets a filed block's chunk come after a few GBA lag frames, and a
+ * glitched size header still can't hold the arbiter forever. */
+#define GEN3_CLUB_BLOCK_GAP_BURSTS    GEN3_CLUB_REPLY_DELAY_BURSTS
 #define GEN3_CLUB_BLOCK_HEADER_BURSTS 3
 /* D9: the GBA CAFEs (one per GBA frame) the club sees in a room session before its CAFE 0017.
- * After a 0x1111 relink the GBA fades in with its controls locked for about 20 frames from its
- * first CAFE (task_mpl_807DD60); an exit forced then would find them unlocked when the fade ends
- * (sub_80553E4 sends 0x1A) and restart. */
+ * After a 0x1111 relink the GBA fades in with its controls locked for about 23-24 GBA frames from
+ * its first CAFE: the FADE_FROM_BLACK palette fade and its 5 finishing calls, then the weather
+ * update and task_mpl_807DD60 case 2 (field_weather.c:497-501, field_fadetransition.c:122-128).
+ * An exit forced in the fade-in finds the controls unlocked when it ends (sub_80553E4 sends 0x1A),
+ * and TerminateLink restarts once: no link error, but a reprinted message. At least 26 (ruled). */
 #define GEN3_CLUB_LEAVE_DELAY_CAFES   30
 /* After the GBA closed a link to open the next one at once (the 5FFF answered in Room for the
  * trade menu, in Menu or in Save), the frames the club waits for it to connect before taking the
@@ -125,7 +128,8 @@ typedef struct {
     bool save_window; /* sync 1 answered, sync 3 not yet seen: don't stop the link (D10) */
     Gen3TradeResult last_result; /* how the latest pending trade ended; None before any */
     /* Menu: the GBA's view of the Flipper's party is out of date (no offer, offer changed, or a
-     * checksum error in this 0x1122 session) or the app is editing: it gets EEBB */
+     * checksum error in this 0x1122 session), the app is editing, or a leave is asked (leaving):
+     * it gets EEBB */
     bool offer_stale;
     /* Room via 0x1111: the GBA's avatar is on its seat; it must step off and back on. Until the
      * GBA's next CAFE 0016 or a 0x1133 linkup */
