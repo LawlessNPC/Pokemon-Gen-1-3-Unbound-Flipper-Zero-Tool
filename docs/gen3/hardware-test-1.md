@@ -48,6 +48,6 @@ Tunables are `#define`s at the top of `src/gen3/mlink_hw_furi.c`. See `docs/gen3
 |---|---|
 | Received words look bit-reversed (e.g. `059D` instead of `B9A0`) | `MLINK_LSB_FIRST` 1 to 0 |
 | Garbled or missing words, slow rising edges on SD | `MLINK_SD_PUSH_PULL` 1 to 0 (open drain) or back to 1 |
-| Frequent `T/O` (child did not answer), unless the cable line showed `plug in/swap ends` (frames the Flipper skips for the cable count as `T/O`) | raise `MLINK_CHILD_TIMEOUT_US` |
+| Frequent `T/O` (child did not answer), unless the cable line showed `plug in/swap ends` (a frame skipped for the cable during a link adds 9 `T/O` and drops the link) | raise `MLINK_CHILD_TIMEOUT_US` |
 | Link drops after a fixed time, or GBA error | check `MLINK_TICK_DECI_US` / `MLINK_FRAME_DECI_US` (burst timing) and the 751.5 us end-to-start gap. `MLINK_TICK_DECI_US` must change together with `MLINK_TIM_ARR` (a compile-time check fails otherwise) |
 | `Frm` stays 0 | cable (step 4), pin config (step 3), `MLINK_CABLE_SETTLE_US` |
