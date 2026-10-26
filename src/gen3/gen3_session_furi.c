@@ -22,11 +22,27 @@
 #define GEN3_LOG_DRAIN_MS     100
 #define GEN3_LOG_FLAG_STOP    (1u << 0)
 
+/* The club's identity in each mode (D7: the Flipper stays FLIPPER / 22222 / SID 0 in both). */
+static const Gen3ClubConfig gen3_session_test_cfg = {
+    .name = GEN3_TEST_TRAINER_NAME,
+    .tid = GEN3_TEST_TRAINER_TID,
+    .sid = GEN3_TEST_TRAINER_SID,
+    .gender = 0,
+    .trading = false};
+static const Gen3ClubConfig gen3_session_trade_cfg = {
+    .name = GEN3_TEST_TRAINER_NAME,
+    .tid = GEN3_TEST_TRAINER_TID,
+    .sid = GEN3_TEST_TRAINER_SID,
+    .gender = 0,
+    .trading = true};
+
 struct Gen3Session {
     MlinkHw* hw;
     bool running;
+    bool trade_mode; /* the latest start was gen3_session_start_trade */
 
-    /* Written by the frame callback (ISR) while running; by start before the driver runs. */
+    /* Written by the frame callback (ISR) while running; by start before the driver runs. The
+     * app reaches it only through the hand-off calls, inside a PRIMASK section. */
     Gen3Club club;
     Gen3LogRing ring;
     uint32_t log_frame; /* frames completed this run, the log's frame number */
@@ -169,20 +185,15 @@ MlinkCable gen3_session_check_cable(Gen3Session* s) {
     return mlink_hw_check_cable(s->hw);
 }
 
-bool gen3_session_start(Gen3Session* s) {
+static bool gen3_session_start_with(Gen3Session* s, const Gen3ClubConfig* cfg, bool national_dex) {
     furi_check(s);
     if(s->running) return true;
 
-    const Gen3ClubConfig cfg = {
-        .name = GEN3_TEST_TRAINER_NAME,
-        .tid = GEN3_TEST_TRAINER_TID,
-        .sid = GEN3_TEST_TRAINER_SID,
-        .gender = 0,
-        .trading = false};
     MlinkTx first;
 
     /* The driver is off, so nothing else touches the club, the ring or the status yet. */
-    gen3_club_init(&s->club, &cfg);
+    gen3_club_init(&s->club, cfg);
+    gen3_club_set_national_dex(&s->club, national_dex);
     gen3_log_init(&s->ring);
     s->log_frame = 0;
     gen3_session_reset_status(s);
@@ -193,12 +204,29 @@ bool gen3_session_start(Gen3Session* s) {
         return false;
     }
     s->running = true;
+    s->trade_mode = cfg->trading;
 
     gen3_session_log_open(s);
     s->log_thread = furi_thread_alloc_ex(
         GEN3_LOG_THREAD_NAME, GEN3_LOG_THREAD_STACK, gen3_session_log_thread, s);
     furi_thread_start(s->log_thread);
     return true;
+}
+
+bool gen3_session_start(Gen3Session* s) {
+    return gen3_session_start_with(s, &gen3_session_test_cfg, false);
+}
+
+bool gen3_session_start_trade(Gen3Session* s, bool national_dex) {
+    return gen3_session_start_with(s, &gen3_session_trade_cfg, national_dex);
+}
+
+bool gen3_session_running(Gen3Session* s) {
+    return s && s->running;
+}
+
+bool gen3_session_trading(Gen3Session* s) {
+    return s && s->running && s->trade_mode;
 }
 
 void gen3_session_stop(Gen3Session* s) {
@@ -230,4 +258,61 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool
 
     if(log_ok) *log_ok = s->log_open && !gen3_log_failed(&s->ring);
     if(cable_ok) *cable_ok = mlink_hw_cable_ok(s->hw);
+}
+
+/* ---- App <-> club hand-off (G5) ----
+ * Each PRIMASK section masks every interrupt, TIM2 included, around exactly one gen3_club_* call,
+ * so the frame callback never sees a half-made change. Inside: at most 104 bytes copied (one
+ * 100-byte Pokemon plus scalars), nothing that blocks, no memcmp, no decrypt: a few microseconds
+ * at most, which only delays the next TIM2 tick. */
+
+bool gen3_session_set_offer(Gen3Session* s, const uint8_t* offer, uint32_t trades_seen) {
+    furi_check(s);
+    if(!s->running) return false;
+
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    const bool ok = gen3_club_set_offer(&s->club, offer, trades_seen); /* 100 B + has_offer */
+    __set_PRIMASK(primask);
+    return ok;
+}
+
+void gen3_session_get_received(Gen3Session* s, uint8_t out[GEN3_PARTY_SIZE], uint32_t* trades_done) {
+    furi_check(s);
+    furi_check(out);
+
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    gen3_club_get_received(&s->club, out, trades_done); /* 100 B + 4 B */
+    __set_PRIMASK(primask);
+}
+
+bool gen3_session_set_editing(Gen3Session* s, bool on, uint32_t trades_seen) {
+    furi_check(s);
+    if(!s->running) return true;
+
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    const bool ok = gen3_club_set_editing(&s->club, on, trades_seen); /* 1 B */
+    __set_PRIMASK(primask);
+    return ok;
+}
+
+void gen3_session_set_national_dex(Gen3Session* s, bool on) {
+    furi_check(s);
+
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    gen3_club_set_national_dex(&s->club, on); /* 1 B */
+    __set_PRIMASK(primask);
+}
+
+void gen3_session_request_leave(Gen3Session* s) {
+    furi_check(s);
+    if(!s->running) return;
+
+    const uint32_t primask = __get_PRIMASK();
+    __disable_irq();
+    gen3_club_request_leave(&s->club); /* 2 B */
+    __set_PRIMASK(primask);
 }
