@@ -6,7 +6,8 @@
 
 /* GBA multiplayer parent (SIO master) over the Game Link GPIO module.
  *
- * Every TIM2 tick (751.5 us) may run one 16-bit multiplayer transfer, bit-banged at 115200 baud.
+ * Every TIM2 tick (1073 us start to start, leaving the GBA's ~751.5 us between transfers) may run
+ * one 16-bit multiplayer transfer, bit-banged at 115200 baud.
  * Transfers come in frames at the GBA frame rate: transfer t of a frame runs on tick t of that
  * frame, t < tx.count. After a frame's last transfer the frame callback runs, in the TIM2
  * interrupt with interrupts enabled. It gets that frame's result and fills the next frame's tx.

@@ -12,6 +12,12 @@
  * bit-reversed (e.g. 059D instead of B9A0), set this to 0. Applies to sending and receiving. */
 #define MLINK_LSB_FIRST 1
 
+/* 1: SD is a push-pull output for the Flipper's own frame (start bit through stop bit), so its
+ * 0->1 edges don't wait on the pull-ups; it is released to input with pull-up before SO goes low,
+ * and idles that way between transfers. 0: SD is an open-drain output with pull-up the whole
+ * time, released = high (the original design). */
+#define MLINK_SD_PUSH_PULL 1
+
 /* DWT->CYCCNT and TIM2 both count the 64 MHz core clock. */
 #define MLINK_CPU_HZ 64000000u
 #define MLINK_BAUD 115200u
@@ -41,16 +47,20 @@
 #define MLINK_CHILD_TIMEOUT_US 100u
 #define MLINK_CHILD_TIMEOUT_CYCLES (MLINK_CHILD_TIMEOUT_US * (MLINK_CPU_HZ / 1000000u)) /* 6400 */
 
-/* TIM2 tick: (PSC + 1) * (ARR + 1) = 48096 cycles = 751.5 us, the GBA's in-burst gap (U2).
- * One transfer per tick, measured start to start. To change the gap, change MLINK_TIM_ARR and
- * MLINK_TICK_DECI_US together (checked below). */
+/* TIM2 tick, one transfer per tick, measured start to start. The GBA leaves 751.5 us from the END
+ * of one transfer to the START of the next (timer 3 reload, started from SendRecvDone; U2). A
+ * nominal transfer is about 321 us (164.9 us parent word + 156.25 us child word), so
+ * 751.5 + 321.5 = 1073 us = 68672 cycles = (PSC + 1) * (ARR + 1). The real gap is
+ * 1073 - (321 + child reply delay) us with a child, 808 us without one. To change it, change
+ * MLINK_TIM_ARR and MLINK_TICK_DECI_US together (checked below). */
 #define MLINK_TIM_PRESCALER 0u
-#define MLINK_TIM_ARR 48095u
+#define MLINK_TIM_ARR 68671u
 
-/* Frame cadence in 0.1 us: +7515 per tick; when the sum reaches 167400 (16.740 ms = 59.74 Hz,
- * a hair faster than the GBA's 59.7275 Hz), subtract it and start a frame. That is 22.3 ticks
- * per frame; frames start on tick boundaries, 22 or 23 ticks apart. */
-#define MLINK_TICK_DECI_US 7515u
+/* Frame cadence in 0.1 us: +10730 per tick; when the sum reaches 167400 (16.740 ms = 59.74 Hz,
+ * a hair faster than the GBA's 59.7275 Hz), subtract it and start a frame. That is 15.6 ticks
+ * per frame; frames start on tick boundaries, 15 or 16 ticks apart. A 9-transfer burst takes
+ * 9 ticks = 9.66 ms, inside the 16.74 ms frame. */
+#define MLINK_TICK_DECI_US 10730u
 #define MLINK_FRAME_DECI_US 167400u
 
 /* mlink_hw_check_cable: settle time for SI's pull-up before reading it. */
@@ -80,6 +90,8 @@ _Static_assert(MLINK_BURST_LEN <= 16, "timeout_mask and framing_mask are 16 bits
 
 struct MlinkHw {
     MlinkPins pins;
+    uint32_t sd_moder_keep; /* SD's port MODER with SD's 2-bit field cleared (= input) */
+    uint32_t sd_moder_out; /* SD's MODER field set to 01 (output) */
     MlinkFrameCallback cb;
     void* ctx;
     bool running;
@@ -133,6 +145,14 @@ static FURI_ALWAYS_INLINE void mlink_wait_until(uint32_t t0, uint32_t cycles) {
     }
 }
 
+/* MLINK_SD_PUSH_PULL: switch SD between input (MODER 00, pull-up) and output (MODER 01; OTYPER is
+ * already push-pull, so it drives ODR). One read-modify-write of MODER, about 4 cycles; safe
+ * because every interrupt is masked while it runs. */
+static FURI_ALWAYS_INLINE void
+    mlink_moder_write(GPIO_TypeDef* port, uint32_t keep_mask, uint32_t field) {
+    port->MODER = (port->MODER & keep_mask) | field;
+}
+
 /* The firmware starts the cycle counter at boot; gblink and furi_delay_us rely on it. Make sure
  * the same way the firmware does it: every wait in a transfer spins on it with interrupts off. */
 static void mlink_cyccnt_ensure(void) {
@@ -145,12 +165,18 @@ static void mlink_cyccnt_ensure(void) {
 
 /* One transfer: the parent's word on SD, hand-over on SO, then the child's word on SD. Every
  * interrupt is masked from SC low to SC high: 265 us with no child, 321 us plus the child's
- * reply delay with one, 421 us at most. */
+ * reply delay with one, 421 us at most. SD is released (input with pull-up, or open drain high)
+ * before SO goes low, and stays released when this returns. */
 static void mlink_hw_transfer(MlinkHw* hw, uint8_t t) {
     const GpioPin* sc = hw->pins.sc;
     const GpioPin* sd = hw->pins.sd;
     const GpioPin* so = hw->pins.so;
     const uint32_t levels = mlink_frame_levels(hw->tx.word[t]);
+#if MLINK_SD_PUSH_PULL
+    GPIO_TypeDef* const sd_port = sd->port;
+    const uint32_t sd_keep = hw->sd_moder_keep;
+    const uint32_t sd_out = hw->sd_moder_out;
+#endif
     uint16_t word = 0;
     bool answered = false;
     bool stop_high = false;
@@ -160,13 +186,25 @@ static void mlink_hw_transfer(MlinkHw* hw, uint8_t t) {
 
     const uint32_t t0 = DWT->CYCCNT;
     mlink_pin_write(sc, false);
-    for(uint32_t b = 0; b < MLINK_FRAME_BITS; b++) {
+#if MLINK_SD_PUSH_PULL
+    mlink_pin_write(sd, false); /* start bit into ODR; SD is still an input, the line stays high */
+    mlink_wait_until(t0, MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS));
+    mlink_moder_write(sd_port, sd_keep, sd_out); /* start bit: drive SD through the stop bit */
+#else
+    mlink_wait_until(t0, MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS));
+    mlink_pin_write(sd, false); /* start bit */
+#endif
+    for(uint32_t b = 1; b < MLINK_FRAME_BITS; b++) {
         const bool level = (levels >> b) & 1u;
         mlink_wait_until(t0, MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS + b));
         mlink_pin_write(sd, level);
     }
     mlink_wait_until(t0, MLINK_EDGE_CYCLES(MLINK_TX_LEAD_BITS + MLINK_FRAME_BITS));
-    mlink_pin_write(sd, true); /* release (open drain) */
+#if MLINK_SD_PUSH_PULL
+    mlink_moder_write(sd_port, sd_keep, 0); /* release: input with pull-up */
+#else
+    mlink_pin_write(sd, true); /* release: open drain high */
+#endif
     mlink_pin_write(so, false); /* child's SI low: its turn */
 
     const uint32_t t_so = DWT->CYCCNT;
@@ -242,7 +280,16 @@ static void mlink_pins_run(const MlinkPins* pins) {
     furi_hal_gpio_write(pins->sc, true);
     furi_hal_gpio_init(pins->sc, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
     furi_hal_gpio_write(pins->sd, true);
+#if MLINK_SD_PUSH_PULL
+    /* Released between transfers: input with pull-up. OTYPER push-pull only takes effect while a
+     * transfer switches MODER to output (mlink_sd_drive). */
+    furi_hal_gpio_init(pins->sd, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
+    FURI_CRITICAL_ENTER();
+    pins->sd->port->OTYPER &= ~(uint32_t)pins->sd->pin;
+    FURI_CRITICAL_EXIT();
+#else
     furi_hal_gpio_init(pins->sd, GpioModeOutputOpenDrain, GpioPullUp, MLINK_GPIO_SPEED);
+#endif
     furi_hal_gpio_init(pins->si, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
 }
 
@@ -256,10 +303,14 @@ static void mlink_pins_off(const MlinkPins* pins) {
 MlinkHw* mlink_hw_alloc(const MlinkPins* pins) {
     furi_check(pins);
     furi_check(pins->sc && pins->sd && pins->so && pins->si);
+    furi_check(pins->sd->pin != 0);
 
     MlinkHw* hw = malloc(sizeof(MlinkHw));
     memset(hw, 0, sizeof(*hw));
     hw->pins = *pins;
+    const uint32_t sd_shift = 2u * (uint32_t)__builtin_ctz(pins->sd->pin);
+    hw->sd_moder_keep = ~(3u << sd_shift);
+    hw->sd_moder_out = 1u << sd_shift;
     return hw;
 }
 
@@ -309,7 +360,7 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
     memset(&hw->rx, 0, sizeof(hw->rx));
     hw->in_frame = false;
     hw->transfer = 0;
-    hw->frame_acc = 0; /* first frame after 23 ticks (17.3 ms) of idle lines */
+    hw->frame_acc = 0; /* first frame after 16 ticks (17.2 ms) of idle lines */
 
     mlink_pins_run(&hw->pins);
     /* Stop mode would halt TIM2; plain WFI sleep keeps it running. */
