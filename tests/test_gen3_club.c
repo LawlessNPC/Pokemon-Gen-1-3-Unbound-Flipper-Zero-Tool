@@ -1,4 +1,5 @@
 #include "test.h"
+#include "bulk_file.h"
 #include "club_bench.h"
 #include <stdbool.h>
 #include <src/gen3/gen3_club.h>
@@ -112,6 +113,7 @@ typedef struct {
     uint32_t bursts;
     Gen3BlockRx f_rx;
     uint32_t f_rx_first;
+    uint16_t f_rx_id;
     BenchBlock f_blocks[4];
     uint8_t n_f_blocks;
 } RawGba;
@@ -133,7 +135,14 @@ static void raw_gba_step(RawGba* r) {
     uint16_t sum = 0;
     for(int i = 1; i < MLINK_BURST_LEN; i++) sum = (uint16_t)(sum + tx.word[i] + r->rx.word[i]);
     r->sum = sum;
-    bench_parse(&r->f_rx, &r->f_rx_first, r->f_blocks, &r->n_f_blocks, &tx.word[1], ++r->bursts);
+    bench_parse(
+        &r->f_rx,
+        &r->f_rx_first,
+        &r->f_rx_id,
+        r->f_blocks,
+        &r->n_f_blocks,
+        &tx.word[1],
+        ++r->bursts);
 }
 
 TEST(test_club_bad_magic_still_replies) {
@@ -544,6 +553,7 @@ TEST(test_club_claim_game) {
 }
 
 int main(void) {
+    if(!bulk_file_open()) return 1; /* bench_init makes the GBA's party with the editor */
     RUN(test_club_reaches_cards);
     RUN(test_club_gba_not_ready);
     RUN(test_club_other_room);

@@ -7,13 +7,19 @@
 #include <src/gen3/gen3_block.h>
 #include <src/gen3/gen3_link_player.h>
 #include <src/gen3/gen3_pkm.h>
+#include <src/gen3/gen3_trade_block.h>
 
 /* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
- * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down and the
- * relink for the trade menu (docs/gen3/link-protocol-trade.md §B1). Pure C, no heap;
- * gen3_club_frame runs in the link frame ISR. */
+ * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down, the
+ * relink for the trade menu and its party exchange (docs/gen3/link-protocol-trade.md §B1, §B2).
+ * Pure C, no heap; gen3_club_frame runs in the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
+/* Idle bursts before a party-exchange CCCC (§B2.2): between both LinkPlayerBlocks and round 1's
+ * (>= 8), and between both blocks of a round and the next round's (>= 5) */
+#define GEN3_CLUB_ROUND1_DELAY_BURSTS 10
+#define GEN3_CLUB_ROUND_DELAY_BURSTS  6
+#define GEN3_CLUB_GBA_PARTY           6 /* the GBA's party slots */
 
 /* The values are the phase numbers in the link log: append only. */
 typedef enum {
@@ -62,6 +68,7 @@ typedef struct {
     bool gba_seated; /* this room session: the GBA sent CAFE 0016 and hasn't sent 001D/001A since */
     bool flipper_seated; /* this room session: the Flipper sent CAFE 0016 */
     uint32_t trades_done; /* finalized trades since init; stays 0 until Task 6 */
+    uint8_t round; /* Exchange/Menu: the round in progress or done, 1..5; 0 before round 1 */
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -92,10 +99,18 @@ struct Gen3Club {
     /* Room seats, per room session (§B1.3, §B1.4) */
     bool gba_seated;
     bool flipper_seated;
+    /* Party exchange, per session (§B2) */
+    uint8_t round; /* 0 before round 1, then the round in progress or done */
+    bool round_gba_done; /* the GBA's block of this round is in */
+    uint8_t round1_delay; /* idle bursts before round 1's CCCC */
+    uint8_t round_delay; /* before the CCCC of rounds 2..5 */
+    uint8_t round_block[GEN3_TRADE_ROUND_MAX]; /* the Flipper's block of this round (R2) */
     /* Trade context: survives relinks (D3) */
     uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
     bool has_offer;
     uint32_t trades_done;
+    uint8_t party_mon[GEN3_PARTY_SIZE]; /* the Flipper mon the GBA was shown: offer at round 1 */
+    uint8_t gba_party[GEN3_CLUB_GBA_PARTY][GEN3_PARTY_SIZE]; /* game form, rounds 1-3 */
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
@@ -124,3 +139,8 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out);
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen);
 /* Tests only; production uses GEN3_CLUB_CARD_DELAY_BURSTS. */
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts);
+/* Tests only; production uses GEN3_CLUB_ROUND1_DELAY_BURSTS and GEN3_CLUB_ROUND_DELAY_BURSTS. */
+void gen3_club_set_round_delays(Gen3Club* club, uint8_t first, uint8_t later);
+/* The GBA's party slot 0..5 (game form) from the last exchange; zeros for another slot or a slot
+ * no exchange has filled. Each of rounds 1-3 refills two slots. */
+void gen3_club_gba_mon(const Gen3Club* club, uint8_t slot, uint8_t out[GEN3_PARTY_SIZE]);

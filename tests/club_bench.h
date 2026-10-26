@@ -26,6 +26,7 @@ static const Gen3ClubConfig club_cfg_trade =
 /* One completed block as one side put it on the wire. */
 typedef struct {
     uint16_t size, code, arg; /* code, arg: the block's words 0 and 1 */
+    uint16_t id; /* the header's word 2: 0x80 + the sender's multiplayer id */
     uint32_t first_burst, last_burst; /* the header's burst, the last chunk's */
 } BenchBlock;
 
@@ -44,6 +45,7 @@ typedef struct {
     MlinkTx last_tx; /* the Flipper's tx of the latest step */
     Gen3BlockRx f_rx, g_rx; /* the bench's own parse of each side's blocks (tx / rx words 1..8) */
     uint32_t f_rx_first, g_rx_first; /* burst of the header f_rx / g_rx is parsing */
+    uint16_t f_rx_id, g_rx_id; /* that header's word 2 */
     /* every completed block of each side, in order */
     BenchBlock f_blocks[BENCH_BLOCKS], g_blocks[BENCH_BLOCKS];
     uint8_t n_f_blocks, n_g_blocks;
@@ -55,9 +57,25 @@ typedef struct {
     uint32_t sent_cafe16; /* Flipper CAFE 0016 count */
     uint32_t f_cafe16_burst, g_cafe16_burst; /* latest CAFE 0016 burst per side */
     bool muted; /* bench_mute */
+    uint8_t party[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* the GBA's party as set, game form */
+    uint8_t party_count;
 } Bench;
 
+/* The GBA's party (game form, slots 0..count-1), for the fake now and after ruby_relink. */
+static inline void
+    bench_set_party(Bench* b, const uint8_t party[][GEN3_PARTY_SIZE], uint8_t count) {
+    memset(b->party, 0, sizeof(b->party));
+    for(uint8_t i = 0; i < count && i < FAKE_RUBY_PARTY; i++) {
+        memcpy(b->party[i], party[i], GEN3_PARTY_SIZE);
+    }
+    b->party_count = count;
+    fake_ruby_set_party(&b->ruby, b->party, count);
+}
+
+/* The GBA holds tm_make(1, 5, 11), tm_make(4, 5, 12) and tm_make(7, 10, 13). The test's main
+ * must have called bulk_file_open. */
 static inline void bench_init_cfg(Bench* b, uint32_t ruby_link_type, const Gen3ClubConfig* cfg) {
+    uint8_t party[3][GEN3_PARTY_SIZE];
     memset(b, 0, sizeof(*b));
     b->me.version = GEN3_VERSION_RUBY;
     b->me.trainer_id = (54321u << 16) | 12345u;
@@ -67,6 +85,10 @@ static inline void bench_init_cfg(Bench* b, uint32_t ruby_link_type, const Gen3C
     b->me.language = GEN3_LANGUAGE_ENGLISH;
     gen3_club_init(&b->club, cfg);
     fake_ruby_init(&b->ruby, &b->me);
+    tm_make(1, 5, 11, party[0]);
+    tm_make(4, 5, 12, party[1]);
+    tm_make(7, 10, 13, party[2]);
+    bench_set_party(b, party, 3);
 }
 
 /* A Link Test session (trading false). */
@@ -91,9 +113,10 @@ static inline void bench_init_trade(Bench* b) {
     bench_offer(b, mon);
 }
 
-/* The GBA restarts (or its player is back at the counter) and links again; same club. */
+/* The GBA restarts (or its player is back at the counter) and links again; same club and party. */
 static inline void ruby_relink(Bench* b) {
     fake_ruby_init(&b->ruby, &b->me);
+    fake_ruby_set_party(&b->ruby, b->party, b->party_count);
     fake_ruby_open_link(&b->ruby);
 }
 
@@ -115,6 +138,7 @@ static inline void count_sent(Bench* b, const MlinkTx* tx) {
 static inline bool bench_parse(
     Gen3BlockRx* rx,
     uint32_t* first,
+    uint16_t* id,
     BenchBlock* blocks,
     uint8_t* n,
     const uint16_t cmd[GEN3_CMD_LEN],
@@ -125,6 +149,7 @@ static inline bool bench_parse(
     switch(gen3_block_rx_feed(rx, cmd)) {
     case Gen3BlockRxStarted:
         *first = burst;
+        *id = cmd[2];
         return false;
     case Gen3BlockRxDone:
         if(*n < BENCH_BLOCKS) {
@@ -132,6 +157,7 @@ static inline bool bench_parse(
             blk->size = rx->size;
             blk->code = (uint16_t)(rx->data[0] | (rx->data[1] << 8));
             blk->arg = (uint16_t)(rx->data[2] | (rx->data[3] << 8));
+            blk->id = *id;
             blk->first_burst = *first;
             blk->last_burst = burst;
         }
@@ -151,7 +177,7 @@ static inline void bench_record(Bench* b, const MlinkTx* tx) {
     const uint16_t* f = &tx->word[1];
     const uint16_t* g = &b->rx.word[1];
 
-    bench_parse(&b->f_rx, &b->f_rx_first, b->f_blocks, &b->n_f_blocks, f, burst);
+    bench_parse(&b->f_rx, &b->f_rx_first, &b->f_rx_id, b->f_blocks, &b->n_f_blocks, f, burst);
     if(f[0] == 0xCCCC && b->n_f_cccc < BENCH_CCCC) {
         b->f_cccc[b->n_f_cccc] = f[1];
         b->f_cccc_burst[b->n_f_cccc] = burst;
@@ -163,7 +189,7 @@ static inline void bench_record(Bench* b, const MlinkTx* tx) {
     }
 
     if(b->rx.count != MLINK_BURST_LEN) return;
-    if(bench_parse(&b->g_rx, &b->g_rx_first, b->g_blocks, &b->n_g_blocks, g, burst) &&
+    if(bench_parse(&b->g_rx, &b->g_rx_first, &b->g_rx_id, b->g_blocks, &b->n_g_blocks, g, burst) &&
        b->g_rx.size == GEN3_LINK_PLAYER_BLOCK_SIZE) {
         b->n_f_cccc = 0; /* a new link session: its CCCCs count from here */
     }
@@ -246,6 +272,19 @@ static inline bool reach_room(Bench* b) {
 static inline bool bench_to_room(Bench* b) {
     fake_ruby_open_link(&b->ruby);
     return run_until_room(b, 420) && fake_ruby_error(&b->ruby) == NULL;
+}
+
+/* On an initialised bench (a test may set the party or the offer first): bench_to_room, the GBA
+ * sits on seat 1, then until its trade menu is Browsing (<= 600 frames). False on a fake error. */
+static inline bool bench_reach_menu(Bench* b) {
+    if(!bench_to_room(b)) return false;
+    fake_ruby_sit(&b->ruby, 1);
+    for(uint32_t i = 0; i < 600; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuBrowsing) return true;
+    }
+    return false;
 }
 
 /* For `frames` frames a fresh Gen3Link is the master instead of the club: it handshakes, and on

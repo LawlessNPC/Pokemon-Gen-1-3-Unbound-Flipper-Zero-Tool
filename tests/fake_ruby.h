@@ -4,11 +4,12 @@
 #include <stdint.h>
 #include <src/gen3/mlink_types.h>
 #include <src/gen3/gen3_link_player.h>
+#include <src/gen3/gen3_pkm.h>
 
 /* Test-only model of Pokemon Ruby as the multiplayer child (slot 1) during the Trade Center
- * linkup, the room and leaving it (docs/gen3/link-protocol.md §A2-A7, §B7), sitting down and the
- * trade menu's relink (docs/gen3/link-protocol-trade.md §B1). It models the
- * child's own link stack and does not use src/gen3/gen3_link.c: the per-transfer ISR
+ * linkup, the room and leaving it (docs/gen3/link-protocol.md §A2-A7, §B7), sitting down, the
+ * trade menu's relink and its party exchange (docs/gen3/link-protocol-trade.md §B1, §B2). It
+ * models the child's own link stack and does not use src/gen3/gen3_link.c: the per-transfer ISR
  * (DoHandshake, DoRecv, DoSend), its own send and receive queues, LinkMain1/LinkMain2 with
  * gSendCmd/gRecvCmds, gLinkCallback, the cable_club.c linkup tasks, and in the room the
  * lockstep game update (CB1_OverworldLink: player link states, key intercept callbacks) with
@@ -20,6 +21,9 @@
 #define FAKE_RUBY_QUEUE_LEN 50 /* QUEUE_CAPACITY */
 #define FAKE_RUBY_PLAYERS   2 /* Flipper (slot 0) + this GBA (slot 1) */
 #define FAKE_RUBY_BLOCK_MAX 256 /* BLOCK_BUFFER_SIZE: one gBlockRecvBuffer slot */
+#define FAKE_RUBY_PARTY     6 /* PARTY_SIZE */
+#define FAKE_RUBY_MAIL_SIZE 216 /* 6 x sizeof(struct MailStruct), 36 B each (§B2.3) */
+#define FAKE_RUBY_RIBBONS   11 /* giftRibbons */
 
 typedef enum {
     FakeRubyOff,
@@ -35,6 +39,18 @@ typedef enum {
     FakeRubySave, /* link save */
     FakeRubyReturn, /* after EEBB: back to the room through the 0x1111 re-establish */
 } FakeRubyPhase;
+
+typedef enum {
+    FakeRubyMenuNone, /* not in the trade menu */
+    FakeRubyMenuLoading, /* relink, exchange, building the menu */
+    FakeRubyMenuBrowsing, /* states 0/1: the player can act */
+    FakeRubyMenuSummary, /* Task 7 */
+    FakeRubyMenuStandby, /* states 5/100: "Link standby...", waiting for the Flipper */
+    FakeRubyMenuConfirming, /* states 7/14: after DDDD, before YES/NO */
+    FakeRubyMenuPrompt, /* state 3: "Is this trade okay?" YES/NO */
+    FakeRubyMenuMessage, /* state 8: canceled / friend wants to trade; needs A */
+    FakeRubyMenuClosing, /* states 10-13 or 11-12: fading out to the trade or the room */
+} FakeRubyMenuState;
 
 /* Private state below; tests use the functions only. */
 
@@ -195,6 +211,21 @@ struct FakeRuby {
     uint16_t wait_count; /* its data[0] */
     uint32_t open_frame; /* main-loop frame of the latest OpenLink */
     uint32_t relink_frames; /* open_frame -> gReceivedRemoteLinkPlayers; UINT32_MAX while waiting */
+    FakeRubyMenuState menu;
+
+    /* Part B: the parties and sub_8048D44 [BufferTradeParties] (§B2) */
+    uint8_t party[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* gPlayerParty, game form */
+    uint8_t saved_party[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* the party in its save */
+    uint8_t enemy[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* gEnemyParty */
+    uint8_t enemy_count; /* gEnemyPartyCount */
+    uint8_t partner_mail[FAKE_RUBY_MAIL_SIZE]; /* gUnknown_02029700 [gLinkPartnerMail] */
+    uint8_t partner_ribbons[FAKE_RUBY_RIBBONS]; /* unk_00b5 */
+    uint8_t xchg_case; /* its unk_0075 */
+    uint32_t xchg_case_frame; /* frame the current case began */
+    uint8_t send_copy; /* the round (1..5) whose case copy gBlockSendBuffer holds; 0 none */
+    uint8_t requests; /* blocks begun by CCCC types 0/1/3/4 since OpenLink: the k-th is round k's */
+    bool request_block; /* the block being sent began with such a CCCC */
+    uint8_t stall; /* fake_ruby_stall: main-loop frames left to skip */
 };
 
 /* me.link_type picks the counter */
@@ -230,7 +261,23 @@ void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx);
 FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
 /* NULL, or "checksum", "magic", "stale card", "lag", "standby timeout", "link timeout" (no
  * LinkPlayers 300 frames after a Part B OpenLink), "link type" (the trade menu's link types
- * differ; Ruby hangs silently there, §B8) */
+ * differ; Ruby hangs silently there, §B8), "stale block" (a party-exchange block requested before
+ * its round's copy: Ruby sends stale bytes, U3), "exchange stalled" (a sub_8048D44 wait case
+ * lasted 600 frames: Ruby's black screen, §B2.2), "bad egg" (a Flipper party slot fails its
+ * checksum), "bad offer" (a Flipper party slot holds a species or item Ruby can't take, §B2.5) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as Ruby parsed it */
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);
+
+/* The GBA's party, game form, slots 0..count-1 (also its saved party: it saved at the counter,
+ * §A6). Later slots are empty (zeros). Call after fake_ruby_init, which clears it. */
+void fake_ruby_set_party(FakeRuby* g, const uint8_t party[][GEN3_PARTY_SIZE], uint8_t count);
+/* Party slot 0..5, from its RAM or (saved) its save; NULL for another slot. */
+const uint8_t* fake_ruby_party(const FakeRuby* g, uint8_t slot, bool saved);
+/* The Flipper's party from the latest exchange, slot 0..5; NULL for another slot. */
+const uint8_t* fake_ruby_enemy(const FakeRuby* g, uint8_t slot);
+uint8_t fake_ruby_enemy_count(const FakeRuby* g); /* CalculateEnemyPartyCount */
+FakeRubyMenuState fake_ruby_menu_state(const FakeRuby* g);
+/* The main loop skips the next `frames` frames (a map load or flash write): LinkMain1, LinkMain2
+ * and the game don't run, VBlank and the serial IRQs do, so the receive queue backs up. */
+void fake_ruby_stall(FakeRuby* g, uint8_t frames);

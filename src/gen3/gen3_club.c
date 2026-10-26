@@ -20,11 +20,11 @@
 #define FLIPPER_MULTIPLAYER_ID 0 /* slot 0: block headers carry 0x80 */
 #define NAME_MAX_CHARS         7
 
-static void send_cmd(Gen3Club* club, uint16_t w0, uint16_t w1) {
+static bool send_cmd(Gen3Club* club, uint16_t w0, uint16_t w1) {
     uint16_t cmd[GEN3_CMD_LEN] = {0};
     cmd[0] = w0;
     cmd[1] = w1;
-    gen3_link_send(&club->link, cmd);
+    return gen3_link_send(&club->link, cmd);
 }
 
 /* Any non-zero word, as for Gen3LinkEventCommand (an all-zero burst is no command, §A2). */
@@ -54,6 +54,8 @@ static void reset_session(Gen3Club* club) {
     club->idle_bursts = 0;
     club->gba_seated = false;
     club->flipper_seated = false;
+    club->round = 0;
+    club->round_gba_done = false;
 }
 
 void gen3_club_claim_game(
@@ -83,6 +85,8 @@ void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg) {
     gen3_link_init(&club->link);
     club->cfg = *cfg;
     club->card_delay = GEN3_CLUB_CARD_DELAY_BURSTS;
+    club->round1_delay = GEN3_CLUB_ROUND1_DELAY_BURSTS;
+    club->round_delay = GEN3_CLUB_ROUND_DELAY_BURSTS;
     club->phase = Gen3ClubPhaseWaiting;
     club->last_error = Gen3ClubErrorNone;
 }
@@ -141,9 +145,10 @@ static void on_player_block(Gen3Club* club) {
             club->phase = Gen3ClubPhasePlayers;
             club->idle_bursts = 0;
         } else if(own_type == GEN3_LINKTYPE_TRADE_CONNECTING) {
-            /* §B1.6: the trade menu. The party exchange starts after both blocks (Task 4). */
+            /* §B1.6: the trade menu. The party exchange starts after both blocks. */
             club->partner_valid = true;
             club->phase = Gen3ClubPhaseExchange;
+            club->idle_bursts = 0;
         } else if(is_trade_link_type(lp.link_type)) {
             /* A Cable Club trade type the club doesn't follow: the 0x1133 block stalls the GBA. */
             set_error(club, Gen3ClubErrorUnexpected);
@@ -195,8 +200,66 @@ static void try_sit(Gen3Club* club) {
        !club->gba_seated || club->flipper_seated) {
         return;
     }
-    send_cmd(club, CMD_SEND_HELD_KEYS, KEY_CODE_READY);
-    club->flipper_seated = true;
+    /* A full queue sends nothing: try again next frame */
+    if(send_cmd(club, CMD_SEND_HELD_KEYS, KEY_CODE_READY)) club->flipper_seated = true;
+}
+
+/* §B2.1: the GBA's block of the round in progress. Rounds 1-3 carry its party, two slots each;
+ * rounds 4 (mail) and 5 (gift ribbons) are not kept. A block the club didn't ask for, or of
+ * another size, leaves the GBA and the club out of step. */
+static void on_exchange_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
+    Gen3BlockRxResult r = gen3_block_rx_feed(&club->block_rx, cmd);
+    if(r == Gen3BlockRxBad) {
+        set_error(club, Gen3ClubErrorUnexpected);
+        return;
+    }
+    if(r != Gen3BlockRxDone) return;
+    if(club->round == 0 || club->round_gba_done ||
+       club->block_rx.size != gen3_trade_round_size(club->round)) {
+        set_error(club, Gen3ClubErrorUnexpected);
+        return;
+    }
+    if(club->round <= 3) {
+        memcpy(club->gba_party[2 * (club->round - 1)], club->block_rx.data, 2 * GEN3_PARTY_SIZE);
+    }
+    club->round_gba_done = true;
+}
+
+/* Round r: {CCCC, type} and the Flipper's block, 17 or 18 commands into an empty queue. Round 1
+ * fixes the Pokemon the GBA is shown: the offer now, or zeros without one (R8). */
+static void start_round(Gen3Club* club, uint8_t round) {
+    if(round == 1 && club->has_offer) {
+        memcpy(club->party_mon, club->offer, sizeof(club->party_mon));
+    } else if(round == 1) {
+        memset(club->party_mon, 0, sizeof(club->party_mon));
+    }
+    gen3_trade_round_block(round, round == 1 ? club->party_mon : NULL, club->round_block);
+    send_cmd(club, CMD_SEND_BLOCK_REQ, gen3_trade_round_request(round));
+    gen3_block_send(
+        &club->link, club->round_block, gen3_trade_round_size(round), FLIPPER_MULTIPLAYER_ID);
+    club->round = round;
+    club->round_gba_done = false;
+    club->idle_bursts = 0;
+    gen3_block_rx_reset(&club->block_rx);
+}
+
+/* §B2.2. A step is complete once our block has left (the queue is empty) and the GBA's is in:
+ * both LinkPlayerBlocks before round 1, both blocks of round r before round r + 1. Then
+ * round1_delay or round_delay idle bursts, so the GBA has made its copy for the round and, at
+ * round 1, its case 1 has run. After round 5: the trade menu. */
+static void exchange_step(Gen3Club* club) {
+    if(club->phase != Gen3ClubPhaseExchange) return;
+    if(club->round > 0 && !club->round_gba_done) return;
+    if(gen3_link_queued(&club->link) != 0) return;
+    if(club->round == GEN3_TRADE_ROUNDS) {
+        club->phase = Gen3ClubPhaseMenu;
+        return;
+    }
+    if(club->idle_bursts < (club->round == 0 ? club->round1_delay : club->round_delay)) {
+        club->idle_bursts++; /* the burst built below is idle */
+        return;
+    }
+    start_round(club, (uint8_t)(club->round + 1));
 }
 
 static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
@@ -239,7 +302,10 @@ static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     case Gen3ClubPhaseRoom:
         on_room_command(club, cmd);
         break;
-    default: /* Exchange: idle until Task 4's rounds. Closing: keep bursting until the GBA closes
+    case Gen3ClubPhaseExchange:
+        on_exchange_command(club, cmd);
+        break;
+    default: /* Menu: nothing yet (Task 5). Closing: keep bursting until the GBA closes
                 (Disconnected). */
         break;
     }
@@ -290,6 +356,7 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     if(club->phase == Gen3ClubPhaseRoom) club->room_frames++;
     request_cards(club);
     try_sit(club);
+    exchange_step(club);
     gen3_link_tx(&club->link, tx);
 }
 
@@ -309,6 +376,7 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->gba_seated = club->gba_seated;
     out->flipper_seated = club->flipper_seated;
     out->trades_done = club->trades_done;
+    out->round = club->round;
 }
 
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {
@@ -324,4 +392,17 @@ bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_se
 
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts) {
     club->card_delay = bursts;
+}
+
+void gen3_club_set_round_delays(Gen3Club* club, uint8_t first, uint8_t later) {
+    club->round1_delay = first;
+    club->round_delay = later;
+}
+
+void gen3_club_gba_mon(const Gen3Club* club, uint8_t slot, uint8_t out[GEN3_PARTY_SIZE]) {
+    if(slot < GEN3_CLUB_GBA_PARTY) {
+        memcpy(out, club->gba_party[slot], GEN3_PARTY_SIZE);
+    } else {
+        memset(out, 0, GEN3_PARTY_SIZE);
+    }
 }

@@ -59,10 +59,24 @@
 #define MENU_PLAYERS   3 /* child: GetLinkPlayerCount_2() >= sub_800820C() */
 #define MENU_EXCHANGE  4 /* gReceivedRemoteLinkPlayers && IsLinkPlayerDataExchangeComplete */
 #define MENU_PARTIES   5 /* sub_8048D44 [BufferTradeParties] (§B2) */
+#define MENU_ENEMIES   6 /* CalculateEnemyPartyCount, the party icons */
+#define MENU_BUILD     7 /* states 7-21: held items, names, HP bars, the fade-in */
+#define MENU_RUNNING   22 /* gMain.callback1 = sub_80494D8 [CB1_UpdateLink] */
 #define MENU_DELAY_MAX 11 /* state 2 leaves once ++unk_00b4 > 11 */
+#define MENU_BUILD_FRAMES 32 /* state 6 up to callback1 (states 6-21 and the fade-in) */
+#define XCHG_STALL_FRAMES 600 /* test limit: a sub_8048D44 wait case has no timeout on Ruby */
+#define MAIL_BLOCK_SIZE   220 /* round 4: mail[0..5] and 4 more bytes (§B2.3) */
+/* What Ruby can hold (§B2.5 rules 1-3): internal species 1..251 and 277..411, items below
+ * ITEMS_COUNT, never the ENIGMA BERRY */
+#define SPECIES_JOHTO_LAST  251
+#define SPECIES_HOENN_FIRST 277
+#define SPECIES_LAST        411
+#define ITEMS_COUNT         349
+#define ITEM_ENIGMA_BERRY   175
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
+#define BLOCK_REQ_CARD 2
 
 /* sMagic: an ASCII C string, compared with strcmp (15 bytes including the NUL) */
 static const char link_magic[] = "GameFreak inc.";
@@ -277,7 +291,11 @@ static bool init_block_send(FakeRuby* g, const uint8_t* src, uint16_t size) {
     g->block_send_active = true;
     g->block_send_size = size;
     g->block_send_pos = 0;
-    if(src != g->block_send_buffer) memcpy(g->block_send_buffer, src, size);
+    g->request_block = false;
+    if(src != g->block_send_buffer) {
+        memcpy(g->block_send_buffer, src, size);
+        g->send_copy = 0; /* a round's copy is gone */
+    }
     g->send_cmd[0] = CMD_INIT_BLOCK;
     g->send_cmd[1] = size;
     g->send_cmd[2] = 0x80 + LOCAL_ID;
@@ -340,14 +358,24 @@ static void cont_block(FakeRuby* g, uint8_t slot, const uint16_t* cmd) {
     receive_link_player(g, slot);
 }
 
+/* 0xCCCC: SendBlock(gBlockSendBuffer, sBlockRequestLookupTable[type].size). */
 static void block_request(FakeRuby* g, uint16_t type) {
-    if(!g->card_ready) {
-        set_error(g, "stale card"); /* would send stale gBlockSendBuffer bytes (U3) */
+    if(type == BLOCK_REQ_CARD) {
+        if(!g->card_ready) {
+            set_error(g, "stale card"); /* would send stale gBlockSendBuffer bytes (U3) */
+            return;
+        }
+        init_block_send(g, g->block_send_buffer, block_request_size[type]);
         return;
     }
     /* Ruby indexes the table without a bounds check; the club never sends type >= 5. */
     if(type >= sizeof(block_request_size) / sizeof(block_request_size[0])) return;
-    init_block_send(g, g->block_send_buffer, block_request_size[type]);
+    /* A party-exchange round (§B2.1), refused while a block is active. block_send_chunk checks
+     * its first chunk against the round's copy. */
+    if(init_block_send(g, g->block_send_buffer, block_request_size[type])) {
+        g->request_block = true;
+        g->requests++;
+    }
 }
 
 static void process_recv_cmds(FakeRuby* g) {
@@ -384,8 +412,14 @@ static void process_recv_cmds(FakeRuby* g) {
     }
 }
 
+/* LinkCB_BlockSend reads gBlockSendBuffer as it builds each chunk: a copy made after the request
+ * but before chunk 1 still goes out. */
 static void block_send_chunk(FakeRuby* g) {
     const uint8_t* src = g->block_send_buffer;
+    if(g->block_send_pos == 0 && g->request_block && g->send_copy != g->requests) {
+        set_error(g, "stale block"); /* not this round's copy: Ruby sends stale bytes (U3) */
+        return;
+    }
     g->send_cmd[0] = CMD_CONT_BLOCK;
     for(int i = 0; i < 7; i++) {
         size_t off = (size_t)g->block_send_pos + 2 * i;
@@ -703,6 +737,9 @@ static void room_update(FakeRuby* g) {
     for(uint8_t i = 0; i < FAKE_RUBY_PLAYERS; i++) {
         handle_link_player_key(g, i, g->held_keys[i], seat_step);
     }
+    /* The step ends on the seat tile even when its coord event didn't run (the player wasn't
+     * IDLE), and standing there never runs it again. */
+    if(seat_step) g->on_seat = true;
     uint16_t key = key_intercept(g, b_new);
     g->held_key_to_send = (key >= KEY_CODE_EMPTY && key < KEY_CODE_END) ? key : KEY_CODE_EMPTY;
     run_room_script(g);
@@ -729,6 +766,8 @@ static void open_link(FakeRuby* g) {
     g->trigger_runs = 0;
     g->open_frame = g->frame;
     g->relink_frames = UINT32_MAX;
+    g->requests = 0;
+    g->request_block = false;
 }
 
 /* sub_8083AAC [Task_StartWiredTrade] (§B1.5): from the seat to the trade menu. */
@@ -756,19 +795,125 @@ static void run_start_trade(FakeRuby* g) {
     }
 }
 
-/* sub_8047EC0 [CB2_CreateTradeMenu] states 0-5 (§B1.6). */
+static void xchg_next(FakeRuby* g) {
+    g->xchg_case++;
+    g->xchg_case_frame = g->frame;
+}
+
+/* sub_8048D44 cases 0/4/7/10/13: round r's bytes into gBlockSendBuffer (§B2.1). */
+static void xchg_copy(FakeRuby* g, uint8_t round) {
+    if(round <= 3) {
+        memcpy(g->block_send_buffer, g->party[2 * (round - 1)], 2 * GEN3_PARTY_SIZE);
+    } else if(round == 4) {
+        memset(g->block_send_buffer, 0, MAIL_BLOCK_SIZE); /* gSaveBlock1.mail: this GBA has none */
+    } else {
+        memset(g->block_send_buffer, 0, FAKE_RUBY_RIBBONS); /* giftRibbons; bytes 11.. stale */
+    }
+    g->send_copy = round;
+}
+
+/* Cases 3/6/9/12/15: the Flipper's block (slot mpId ^ 1 = 0) into round r's place. */
+static void xchg_store(FakeRuby* g, uint8_t round) {
+    const uint8_t* src = g->block_recv_buffer[0];
+    if(round <= 3) {
+        memcpy(g->enemy[2 * (round - 1)], src, 2 * GEN3_PARTY_SIZE);
+    } else if(round == 4) {
+        memcpy(g->partner_mail, src, sizeof(g->partner_mail));
+    } else {
+        memcpy(g->partner_ribbons, src, sizeof(g->partner_ribbons));
+    }
+}
+
+/* sub_8048D44 [BufferTradeParties], one case per frame; true at case 16 (§B2.1). A wait case
+ * that lasts XCHG_STALL_FRAMES is the §B2.2 deadlock: Ruby's black screen. */
+static bool buffer_trade_parties(FakeRuby* g) {
+    const uint8_t c = g->xchg_case;
+    switch(c) {
+    case 0: /* round r = c / 3 + 1 */
+    case 4:
+    case 7:
+    case 10:
+    case 13:
+        xchg_copy(g, (uint8_t)(c / 3 + 1));
+        xchg_next(g);
+        return false;
+    case 1: /* IsLinkTaskFinished, then ResetBlockReceivedFlags if any flag is set */
+        if(g->callback != FakeRubyCbNone) break;
+        g->block_received = 0;
+        xchg_next(g);
+        return false;
+    case 2: /* sub_8007E9C [SendBlockRequest]: the master's; the child just advances */
+    case 5:
+    case 8:
+    case 11:
+    case 14:
+        xchg_next(g);
+        return false;
+    case 3: /* round r = c / 3: the Flipper's block and our own echo */
+    case 6:
+    case 9:
+    case 12:
+    case 15:
+        if(g->block_received != 0x3) break;
+        xchg_store(g, (uint8_t)(c / 3));
+        g->block_received = 0;
+        xchg_next(g);
+        return false;
+    default: /* 16: the Shedinja nickname fix (not modelled) */
+        return true;
+    }
+    if(g->frame - g->xchg_case_frame >= XCHG_STALL_FRAMES) set_error(g, "exchange stalled");
+    return false;
+}
+
+static bool all_zero(const uint8_t* p, size_t len) {
+    for(size_t i = 0; i < len; i++) {
+        if(p[i] != 0) return false;
+    }
+    return true;
+}
+
+/* State 6: CalculateEnemyPartyCount counts slots up to the first species 0 (§B2.5); a count of
+ * 0 is legal (R8). Stricter than Ruby, which shows whatever it gets: a slot that fails its
+ * checksum (a Bad Egg on Ruby) is "bad egg", and one Ruby can't hold is "bad offer". */
+static void calculate_enemy_party_count(FakeRuby* g) {
+    g->enemy_count = 0;
+    for(uint8_t i = 0; i < FAKE_RUBY_PARTY; i++) {
+        Gen3Pkm p;
+        if(all_zero(g->enemy[i], GEN3_PARTY_SIZE)) return;
+        if(!gen3_pkm_decrypt(g->enemy[i], GEN3_PARTY_SIZE, &p)) {
+            set_error(g, "bad egg");
+            return;
+        }
+        const uint32_t species = gen3_pkm_get(&p, Gen3FieldSpecies);
+        const uint32_t item = gen3_pkm_get(&p, Gen3FieldHeldItem);
+        if(species == 0) return;
+        if(species > SPECIES_LAST ||
+           (species > SPECIES_JOHTO_LAST && species < SPECIES_HOENN_FIRST) ||
+           item >= ITEMS_COUNT || item == ITEM_ENIGMA_BERRY) {
+            set_error(g, "bad offer");
+            return;
+        }
+        g->enemy_count++;
+    }
+}
+
+/* sub_8047EC0 [CB2_CreateTradeMenu] (§B1.6, §B2). */
 static void run_create_menu(FakeRuby* g) {
     switch(g->menu_state) {
     case MENU_SETUP:
+        g->xchg_case = 0; /* unk_0075 */
         g->menu_state = MENU_OPEN;
         break;
     case MENU_OPEN:
         g->me.link_type = GEN3_LINKTYPE_TRADE_CONNECTING; /* gLinkType; InitLocalLinkPlayer */
         open_link(g);
+        memset(g->enemy, 0, sizeof(g->enemy)); /* CreateMon(&gEnemyParty[i], species 0) */
         g->wait_task = true; /* CreateTask(sub_8083C50): it runs this frame */
         g->wait_count = 0;
         g->menu_count = 0;
         g->menu_state = MENU_DELAY;
+        g->menu = FakeRubyMenuLoading;
         g->phase = FakeRubyMenu;
         break;
     case MENU_DELAY:
@@ -788,7 +933,21 @@ static void run_create_menu(FakeRuby* g) {
         }
         g->menu_state = MENU_PARTIES; /* CalculatePlayerPartyCount */
         break;
-    default: /* MENU_PARTIES: the party exchange */
+    case MENU_PARTIES:
+        /* then sub_804AF84 [SaveTradeGiftRibbons], not modelled */
+        if(buffer_trade_parties(g)) g->menu_state = MENU_ENEMIES;
+        break;
+    case MENU_ENEMIES:
+        calculate_enemy_party_count(g);
+        g->menu_count = 1; /* this frame is the build's first */
+        g->menu_state = MENU_BUILD;
+        break;
+    case MENU_BUILD:
+        if(++g->menu_count < MENU_BUILD_FRAMES) break;
+        g->menu = FakeRubyMenuBrowsing; /* callback1 sub_80494D8, callback2 sub_8048AB4 */
+        g->menu_state = MENU_RUNNING;
+        break;
+    default: /* MENU_RUNNING: the trade menu (Task 5) */
         break;
     }
 }
@@ -829,6 +988,7 @@ static void run_linkup_task(FakeRuby* g) {
          * ProcessRecvCmds: a 0xCCCC processed in burst P+3 or later gets the real card. */
         if(g->frame - g->task_frame + 1 < CARD_READY_BURSTS) break;
         gen3_trainer_card_build(&g->me, g->block_send_buffer);
+        g->send_copy = 0;
         g->card_ready = true;
         next_task(g, FakeRubyTaskAwaitCards);
         break;
@@ -991,7 +1151,12 @@ void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx) {
             rx->timeout_mask |= (uint16_t)(1u << t);
         }
     }
-    if(g->powered && !g->error) main_loop(g);
+    if(!g->powered || g->error) return;
+    if(g->stall > 0) {
+        g->stall--; /* fake_ruby_stall: no main loop this frame */
+        return;
+    }
+    main_loop(g);
 }
 
 FakeRubyPhase fake_ruby_phase(const FakeRuby* g) {
@@ -1004,4 +1169,33 @@ const char* fake_ruby_error(const FakeRuby* g) {
 
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g) {
     return &g->link_players[0];
+}
+
+void fake_ruby_set_party(FakeRuby* g, const uint8_t party[][GEN3_PARTY_SIZE], uint8_t count) {
+    memset(g->party, 0, sizeof(g->party));
+    for(uint8_t i = 0; i < count && i < FAKE_RUBY_PARTY; i++) {
+        memcpy(g->party[i], party[i], GEN3_PARTY_SIZE);
+    }
+    memcpy(g->saved_party, g->party, sizeof(g->saved_party));
+}
+
+const uint8_t* fake_ruby_party(const FakeRuby* g, uint8_t slot, bool saved) {
+    if(slot >= FAKE_RUBY_PARTY) return NULL;
+    return saved ? g->saved_party[slot] : g->party[slot];
+}
+
+const uint8_t* fake_ruby_enemy(const FakeRuby* g, uint8_t slot) {
+    return slot < FAKE_RUBY_PARTY ? g->enemy[slot] : NULL;
+}
+
+uint8_t fake_ruby_enemy_count(const FakeRuby* g) {
+    return g->enemy_count;
+}
+
+FakeRubyMenuState fake_ruby_menu_state(const FakeRuby* g) {
+    return g->phase == FakeRubyMenu ? g->menu : FakeRubyMenuNone;
+}
+
+void fake_ruby_stall(FakeRuby* g, uint8_t frames) {
+    g->stall = frames;
 }
