@@ -16,14 +16,36 @@
 #define MASTER_HANDSHAKE 0x8FFF
 #define SLAVE_HANDSHAKE  0xB9A0
 
-#define LOCAL_ID       1 /* multiplayer id of the child */
-#define KEY_CODE_EMPTY 0x11
+#define LOCAL_ID 1 /* multiplayer id of the child */
+
+/* Room key codes (§A7 "Room command format") */
+#define KEY_CODE_EMPTY      0x11
+#define KEY_CODE_DPAD_DOWN  0x12
+#define KEY_CODE_READY      0x16
+#define KEY_CODE_EXIT_ROOM  0x17
+#define KEY_CODE_START      0x18
+#define KEY_CODE_IDLE       0x1A
+#define KEY_CODE_RECV_QUEUE 0x1B
+#define KEY_CODE_SEND_QUEUE 0x1C
+#define KEY_CODE_EXIT_SEAT  0x1D
+#define KEY_CODE_END        0x1E /* sub_8055280 keeps codes 0x11..0x1D, else sends 0x11 */
+
+/* Player link states (gUnknown_03000580) */
+#define PLAYER_IDLE    0x80
+#define PLAYER_BUSY    0x81
+#define PLAYER_READY   0x82
+#define PLAYER_EXITING 0x83
 
 #define TRIGGER_HANDSHAKE_RUNS 5 /* Task_TriggerHandshake */
 #define LAG_VBLANKS            10 /* LinkVSync: > 10 VBlanks without a serial IRQ */
 #define CARD_READY_BURSTS      3 /* own card ready this many bursts after both player blocks */
 #define WALK_IN_FRAMES         30 /* zero-command frames between the cards and 0x2FFE */
 #define STANDBY_TIMEOUT_FRAMES 600 /* test limit; Ruby itself waits forever */
+/* Script pacing in game updates; the player's reading time, not protocol values. */
+#define PROMPT_UPDATES    60 /* "Terminate the link?" until the player picks YES */
+#define TERMINATE_UPDATES 60 /* "Terminating the link..." until ExitLinkRoom */
+#define EXIT_FADE_UPDATES 30 /* FadeScreen and music fade-out before SetCloseLinkCallback */
+#define CORRUPT_BIT       0x0001
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -55,6 +77,7 @@ static void link_reset(FakeRuby* g) {
     g->lag = false;
     g->recv_nonzero = false;
     g->send_empty = false;
+    g->received_nothing = false;
     g->send_pos = 0;
     g->send_count = 0;
     g->recv_pos = 0;
@@ -199,6 +222,7 @@ static void enqueue_send_cmd(FakeRuby* g) {
 }
 
 static void dequeue_recv_cmds(FakeRuby* g) {
+    g->received_nothing = g->recv_count == 0;
     if(g->recv_count == 0) {
         memset(g->recv_cmds, 0, sizeof(g->recv_cmds));
         return;
@@ -303,6 +327,7 @@ static void block_request(FakeRuby* g, uint16_t type) {
 static void process_recv_cmds(FakeRuby* g) {
     for(uint8_t i = 0; i < FAKE_RUBY_PLAYERS; i++) {
         const uint16_t* cmd = g->recv_cmds[i];
+        g->held_keys[i] = 0; /* a key code lasts one game update */
         switch(cmd[0]) {
         case CMD_SEND_LINK_TYPE:
             send_link_player_block(g);
@@ -392,9 +417,10 @@ static void run_callback(FakeRuby* g) {
         }
         break;
     case FakeRubyCbSendHeldKeys:
-        if(g->received_link_players) {
+        /* BuildSendCmd(0xCAFE), every frame, even when the game update is skipped */
+        if(g->received_link_players && g->held_key_to_send != 0) {
             g->send_cmd[0] = CMD_SEND_HELD_KEYS;
-            g->send_cmd[1] = KEY_CODE_EMPTY;
+            g->send_cmd[1] = g->held_key_to_send;
         }
         break;
     }
@@ -421,11 +447,154 @@ static void next_task(FakeRuby* g, FakeRubyTask task) {
     g->task_frame = g->frame;
 }
 
+/* ---- Trade Center room: overworld.c, field_fadetransition.c (§A7, §B7) ---- */
+
+static bool any_player_in(const FakeRuby* g, uint8_t state) { /* sub_8054FC0 */
+    for(int i = 0; i < FAKE_RUBY_PLAYERS; i++) {
+        if(g->link_state[i] == state) return true;
+    }
+    return false;
+}
+
+static bool all_players_in(const FakeRuby* g, uint8_t state) { /* sub_8054F88 */
+    for(int i = 0; i < FAKE_RUBY_PLAYERS; i++) {
+        if(g->link_state[i] != state) return false;
+    }
+    return true;
+}
+
+/* sub_8055824 (exit prompt) / sub_805585C (forced exit): the script takes over the local player.
+ * Neither script unlocks the controls before ExitLinkRoom replaces the key intercept. */
+static void start_leave_script(FakeRuby* g, FakeRubyScript script, uint16_t updates) {
+    g->key_cb = FakeRubyKeyDeferToEventScript;
+    g->controls_locked = true;
+    g->script = script;
+    g->script_updates = updates;
+    g->phase = FakeRubyLeaving;
+}
+
+/* sub_8054FF8 [HandleLinkPlayerKeyInput], per slot per game update. While anyone is
+ * EXITING_ROOM, an IDLE player is made BUSY and that update's key is dropped (early return), so
+ * only a player that is already not IDLE takes 0x17. A partner's 0x17 processed in the update
+ * right after our own echoed 0x17 is lost, and we then wait forever for all EXITING_ROOM. */
+static void handle_link_player_key(FakeRuby* g, uint8_t slot, uint16_t key) {
+    bool local = slot == LOCAL_ID;
+    uint8_t* state = &g->link_state[slot];
+    if(*state == PLAYER_IDLE) {
+        /* No coord-event script (sub_8055648): no avatar ever takes a step in this model. */
+        if(any_player_in(g, PLAYER_EXITING)) {
+            *state = PLAYER_BUSY;
+            if(local) start_leave_script(g, FakeRubyScriptTerminate, TERMINATE_UPDATES);
+            return;
+        }
+        switch(key) {
+        case KEY_CODE_START:
+        case KEY_CODE_RECV_QUEUE:
+        case KEY_CODE_SEND_QUEUE:
+            *state = PLAYER_BUSY; /* the local player never sends these in this model */
+            break;
+        case KEY_CODE_DPAD_DOWN: /* the exit prompt needs the south exit, facing south */
+            if(local && g->facing_exit) {
+                *state = PLAYER_BUSY;
+                start_leave_script(g, FakeRubyScriptPrompt, PROMPT_UPDATES);
+            }
+            break;
+        default: /* 0x19 (A) needs map data and is not modelled */
+            break;
+        }
+    }
+    switch(key) {
+    case KEY_CODE_EXIT_ROOM:
+        *state = PLAYER_EXITING;
+        break;
+    case KEY_CODE_READY:
+        *state = PLAYER_READY;
+        break;
+    case KEY_CODE_IDLE:
+        *state = PLAYER_IDLE;
+        if(local) g->key_cb = FakeRubyKeySelfIdle;
+        break;
+    case KEY_CODE_EXIT_SEAT:
+        if(*state == PLAYER_READY) *state = PLAYER_BUSY;
+        break;
+    default:
+        break;
+    }
+}
+
+/* gUnknown_03000584: this GBA's next key code, after every player's key was handled. */
+static uint16_t key_intercept(FakeRuby* g) {
+    switch(g->key_cb) {
+    case FakeRubyKeySelfIdle:
+        /* 0x1B/0x1C flow control needs a queue above 4; one burst per frame keeps both <= 1. */
+        if(g->controls_locked) return KEY_CODE_EMPTY;
+        return g->facing_exit ? KEY_CODE_DPAD_DOWN : KEY_CODE_EMPTY;
+    case FakeRubyKeySendExitRoomKey:
+        g->key_cb = FakeRubyKeyWaitForPlayersToExit;
+        return KEY_CODE_EXIT_ROOM;
+    case FakeRubyKeyWaitForPlayersToExit:
+        if(all_players_in(g, PLAYER_EXITING)) {
+            g->script = FakeRubyScriptExitStart; /* ScriptContext_SetupScript(gUnknown_081A4508) */
+            g->key_cb = FakeRubyKeySendNothing;
+        }
+        return KEY_CODE_EMPTY;
+    case FakeRubyKeyDeferToEventScript: /* controls stay locked: see start_leave_script */
+    case FakeRubyKeySendNothing:
+        return KEY_CODE_EMPTY;
+    }
+    return KEY_CODE_EMPTY;
+}
+
+/* Callback2: the running script, then sub_8081050 [Task_ReturnFromLinkRoom]. */
+static void run_room_script(FakeRuby* g) {
+    switch(g->script) {
+    case FakeRubyScriptNone:
+    case FakeRubyScriptExitWait: /* WaitCloseLink closes the link; then the warp to PC 2F */
+        break;
+    case FakeRubyScriptPrompt:
+        if(--g->script_updates == 0) { /* YES: goto TradeRoom_TerminateLink */
+            g->script = FakeRubyScriptTerminate;
+            g->script_updates = TERMINATE_UPDATES;
+        }
+        break;
+    case FakeRubyScriptTerminate:
+        if(--g->script_updates == 0) {
+            g->key_cb = FakeRubyKeySendExitRoomKey; /* special ExitLinkRoom -> sub_805559C */
+            g->script = FakeRubyScriptNone;
+        }
+        break;
+    case FakeRubyScriptExitStart:
+        g->callback = FakeRubyCbNone; /* ClearLinkCallback_2: no more CAFE */
+        g->script = FakeRubyScriptExitFade;
+        g->script_updates = EXIT_FADE_UPDATES;
+        break;
+    case FakeRubyScriptExitFade:
+        if(--g->script_updates == 0) {
+            if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbReadyCloseLink;
+            g->script = FakeRubyScriptExitWait;
+        }
+        break;
+    }
+}
+
+/* One game update in the room: callback1 (sub_8055354 [CB1_OverworldLink]: every player's key
+ * in lockstep, own echo included, then sub_8055280 keeps 0x11..0x1D), then callback2. */
+static void room_update(FakeRuby* g) {
+    for(uint8_t i = 0; i < FAKE_RUBY_PLAYERS; i++) {
+        handle_link_player_key(g, i, g->held_keys[i]);
+    }
+    uint16_t key = key_intercept(g);
+    g->held_key_to_send = (key >= KEY_CODE_EMPTY && key < KEY_CODE_END) ? key : KEY_CODE_EMPTY;
+    run_room_script(g);
+}
+
 /* cable_club.c (child side of the Trade Center linkup) and the counter script. */
 static void run_linkup_task(FakeRuby* g) {
     switch(g->task) {
     case FakeRubyTaskNone:
+        break;
     case FakeRubyTaskRoom:
+        room_update(g);
         break;
     case FakeRubyTaskExchange:
         if(!g->received_link_players) break;
@@ -466,6 +635,12 @@ static void run_linkup_task(FakeRuby* g) {
          * callback also ends this wait once it is sent, as on Ruby. */
         if(g->callback != FakeRubyCbNone) break;
         g->callback = FakeRubyCbSendHeldKeys; /* StartSendingKeysToLink */
+        /* sub_8054F70 at the map load; CB1 ran through the walk-in with the controls locked
+         * (0x11), and sub_8080A5C unlocks them now. */
+        memset(g->link_state, PLAYER_IDLE, sizeof(g->link_state));
+        g->key_cb = FakeRubyKeySelfIdle;
+        g->held_key_to_send = KEY_CODE_EMPTY;
+        g->controls_locked = false;
         g->phase = FakeRubyRoom;
         next_task(g, FakeRubyTaskRoom);
         break;
@@ -487,6 +662,9 @@ static void main_loop(FakeRuby* g) {
     link_main1(g);
     link_main2(g);
     if(g->error) return;
+    /* UpdateLinkAndCallCallbacks: while sending keys, a frame whose dequeue found nothing skips
+     * the whole game update (lockstep, §A7). LinkMain2 above still built this frame's CAFE. */
+    if(g->received_nothing && g->callback == FakeRubyCbSendHeldKeys) return;
     run_tasks(g);
 }
 
@@ -531,6 +709,16 @@ void fake_ruby_power_off(FakeRuby* g) {
     g->phase = FakeRubyOff;
 }
 
+void fake_ruby_leave_room(FakeRuby* g) {
+    if(g->phase != FakeRubyRoom || g->error) return;
+    g->facing_exit = true; /* SelfIdle now sends 0x12 until the prompt takes over */
+    g->phase = FakeRubyLeaving;
+}
+
+void fake_ruby_corrupt_next(FakeRuby* g) {
+    g->corrupt_pending = true;
+}
+
 void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx) {
     memset(rx, 0, sizeof(*rx));
     rx->count = tx->count;
@@ -539,7 +727,12 @@ void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx) {
         if(g->powered && g->serial_on) {
             uint16_t own = g->sio_send;
             rx->word[t] = own;
-            serial_irq(g, tx->word[t], own);
+            /* send_index 1..8: transfers #2..#9 carry command words (0 is the checksum slot) */
+            if(g->corrupt_pending && g->state == FakeRubyLinkConnected && g->send_index != 0) {
+                rx->word[t] ^= CORRUPT_BIT; /* the Flipper reads a glitched word ... */
+                g->corrupt_pending = false;
+            }
+            serial_irq(g, tx->word[t], own); /* ... while this GBA sums the word it sent */
         } else {
             rx->word[t] = MLINK_NO_DATA;
             rx->timeout_mask |= (uint16_t)(1u << t);

@@ -6,11 +6,13 @@
 #include <src/gen3/gen3_link_player.h>
 
 /* Test-only model of Pokemon Ruby as the multiplayer child (slot 1) during the Trade Center
- * linkup (docs/gen3/link-protocol.md §A2-A7). It models the child's own link stack and does
- * not use src/gen3/gen3_link.c: the per-transfer ISR (DoHandshake, DoRecv, DoSend), its own
- * send and receive queues, LinkMain1/LinkMain2 with gSendCmd/gRecvCmds, gLinkCallback, and the
- * cable_club.c linkup tasks. One fake_ruby_frame() is one GBA frame: VBlank (LinkVSync), the
- * frame's transfers, then the main loop. Any error stops it answering (0xFFFF from then on). */
+ * linkup, the room and leaving it (docs/gen3/link-protocol.md §A2-A7, §B7). It models the
+ * child's own link stack and does not use src/gen3/gen3_link.c: the per-transfer ISR
+ * (DoHandshake, DoRecv, DoSend), its own send and receive queues, LinkMain1/LinkMain2 with
+ * gSendCmd/gRecvCmds, gLinkCallback, the cable_club.c linkup tasks, and in the room the
+ * lockstep game update (CB1_OverworldLink: player link states, key intercept callbacks) with
+ * the exit scripts. One fake_ruby_frame() is one GBA frame: VBlank (LinkVSync), the frame's
+ * transfers, then the main loop. Any error stops it answering (0xFFFF from then on). */
 
 #define FAKE_RUBY_CMD_LEN   8 /* CMD_LENGTH */
 #define FAKE_RUBY_QUEUE_LEN 50 /* QUEUE_CAPACITY */
@@ -59,6 +61,25 @@ typedef enum {
     FakeRubyTaskRoom, /* sending CAFE every frame */
     FakeRubyTaskStop, /* sub_80833C4 [Task_StopLinkup]: closing after "different selections" */
 } FakeRubyTask;
+
+/* gUnknown_03000584 [sPlayerKeyInterceptCallback]: picks the key code this GBA sends next. */
+typedef enum {
+    FakeRubyKeySelfIdle, /* sub_8055390 [KeyInterCB_SelfIdle] */
+    FakeRubyKeyDeferToEventScript, /* sub_80553E4 [KeyInterCB_DeferToEventScript] */
+    FakeRubyKeySendExitRoomKey, /* sub_80554E4 [KeyInterCB_SendExitRoomKey] */
+    FakeRubyKeyWaitForPlayersToExit, /* sub_80554BC [KeyInterCB_WaitForPlayersToExit] */
+    FakeRubyKeySendNothing, /* sub_80554B8 [KeyInterCB_SendNothing] */
+} FakeRubyKeyCb;
+
+/* Room event scripts and the task that takes the player out (§B7). */
+typedef enum {
+    FakeRubyScriptNone,
+    FakeRubyScriptPrompt, /* TradeRoom_PromptToCancelLink: the player answers YES */
+    FakeRubyScriptTerminate, /* TradeRoom_TerminateLink: message, then ExitLinkRoom */
+    FakeRubyScriptExitStart, /* gUnknown_081A4508 -> sub_8081050 case 0: stop CAFE, fade */
+    FakeRubyScriptExitFade, /* sub_8081050 case 1: after the fade, SetCloseLinkCallback */
+    FakeRubyScriptExitWait, /* sub_8081050 case 2: wait for CloseLink, then warp */
+} FakeRubyScript;
 
 typedef struct FakeRuby FakeRuby;
 
@@ -119,12 +140,37 @@ struct FakeRuby {
     uint32_t task_frame; /* frame the current task step began */
     bool card_ready; /* own trainer card is in gBlockSendBuffer */
     uint32_t standby_frame; /* frame this GBA built its 0x2FFE */
+
+    /* overworld.c in the Trade Center: CB1_OverworldLink and the room scripts */
+    bool received_nothing; /* gLink.receivedNothing: the last dequeue found the queue empty */
+    uint8_t link_state[FAKE_RUBY_PLAYERS]; /* gUnknown_03000580 [sPlayerLinkStates] */
+    FakeRubyKeyCb key_cb;
+    uint16_t held_key_to_send; /* word_3004858 [gHeldKeyCodeToSend] */
+    bool controls_locked; /* ArePlayerFieldControlsLocked */
+    bool facing_exit; /* on its exit tile facing south, DOWN held (the walk is abstracted) */
+    FakeRubyScript script;
+    uint16_t script_updates; /* game updates left in the current script step */
+
+    bool corrupt_pending; /* fake_ruby_corrupt_next: glitch the next command word */
 };
 
-void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me); /* me.link_type picks the counter */
-void fake_ruby_open_link(FakeRuby* g); /* player chose the counter: link opens after 6 frames (§A3 timeline) */
-void fake_ruby_power_off(FakeRuby* g); /* answers 0xFFFF from now on */
-void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx); /* simulates one frame of transfers */
+/* me.link_type picks the counter */
+void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me);
+/* player chose the counter: link opens after 6 frames (§A3 timeline) */
+void fake_ruby_open_link(FakeRuby* g);
+/* answers 0xFFFF from now on; fake_ruby_init powers it on again */
+void fake_ruby_power_off(FakeRuby* g);
+/* In the room: the player walks onto its exit, faces south and confirms "Terminate the link?"
+ * (§B7). It sends CAFE 0017 and waits, with no timeout, until every player is EXITING_ROOM; then
+ * stops sending keys, fades out, sends 5FFF, waits for the Flipper's 5FFF and closes (0xFFFF). */
+void fake_ruby_leave_room(FakeRuby* g);
+/* Flips one bit of the next command word this GBA puts on the wire, as the Flipper reads it.
+ * This GBA sums its own word, so both checksums diverge, as with a glitch at the receiver. */
+void fake_ruby_corrupt_next(FakeRuby* g);
+/* simulates one frame of transfers */
+void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx);
 FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
-const char* fake_ruby_error(const FakeRuby* g); /* NULL, or "checksum", "magic", "stale card", "lag", "standby timeout" */
-const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g); /* the Flipper's block as Ruby parsed it */
+/* NULL, or "checksum", "magic", "stale card", "lag", "standby timeout" */
+const char* fake_ruby_error(const FakeRuby* g);
+/* the Flipper's block as Ruby parsed it */
+const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);

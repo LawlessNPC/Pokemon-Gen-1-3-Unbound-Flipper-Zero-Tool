@@ -7,9 +7,9 @@
 #include <src/gen3/gen3_block.h>
 #include <src/gen3/gen3_link_player.h>
 
-/* Cable Club (Trade Center) state machine, Flipper as multiplayer master
- * (docs/gen3/link-protocol.md §A6, §A8). Pure C, no heap; gen3_club_frame runs in the
- * link frame ISR. */
+/* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
+ * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7). Pure C, no heap; gen3_club_frame runs in
+ * the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
 
@@ -43,7 +43,7 @@ typedef struct {
     bool partner_valid;
     Gen3LinkPlayer partner;
     uint32_t frames;
-    uint32_t room_frames;
+    uint32_t room_frames; /* frames spent in Room since init, over all sessions */
     Gen3LinkStats link;
 } Gen3ClubStatus;
 
@@ -61,6 +61,7 @@ struct Gen3Club {
     Gen3LinkPlayer partner;
     bool card_requested; /* 0xCCCC and own card queued this session */
     bool close_answered; /* {5FFF} queued this session */
+    bool exit_answer_due; /* the GBA sent CAFE 0017: answer after its next command */
     uint8_t card_delay; /* idle bursts to wait before 0xCCCC */
     uint8_t idle_bursts;
     uint32_t frames;

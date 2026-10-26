@@ -4,9 +4,13 @@
 
 #include <string.h>
 
-#define CMD_SEND_LINK_TYPE   0x2222
-#define CMD_READY_CLOSE_LINK 0x5FFF
-#define CMD_SEND_BLOCK_REQ   0xCCCC
+#define CMD_SEND_LINK_TYPE     0x2222
+#define CMD_READY_EXIT_STANDBY 0x2FFE
+#define CMD_READY_CLOSE_LINK   0x5FFF
+#define CMD_SEND_HELD_KEYS     0xCAFE
+#define CMD_SEND_BLOCK_REQ     0xCCCC
+
+#define KEY_CODE_EXIT_ROOM 0x17
 
 #define BLOCK_REQ_TRAINER_CARD 2
 #define FLIPPER_MULTIPLAYER_ID 0 /* slot 0: block headers carry 0x80 */
@@ -30,6 +34,7 @@ static void reset_session(Gen3Club* club) {
     memset(&club->partner, 0, sizeof(club->partner));
     club->card_requested = false;
     club->close_answered = false;
+    club->exit_answer_due = false;
     club->idle_bursts = 0;
 }
 
@@ -84,6 +89,23 @@ static void on_player_block(Gen3Club* club) {
     gen3_block_rx_reset(&club->block_rx);
 }
 
+/* §A7 "What the Flipper must react to while idling": one answer per request; idle bursts stay
+ * all zero (U6). G's CAFE 0017 is answered one G command later. In the game update right after
+ * G's own 0x17 comes back, Ruby turns our IDLE avatar BUSY and drops that update's key
+ * (pokeruby overworld.c sub_8054FF8), so an answer in the very next burst is lost and G waits
+ * forever. A later G command is a receive-queue entry of its own, whose update comes between. */
+static void on_room_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
+    if(club->exit_answer_due) {
+        send_cmd(club, CMD_SEND_HELD_KEYS, KEY_CODE_EXIT_ROOM);
+        club->exit_answer_due = false;
+    }
+    if(cmd[0] == CMD_READY_EXIT_STANDBY) {
+        send_cmd(club, CMD_READY_EXIT_STANDBY, 0);
+    } else if(cmd[0] == CMD_SEND_HELD_KEYS && cmd[1] == KEY_CODE_EXIT_ROOM) {
+        club->exit_answer_due = true;
+    }
+}
+
 static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     if(cmd[0] == CMD_READY_CLOSE_LINK) {
         /* §A7: always answer with exactly one 5FFF, whatever the phase. */
@@ -114,7 +136,17 @@ static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
             set_error(club, Gen3ClubErrorBadPlayerBlock);
         }
         break;
-    default:
+    case Gen3ClubPhaseCards:
+        /* §A7 entering: zero bursts through the walk-in, then the GBA's standby 2FFE. */
+        if(cmd[0] == CMD_READY_EXIT_STANDBY) {
+            send_cmd(club, CMD_READY_EXIT_STANDBY, 0);
+            club->phase = Gen3ClubPhaseRoom;
+        }
+        break;
+    case Gen3ClubPhaseRoom:
+        on_room_command(club, cmd);
+        break;
+    default: /* Closing: keep bursting until the GBA closes (Disconnected) */
         break;
     }
 }
@@ -157,6 +189,7 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
             break;
         }
     }
+    if(club->phase == Gen3ClubPhaseRoom) club->room_frames++;
     request_cards(club);
     gen3_link_tx(&club->link, tx);
 }

@@ -218,6 +218,75 @@ TEST(test_fake_stray_link_type_starts_block) {
     ASSERT_TRUE(stray_request_starts_block(0x2222, 0x1133, header));
 }
 
+/* master_to_standby, then the master's 2FFE: G enters the room and sends CAFE 0011. */
+static bool master_to_room(Gen3Link* l, FakeRuby* g) {
+    MlinkRx rx;
+    const uint16_t standby[GEN3_CMD_LEN] = {0x2FFE};
+    if(!master_to_standby(l, g)) return false;
+    if(!gen3_link_send(l, standby)) return false;
+    for(int i = 0; i < 20; i++) {
+        master_frame(l, g, 0, &rx);
+        if(rx.word[1] == 0xCAFE && rx.word[2] == 0x0011) {
+            return fake_ruby_phase(g) == FakeRubyRoom && fake_ruby_error(g) == NULL;
+        }
+    }
+    return false;
+}
+
+/* G leaves the room (§B7). The master answers G's CAFE 0017 `gap` bursts after the first burst
+ * it could use (gap < 0: never), and G's 5FFF at once. G's phase 600 frames later, or
+ * FakeRubyOff if G errored or never reached the room. */
+static FakeRubyPhase leave_room_answering(int gap) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkRx rx;
+    const uint16_t exit_room[GEN3_CMD_LEN] = {0xCAFE, 0x0017};
+    const uint16_t close[GEN3_CMD_LEN] = {0x5FFF};
+    int first_usable = -1; /* the burst right after the one carrying G's 0x17 */
+    fake_init(&g);
+    if(!master_to_room(&l, &g)) return FakeRubyOff;
+    fake_ruby_leave_room(&g);
+    for(int i = 0; i < 600; i++) {
+        if(first_usable >= 0 && gap >= 0 && i == first_usable + gap) gen3_link_send(&l, exit_room);
+        master_frame(&l, &g, 0, &rx);
+        if(first_usable < 0 && rx.word[1] == 0xCAFE && rx.word[2] == 0x0017) first_usable = i + 1;
+        if(rx.word[1] == 0x5FFF) gen3_link_send(&l, close);
+    }
+    return fake_ruby_error(&g) == NULL ? fake_ruby_phase(&g) : FakeRubyOff;
+}
+
+TEST(test_fake_leave_waits_for_partner) {
+    /* No CAFE 0017 from the master: G waits for all EXITING_ROOM with no timeout and no error. */
+    ASSERT_EQ(leave_room_answering(-1), FakeRubyLeaving);
+}
+
+TEST(test_fake_leave_drops_hasty_answer) {
+    /* sub_8054FF8: in the update after G's own 0x17, the IDLE partner is forced BUSY and that
+     * update's key is dropped. An answer in the very next burst is lost; one burst later works. */
+    ASSERT_EQ(leave_room_answering(0), FakeRubyLeaving);
+    ASSERT_EQ(leave_room_answering(1), FakeRubyClosed);
+}
+
+TEST(test_fake_corrupt_next) {
+    FakeRuby g;
+    Gen3Link l;
+    MlinkTx tx;
+    MlinkRx rx;
+    uint16_t cmd[GEN3_CMD_LEN];
+    Gen3LinkEvent ev = Gen3LinkEventNone;
+    fake_init(&g);
+    ASSERT_TRUE(master_to_room(&l, &g));
+    fake_ruby_corrupt_next(&g);
+    for(int i = 0; i < 3 && ev != Gen3LinkEventChecksumError; i++) {
+        gen3_link_tx(&l, &tx);
+        fake_ruby_frame(&g, &tx, &rx);
+        ev = gen3_link_rx(&l, &rx, cmd);
+    }
+    ASSERT_EQ(ev, Gen3LinkEventChecksumError); /* the master's check of G's checksum fails */
+    ASSERT_TRUE(fake_ruby_error(&g) != NULL); /* and G's check of the master's */
+    ASSERT_STR_EQ(fake_ruby_error(&g), "checksum");
+}
+
 int main(void) {
     RUN(test_fake_handshake_timeline);
     RUN(test_fake_checksum_checked);
@@ -226,5 +295,8 @@ int main(void) {
     RUN(test_fake_block_pacing);
     RUN(test_fake_stray_card_request_starts_block);
     RUN(test_fake_stray_link_type_starts_block);
+    RUN(test_fake_leave_waits_for_partner);
+    RUN(test_fake_leave_drops_hasty_answer);
+    RUN(test_fake_corrupt_next);
     TEST_EXIT();
 }
