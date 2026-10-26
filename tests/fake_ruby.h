@@ -8,14 +8,15 @@
 
 /* Test-only model of Pokemon Ruby as the multiplayer child (slot 1) during the Trade Center
  * linkup, the room and leaving it (docs/gen3/link-protocol.md §A2-A7, §B7), sitting down, the
- * trade menu's relink, its party exchange and the menu itself with the Flipper as the arbiter
- * (docs/gen3/link-protocol-trade.md §B1-B3). It models the child's own link stack and does not
- * use src/gen3/gen3_link.c: the per-transfer ISR (DoHandshake, DoRecv, DoSend), its own send and
- * receive queues, LinkMain1/LinkMain2 with gSendCmd/gRecvCmds, gLinkCallback, the cable_club.c
- * linkup tasks, and in the room the lockstep game update (CB1_OverworldLink: player link states,
- * key intercept callbacks) with the exit and seat scripts, then the trade menu's own callbacks
- * and tasks. One fake_ruby_frame() is one GBA frame: VBlank (LinkVSync), the frame's transfers,
- * then the main loop. Any error stops it answering (0xFFFF from then on). */
+ * trade menu's relink, its party exchange and the menu itself with the Flipper as the arbiter,
+ * the trade's relink, animation and TradeMons, and the link save with its way back to the trade
+ * menu (docs/gen3/link-protocol-trade.md §B1-B6.1). It models the child's own link stack and does
+ * not use src/gen3/gen3_link.c: the per-transfer ISR (DoHandshake, DoRecv, DoSend), its own send
+ * and receive queues, LinkMain1/LinkMain2 with gSendCmd/gRecvCmds, gLinkCallback, the
+ * cable_club.c linkup tasks, and in the room the lockstep game update (CB1_OverworldLink: player
+ * link states, key intercept callbacks) with the exit and seat scripts, then trade.c's own
+ * callbacks and tasks. One fake_ruby_frame() is one GBA frame: VBlank (LinkVSync), the frame's
+ * transfers, then the main loop. Any error stops it answering (0xFFFF from then on). */
 
 #define FAKE_RUBY_CMD_LEN   8 /* CMD_LENGTH */
 #define FAKE_RUBY_QUEUE_LEN 50 /* QUEUE_CAPACITY */
@@ -87,6 +88,12 @@ typedef enum {
     FakeRubyTaskStartTrade, /* sub_8083AAC [Task_StartWiredTrade] */
     FakeRubyTaskStartMenu, /* callback2 sub_8047CD8 [CB2_StartCreateTradeMenu] */
     FakeRubyTaskCreateMenu, /* callback2 sub_8047EC0 [CB2_CreateTradeMenu] */
+    FakeRubyTaskLinkTrade, /* callback2 sub_804B41C [CB2_LinkTrade]: 0x1144 relink, pictures */
+    FakeRubyTaskTradeAnim, /* callback2 sub_804DB84 [CB2_UpdateLinkTrade]: the animation */
+    FakeRubyTaskWaitTrade, /* callback2 sub_804DC18 [CB2_WaitTradeComplete]: waits for DCBA */
+    FakeRubyTaskTradeEvolution, /* callback2 sub_804D588 [CB2_TryLinkTradeEvolution] */
+    FakeRubyTaskSave, /* callback2 sub_804DC88 [CB2_SaveAndEndTrade] */
+    FakeRubyTaskFreeTradeAnim, /* callback2 sub_804E144 [CB2_FreeTradeAnim] */
 } FakeRubyTask;
 
 /* gUnknown_03000584 [sPlayerKeyInterceptCallback]: picks the key code this GBA sends next. */
@@ -251,8 +258,22 @@ struct FakeRuby {
     uint8_t offer_slot;
     bool cancel_pending;
     bool press_a_pending;
+    bool press_r_pending;
     bool answer_pending; /* kept until the prompt is up */
     bool answer_yes;
+
+    /* Part B: the trade (§B4) and the link save (§B5), callback2 sub_804B41C .. sub_804DC88 */
+    uint8_t cb2_state; /* gMain.state of the callback2 running (SetMainCallback2 zeroes it) */
+    uint16_t cb2_count; /* its unk_00c0 */
+    uint32_t cb2_frame; /* frame its current timed step began */
+    bool abcd_sent; /* this trade's ABCD went out (sub_804BB78) */
+    bool national_dex; /* EnableNationalPokedex ran (sub_804BA64) */
+    uint8_t sector_stall; /* fake_ruby_set_sector_stall */
+    uint8_t sectors; /* sub_8125DA8 calls in this save */
+    bool save_dirty; /* a sector of the new slot is written, the commit isn't (§B5.2) */
+    bool save_corrupt;
+    uint32_t saved_trades;
+    bool saved_national_dex;
 };
 
 /* me.link_type picks the counter */
@@ -290,18 +311,23 @@ uint32_t fake_ruby_relink_frames(const FakeRuby* g);
 void fake_ruby_frame(FakeRuby* g, const MlinkTx* tx, MlinkRx* rx);
 FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
 /* NULL, or "checksum", "magic", "stale card", "lag", "standby timeout", "link timeout" (no
- * LinkPlayers 300 frames after a Part B OpenLink), "link type" (the trade menu's link types
- * differ; Ruby hangs silently there, §B8), "stale block" (a party-exchange block requested before
- * its round's copy: Ruby sends stale bytes, U3), "exchange stalled" (a sub_8048D44 wait case
- * lasted 600 frames: Ruby's black screen, §B2.2), "bad egg" (a Flipper party slot fails its
- * checksum), "bad offer" (a Flipper party slot holds a species, move or item Ruby can't take, or
- * mail, §B2.5), "bad request" (a CCCC type past sBlockRequestLookupTable), "empty party" (a DDDD
- * for a Flipper slot this GBA didn't count, as with an empty Flipper party: Ruby animates a party
- * icon it never made, R8), "unexpected dddd" (a DDDD unless this GBA waits in Link standby after
- * its own AABB), "bad ccdd" (a CCDD unless this GBA's AABB, the Flipper's DDDD and this GBA's
- * BBBB were the latest blocks, in that order: Ruby trades whatever its cursor holds, §B3.4),
- * "ccdd hang" (CCDD's SetCloseLinkCallback ignored while gLinkCallback is busy: Ruby hangs in
- * trade-menu state 13) */
+ * LinkPlayers 300 frames after a Part B OpenLink), "link type" (the trade menu's or the trade's
+ * link types differ; Ruby hangs silently there, §B8), "stale block" (a party-exchange block
+ * requested before its round's copy: Ruby sends stale bytes, U3), "exchange stalled" (a
+ * sub_8048D44 wait case lasted 600 frames: Ruby's black screen, §B2.2), "bad egg" (a Flipper
+ * party slot fails its checksum), "bad offer" (a Flipper party slot holds a species, move or item
+ * Ruby can't take, or mail, §B2.5), "bad request" (a CCCC type past sBlockRequestLookupTable),
+ * "empty party" (a DDDD for a Flipper slot this GBA didn't count, as with an empty Flipper party:
+ * Ruby animates a party icon it never made, R8), "unexpected dddd" (a DDDD unless this GBA waits
+ * in Link standby after its own AABB), "bad ccdd" (a CCDD unless this GBA's AABB, the Flipper's
+ * DDDD and this GBA's BBBB were the latest blocks, in that order: Ruby trades whatever its cursor
+ * holds, §B3.4), "ccdd hang" / "eebb hang" (the SetCloseLinkCallback after CCDD's or EEBB's fade
+ * ignored while gLinkCallback is busy: Ruby hangs in trade-menu state 13 or 12; a stray Flipper
+ * CCCC that would keep it busy trips "stale block" or "stale card" first, a stray 2222 doesn't),
+ * "early dcba" (a DCBA before this GBA sent its ABCD: Ruby skips TradeMons and saves the untraded
+ * party, §B4.3), "flipper mail" (the Flipper's traded Pokemon has a mail index: Ruby gives it
+ * mail data the Flipper never sent, §B4.4), "stray 2ffe" (a Flipper 2FFE while this GBA isn't in a
+ * standby sync: its flag would let a later sync finish without the Flipper, §B5.3) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as Ruby parsed it */
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);
@@ -332,3 +358,16 @@ void fake_ruby_cancel_trade(FakeRuby* g);
 void fake_ruby_answer(FakeRuby* g, bool yes);
 /* Message: A, back to Browsing. */
 void fake_ruby_press_a(FakeRuby* g);
+/* Browsing: R, the debug block: linkData[i] = i, sent at once with no IsLinkTaskFinished guard
+ * (§B3.2). It stays Browsing. */
+void fake_ruby_press_r(FakeRuby* g);
+
+/* The trade (§B4) and the link save (§B5). */
+uint32_t fake_ruby_saved_trades(const FakeRuby* g); /* link saves committed */
+/* The new save slot was partly written when this GBA stopped: a link error or power-off after the
+ * save's first sector (after sync 1) and before the commit (§B5.2). The saved party stays as it
+ * was: on Ruby, the boot reports a corrupt save and loads the previous one. */
+bool fake_ruby_save_corrupt(const FakeRuby* g);
+bool fake_ruby_national_dex(const FakeRuby* g); /* saved National Dex flag */
+/* Main-loop stall per flash sector written in the link save; default 2 (T4: not measured). */
+void fake_ruby_set_sector_stall(FakeRuby* g, uint8_t frames);

@@ -60,6 +60,7 @@ static void reset_session(Gen3Club* club) {
     club->reply_due = false;
     club->gba_slot = 0;
     club->refused = Gen3RefuseNone;
+    club->party_shown = false;
 }
 
 void gen3_club_claim_game(
@@ -103,10 +104,15 @@ static void on_connected(Gen3Club* club) {
 }
 
 /* D2: the Flipper's block carries the GBA's link type only where the club follows the GBA there
- * (§B1.6: a mismatch hangs the GBA silently, before anything is written). Otherwise 0x1133: a
- * Link Test never trades, and the 0x1144 and 0x1111 relinks come with Tasks 6 and 7. */
+ * (§B1.6, §B4.1: a mismatch hangs the GBA silently, before anything is written). Otherwise
+ * 0x1133: a Link Test never trades, 0x1144 is followed only for a pending trade (CCDD sent), and
+ * the 0x1111 relink comes with Task 7. */
 static uint32_t own_link_type(const Gen3Club* club, uint32_t gba_link_type) {
-    if(club->cfg.trading && gba_link_type == GEN3_LINKTYPE_TRADE_CONNECTING) return gba_link_type;
+    if(!club->cfg.trading) return GEN3_LINKTYPE_TRADE_SETUP;
+    if(gba_link_type == GEN3_LINKTYPE_TRADE_CONNECTING) return gba_link_type;
+    if(gba_link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED && club->trade_pending) {
+        return gba_link_type;
+    }
     return GEN3_LINKTYPE_TRADE_SETUP;
 }
 
@@ -120,13 +126,29 @@ static bool is_trade_link_type(uint32_t link_type) {
 static void send_own_player_block(Gen3Club* club, uint32_t link_type) {
     Gen3LinkPlayer lp;
     gen3_club_claim_game(
-        &club->cfg, &club->partner, link_type, /* national_dex */ false, &lp, club->own_card);
+        &club->cfg, &club->partner, link_type, club->national_dex, &lp, club->own_card);
     gen3_link_player_block_build(&lp, club->own_player_block);
     gen3_block_send(
         &club->link,
         club->own_player_block,
         sizeof(club->own_player_block),
         FLIPPER_MULTIPLAYER_ID);
+}
+
+/* The pending trade is over (D5): Done (sync 3) and Assumed (lost after the sync-2 answer) take
+ * the GBA's Pokemon, which is then also the offer and the Pokemon the GBA is shown next (§B6.1).
+ * Field to field, no local buffer (R2): 300 B. */
+static void end_trade(Gen3Club* club, Gen3TradeResult result) {
+    if(result == Gen3TradeResultDone || result == Gen3TradeResultAssumed) {
+        memcpy(club->received, club->pending_mon, sizeof(club->received));
+        memcpy(club->party_mon, club->pending_mon, sizeof(club->party_mon));
+        memcpy(club->offer, club->pending_mon, sizeof(club->offer));
+        club->has_offer = true;
+        club->trades_done++;
+    }
+    club->trade_pending = false;
+    club->save_window = false;
+    club->last_result = result;
 }
 
 /* The GBA's first block of a session is complete. The Flipper's own block goes out for every
@@ -139,6 +161,10 @@ static void on_player_block(Gen3Club* club) {
        !gen3_link_player_block_parse(club->block_rx.data, &lp)) {
         set_error(club, Gen3ClubErrorBadPlayerBlock);
     } else {
+        if(club->trade_pending && lp.link_type != GEN3_LINKTYPE_TRADE_DISCONNECTED) {
+            /* D3: the GBA restarted or came back from the counter: the trade never began on it */
+            end_trade(club, Gen3TradeResultCanceled);
+        }
         club->partner = lp;
         club->link_type = lp.link_type;
         own_type = own_link_type(club, lp.link_type);
@@ -153,6 +179,11 @@ static void on_player_block(Gen3Club* club) {
             club->partner_valid = true;
             club->phase = Gen3ClubPhaseExchange;
             club->idle_bursts = 0;
+        } else if(own_type == GEN3_LINKTYPE_TRADE_DISCONNECTED) {
+            /* §B4.1: the pending trade's animation, then the GBA's ABCD and its link save */
+            club->partner_valid = true;
+            club->phase = Gen3ClubPhaseTrade;
+            club->save_syncs = 0;
         } else if(is_trade_link_type(lp.link_type)) {
             /* A Cable Club trade type the club doesn't follow: the 0x1133 block stalls the GBA. */
             set_error(club, Gen3ClubErrorUnexpected);
@@ -237,6 +268,9 @@ static void start_round(Gen3Club* club, uint8_t round) {
     } else if(round == 1) {
         memset(club->party_mon, 0, sizeof(club->party_mon));
     }
+    /* R8: Ruby counts the Flipper's party up to the first species 0. The offer has a species
+     * (G6); without one the GBA's partner column is empty. */
+    if(round == 1) club->party_shown = club->has_offer;
     gen3_trade_round_block(round, round == 1 ? club->party_mon : NULL, club->round_block);
     send_cmd(club, CMD_SEND_BLOCK_REQ, gen3_trade_round_request(round));
     gen3_block_send(
@@ -269,11 +303,30 @@ static void exchange_step(Gen3Club* club) {
     start_round(club, (uint8_t)(club->round + 1));
 }
 
-/* §B3.2: the GBA's codes the arbiter answers. The R-button debug block (word 0 = 0) and any
- * other code get no reply (§B3.4). */
-static bool gets_reply(uint16_t code) {
-    return code == GEN3_TRADE_READY || code == GEN3_TRADE_CANCEL || code == GEN3_TRADE_CONFIRM ||
-           code == GEN3_TRADE_CONFIRM_NO;
+/* §B3.2: the GBA's trade-menu codes, each answered once (§B3.4). Every other code gets no reply,
+ * the R-button debug block (word 0 = 0) among them. menu_code is the one list of them:
+ * on_menu_command files a reply only for these, and menu_reply covers each (-Wswitch). */
+typedef enum {
+    MenuCodeNone,
+    MenuCodeReady, /* AABB */
+    MenuCodeConfirm, /* BBBB */
+    MenuCodeConfirmNo, /* BBCC */
+    MenuCodeCancel, /* EEAA */
+} MenuCode;
+
+static MenuCode menu_code(uint16_t code) {
+    switch(code) {
+    case GEN3_TRADE_READY:
+        return MenuCodeReady;
+    case GEN3_TRADE_CONFIRM:
+        return MenuCodeConfirm;
+    case GEN3_TRADE_CONFIRM_NO:
+        return MenuCodeConfirmNo;
+    case GEN3_TRADE_CANCEL:
+        return MenuCodeCancel;
+    default:
+        return MenuCodeNone;
+    }
 }
 
 /* §B3.3: the GBA's 20-byte blocks in the trade menu. menu_step answers each once. In Starting
@@ -284,20 +337,11 @@ static void on_menu_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     if(club->menu == Gen3ClubMenuStarting || club->menu == Gen3ClubMenuLeaving) return;
     uint16_t arg;
     const uint16_t code = gen3_trade_block_code(club->block_rx.data, &arg);
-    if(!gets_reply(code)) return;
+    if(menu_code(code) == MenuCodeNone) return;
     club->gba_code = code;
     club->gba_arg = arg;
     club->reply_due = true;
     club->idle_bursts = 0;
-}
-
-/* R8: Ruby counts the Flipper's party up to the first species 0. party_mon is the offer at round
- * 1, which has a species (G6), or zeros without one: then the GBA's partner column is empty. */
-static bool party_mon_shown(const Gen3Club* club) {
-    for(size_t i = 0; i < GEN3_PARTY_SIZE; i++) {
-        if(club->party_mon[i] != 0) return true;
-    }
-    return false;
 }
 
 /* §B3.4 and D4, decided as the reply goes out: the code to send for the GBA's block, and the
@@ -305,48 +349,105 @@ static bool party_mon_shown(const Gen3Club* club) {
  * decrypt of the frame (G4); an AABB while Offered is the GBA's new pick and is decided afresh. */
 static uint16_t menu_reply(Gen3Club* club) {
     const uint16_t slot = club->gba_arg;
-    switch(club->gba_code) {
-    case GEN3_TRADE_READY:
+    switch(menu_code(club->gba_code)) {
+    case MenuCodeReady:
         club->refused = slot < GEN3_CLUB_GBA_PARTY ?
                             gen3_trade_check_incoming(club->gba_party[slot], &club->scratch) :
                             Gen3RefuseEmpty;
         /* R8: never a DDDD to an empty partner column */
-        if(club->refused != Gen3RefuseNone || !party_mon_shown(club)) {
+        if(club->refused != Gen3RefuseNone || !club->party_shown) {
             club->menu = Gen3ClubMenuIdle;
             return GEN3_TRADE_PLAYER_CANCEL;
         }
         club->gba_slot = (uint8_t)slot;
         club->menu = Gen3ClubMenuOffered;
         return GEN3_TRADE_SET_MONS;
-    case GEN3_TRADE_CONFIRM:
+    case MenuCodeConfirm:
         /* Save safety: Offered means the GBA's AABB got our DDDD, and no block of ours since */
-        if(club->menu != Gen3ClubMenuOffered) return GEN3_TRADE_PLAYER_CANCEL;
+        if(club->menu != Gen3ClubMenuOffered) break;
         memcpy(club->pending_mon, club->gba_party[club->gba_slot], sizeof(club->pending_mon));
         club->trade_pending = true;
         club->menu = Gen3ClubMenuStarting;
         return GEN3_TRADE_START;
-    case GEN3_TRADE_CANCEL:
+    case MenuCodeCancel:
         club->menu = Gen3ClubMenuLeaving;
         return GEN3_TRADE_BOTH_CANCEL;
-    default: /* GEN3_TRADE_CONFIRM_NO */
-        club->menu = Gen3ClubMenuIdle;
-        return GEN3_TRADE_PLAYER_CANCEL;
+    case MenuCodeConfirmNo:
+    case MenuCodeNone: /* never filed: on_menu_command */
+        break;
     }
+    club->menu = Gen3ClubMenuIdle;
+    return GEN3_TRADE_PLAYER_CANCEL;
 }
 
-/* §B3.4: the reply goes out once, after GEN3_CLUB_REPLY_DELAY_BURSTS idle bursts from the one
- * that carried the last chunk of the GBA's block. 3 commands into an empty queue. */
-static void menu_step(Gen3Club* club) {
-    if(club->phase != Gen3ClubPhaseMenu || !club->reply_due) return;
-    if(gen3_link_queued(&club->link) != 0) return;
+/* §B3.4: true once the reply to the GBA's block may go out (the caller then sends it): an empty
+ * queue, and GEN3_CLUB_REPLY_DELAY_BURSTS idle bursts after the one that carried the block's last
+ * chunk. */
+static bool reply_ready(Gen3Club* club) {
+    if(!club->reply_due || gen3_link_queued(&club->link) != 0) return false;
     if(club->idle_bursts < GEN3_CLUB_REPLY_DELAY_BURSTS) {
         club->idle_bursts++; /* the burst built below is idle */
-        return;
+        return false;
     }
-    uint8_t block[GEN3_TRADE_BLOCK_SIZE];
-    gen3_trade_block_build(menu_reply(club), 0, block);
-    gen3_block_send(&club->link, block, sizeof(block), FLIPPER_MULTIPLAYER_ID);
     club->reply_due = false;
+    return true;
+}
+
+/* The one reply: a 20-byte block {code, 0}, 3 commands into an empty queue. */
+static void send_reply(Gen3Club* club, uint16_t code) {
+    uint8_t block[GEN3_TRADE_BLOCK_SIZE];
+    gen3_trade_block_build(code, 0, block);
+    gen3_block_send(&club->link, block, sizeof(block), FLIPPER_MULTIPLAYER_ID);
+}
+
+static void menu_step(Gen3Club* club) {
+    if(club->phase == Gen3ClubPhaseMenu && reply_ready(club)) send_reply(club, menu_reply(club));
+}
+
+/* §B4.2-B4.3: the animation runs without link traffic, then the GBA sends ABCD once. Any other
+ * block of the GBA's gets no reply. */
+static void on_trade_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
+    if(gen3_block_rx_feed(&club->block_rx, cmd) != Gen3BlockRxDone) return;
+    if(club->block_rx.size != GEN3_TRADE_BLOCK_SIZE) return;
+    if(gen3_trade_block_code(club->block_rx.data, NULL) != GEN3_TRADE_ANIM_DONE) return;
+    club->reply_due = true;
+    club->idle_bursts = 0;
+}
+
+/* §B4.3: one DCBA, only after the GBA's ABCD (an early one makes it save the untraded party);
+ * then its link save. */
+static void trade_step(Gen3Club* club) {
+    if(club->phase != Gen3ClubPhaseTrade || !reply_ready(club)) return;
+    send_reply(club, GEN3_TRADE_ANIM_ACK);
+    club->phase = Gen3ClubPhaseSave;
+}
+
+/* §B5.1, §B5.3: the GBA's link save. Each of its 2FFEs gets exactly one 2FFE, at once (it commits
+ * 1-2 frames after our sync-2 answer); an extra one would let a later sync finish without us.
+ * From our sync-1 answer the GBA may hold a half-written save (save_window, D10). Sync 3 comes
+ * only after its commit: the trade is done. */
+static void on_save_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
+    if(cmd[0] != CMD_READY_EXIT_STANDBY) return;
+    /* The queue is empty here; a full one would drop the answer, so the sync isn't counted */
+    if(!send_cmd(club, CMD_READY_EXIT_STANDBY, 0)) return;
+    if(club->save_syncs >= GEN3_CLUB_SAVE_SYNCS) return;
+    club->save_syncs++;
+    if(club->save_syncs == 1) club->save_window = true;
+    if(club->save_syncs == GEN3_CLUB_SAVE_SYNCS) end_trade(club, Gen3TradeResultDone);
+}
+
+/* D5, §B5.3: the link is lost. Only the pending trade's own 0x1144 session decides it here, by
+ * the 2FFEs the club had answered; in any other session a pending trade waits for the GBA's next
+ * LinkPlayerBlock (D3). */
+static void on_link_lost(Gen3Club* club) {
+    if(!club->trade_pending || club->link_type != GEN3_LINKTYPE_TRADE_DISCONNECTED) return;
+    if(club->save_syncs == 0) {
+        end_trade(club, Gen3TradeResultCanceled);
+    } else if(club->save_syncs == 1) {
+        end_trade(club, Gen3TradeResultRolledBack);
+    } else {
+        end_trade(club, Gen3TradeResultAssumed);
+    }
 }
 
 static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
@@ -395,6 +496,12 @@ static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     case Gen3ClubPhaseMenu:
         on_menu_command(club, cmd);
         break;
+    case Gen3ClubPhaseTrade:
+        on_trade_command(club, cmd);
+        break;
+    case Gen3ClubPhaseSave:
+        on_save_command(club, cmd);
+        break;
     default: /* Closing: keep bursting until the GBA closes (Disconnected). */
         break;
     }
@@ -437,6 +544,7 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
             if(is_command(cmd)) on_command(club, cmd); /* e.g. G's one 2FFE or CAFE 0017 */
             break;
         case Gen3LinkEventDisconnected:
+            on_link_lost(club);
             reset_session(club);
             club->phase = Gen3ClubPhaseWaiting; /* last_error is kept */
             break;
@@ -447,6 +555,7 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     try_sit(club);
     exchange_step(club);
     menu_step(club);
+    trade_step(club);
     gen3_link_tx(&club->link, tx);
 }
 
@@ -471,6 +580,9 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->gba_slot = club->gba_slot;
     out->refused = club->refused;
     out->trade_pending = club->trade_pending;
+    out->save_syncs = club->save_syncs;
+    out->save_window = club->save_window;
+    out->last_result = club->last_result;
 }
 
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {
@@ -499,4 +611,16 @@ void gen3_club_gba_mon(const Gen3Club* club, uint8_t slot, uint8_t out[GEN3_PART
     } else {
         memset(out, 0, GEN3_PARTY_SIZE);
     }
+}
+
+void gen3_club_set_national_dex(Gen3Club* club, bool on) {
+    club->national_dex = on;
+}
+
+void gen3_club_get_received(
+    const Gen3Club* club,
+    uint8_t out[GEN3_PARTY_SIZE],
+    uint32_t* trades_done) {
+    memcpy(out, club->received, GEN3_PARTY_SIZE);
+    if(trades_done) *trades_done = club->trades_done;
 }

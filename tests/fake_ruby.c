@@ -110,6 +110,42 @@
 #define CODE_PLAYER_CANCEL  0xDDEE /* PLAYER_CANCEL_TRADE */
 #define CODE_BOTH_CANCEL    0xEEBB /* BOTH_CANCEL_TRADE */
 #define CODE_START          0xCCDD /* START_TRADE */
+#define CODE_ANIM_DONE      0xABCD /* this GBA: TradeMons done (§B4.3) */
+#define CODE_ANIM_ACK       0xDCBA /* the Flipper's answer */
+
+/* The trade (§B4): sub_804B41C [CB2_LinkTrade] and sub_804DB84 [CB2_UpdateLinkTrade] */
+#define LINK_TRADE_DELAY_MAX 60 /* state 2 leaves once ++unk_00c0 > 60 */
+#define TRADE_PICS_FRAMES    25 /* states 5-12: both pictures, then the fade-in */
+#define TRADE_ANIM_FRAMES    600 /* sub_804C29C: not computed (T16); no traffic, no deadline */
+#define TRADE_FRIENDSHIP     70 /* sub_804BA94 [TradeMons]: the received Pokemon's, if no egg */
+#define LP_NATIONAL_DEX      0x8000 /* sub_804BA64: the partner's lp_field_2 */
+
+/* The link save (§B5.1): sub_804DC88 [CB2_SaveAndEndTrade] gMain.state values, in run order */
+#define SAVE_STANDBY_TEXT  0 /* "Link standby..." */
+#define SAVE_SYNC1         1 /* sub_80084A4 [SetLinkStandbyCallback] */
+#define SAVE_WAIT_SYNC1    100 /* until IsLinkTaskFinished; 101 after 180 frames, same wait */
+#define SAVE_WAIT_SYNC1_2  101
+#define SAVE_SAVING_TEXT   2 /* "SAVING... DON'T TURN OFF THE POWER." */
+#define SAVE_INIT          50 /* sub_8125D80: serialise, rotate (RAM only) */
+#define SAVE_WAIT_SECTOR   51 /* 5 frames */
+#define SAVE_SECTOR        52 /* sub_8125DA8: one chunk into the other slot */
+#define SAVE_LAST_SECTOR   4 /* sub_8125DDC: chunk 13 but its signature's low byte */
+#define SAVE_WAIT_SYNC2    40 /* 51 frames */
+#define SAVE_SYNC2         41
+#define SAVE_COMMIT        42 /* sync 2 done: sub_8125E04 writes the signature byte */
+#define SAVE_WAIT_SYNC3    5 /* 61 frames, then sync 3 */
+#define SAVE_FADE          6 /* sync 3 done: BeginNormalPaletteFade */
+#define SAVE_BGM           7 /* the fade done: FadeOutBGM(3) */
+#define SAVE_CLOSE         8 /* the BGM stopped: SetCloseLinkCallback */
+#define SAVE_CLOSED        9 /* !gReceivedRemoteLinkPlayers: sub_804E144 */
+#define SAVE_SYNC1_SLOW    180
+#define SAVE_SECTOR_FRAMES 5 /* state 51 leaves once ++unk_00c0 == 5 */
+#define SAVE_CHUNKS        14 /* sSaveBlockChunks: 13 written by sub_8125DA8, the 14th call ends */
+#define SAVE_SYNC2_DELAY   50 /* state 40 leaves once ++unk_00c0 > 50 */
+#define SAVE_SYNC3_DELAY   60 /* state 5 leaves once ++unk_00c0 > 60 */
+#define SAVE_FADE_FRAMES   17 /* BeginNormalPaletteFade(0xFFFFFFFF, 0, 0, 16, 0) */
+#define SAVE_BGM_FRAMES    20 /* FadeOutBGM(3) until IsBGMStopped (not computed) */
+#define SECTOR_STALL       2 /* default main-loop stall per sector (T4: not measured) */
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -121,6 +157,7 @@ static const char link_magic[] = "GameFreak inc.";
 
 static void set_error(FakeRuby* g, const char* reason) {
     if(!g->error) g->error = reason;
+    if(g->save_dirty) g->save_corrupt = true; /* the link save stops between sectors (§B5.2) */
     g->serial_on = false;
     g->link_open = false;
     g->state = FakeRubyLinkStart1;
@@ -427,6 +464,14 @@ static void process_recv_cmds(FakeRuby* g) {
             send_link_player_block(g);
             break;
         case CMD_READY_EXIT_STANDBY:
+            /* The flag persists until a sync completes, so the Flipper's 2FFE outside one would
+             * let this GBA's next sync finish without the Flipper (§B5.3). Ruby keeps it
+             * silently. */
+            if(i != LOCAL_ID && g->callback != FakeRubyCbStandby &&
+               g->callback != FakeRubyCbStandbyForAll) {
+                set_error(g, "stray 2ffe");
+                return;
+            }
             g->ready_standby[i] = true;
             break;
         case CMD_READY_CLOSE_LINK:
@@ -1134,16 +1179,21 @@ static void trade_menu_update(FakeRuby* g) {
     const bool offer = g->offer_pending;
     const bool cancel = g->cancel_pending;
     const bool press_a = g->press_a_pending;
+    const bool press_r = g->press_r_pending;
     const uint32_t elapsed = g->frame - g->trade_state_frame;
     g->offer_pending = false;
     g->cancel_pending = false;
     g->press_a_pending = false;
+    g->press_r_pending = false;
     switch(g->trade_state) {
     case TRADE_BROWSING:
         if(offer) {
             trade_select(g, g->offer_slot);
         } else if(cancel) {
             trade_request_cancel(g);
+        } else if(press_r) { /* sub_8049680: the debug block, no IsLinkTaskFinished guard */
+            for(int i = 0; i < LINK_DATA_WORDS; i++) g->link_data[i] = (uint16_t)i;
+            trade_send_data(g);
         }
         break;
     case TRADE_PROMPT:
@@ -1168,9 +1218,12 @@ static void trade_menu_update(FakeRuby* g) {
         }
         set_trade_state(g, TRADE_CLOSE_TRADE);
         break;
-    case TRADE_FADE_ROOM: /* ignored while busy, as on Ruby: then state 12 never ends */
+    case TRADE_FADE_ROOM: /* sub_8049D9C, once the fade is done */
         if(elapsed < MENU_FADE_FRAMES) break;
-        set_close_link_callback(g);
+        if(!set_close_link_callback(g)) {
+            set_error(g, "eebb hang"); /* the link stays open: state 12 never ends */
+            return;
+        }
         set_trade_state(g, TRADE_CLOSE_ROOM);
         break;
     case TRADE_CLOSE_ROOM: /* SetMainCallback2(sub_805465C): back to the room (Task 7) */
@@ -1178,10 +1231,11 @@ static void trade_menu_update(FakeRuby* g) {
         g->phase = FakeRubyReturn;
         next_task(g, FakeRubyTaskNone);
         return;
-    case TRADE_CLOSE_TRADE: /* callback1 = NULL, SetMainCallback2(sub_804B41C) (Task 6) */
+    case TRADE_CLOSE_TRADE: /* sub_8048A90: callback1 = NULL, SetMainCallback2(sub_804B41C) */
         if(g->received_link_players) break;
         g->phase = FakeRubyTrade;
-        next_task(g, FakeRubyTaskNone);
+        g->cb2_state = 0;
+        next_task(g, FakeRubyTaskLinkTrade);
         return;
     case TRADE_CONFIRM_WAIT:
         if(elapsed >= CONFIRM_MESSAGE_FRAMES) set_trade_state(g, TRADE_PROMPT);
@@ -1258,6 +1312,238 @@ static void run_create_menu(FakeRuby* g) {
         break;
     default: /* MENU_RUNNING */
         run_trade_menu(g);
+        break;
+    }
+}
+
+/* ---- The trade (trade.c, §B4) ---- */
+
+/* sub_804BA94 [TradeMons] (§B4.4) on own cursor i and partner j = gSelectedTradeMonPositions[1]
+ * % 6. This GBA holds no mail (its step 1 clears nothing here). Pokedex flags (step 5) aren't
+ * modelled. */
+static void trade_mons(FakeRuby* g) {
+    const uint8_t i = g->selected[0];
+    const uint8_t j = g->selected[1] % FAKE_RUBY_PARTY;
+    uint8_t swap[GEN3_PARTY_SIZE];
+    Gen3Pkm p;
+    /* Step 4: GiveMailToMon2 with the Flipper's round-4 entry, which carries no mail: the
+     * Pokemon's held item would become that empty entry's item */
+    if(gen3_pkm_decrypt(g->enemy[j], GEN3_PARTY_SIZE, &p) &&
+       gen3_pkm_get(&p, Gen3FieldMail) != MAIL_NONE) {
+        set_error(g, "flipper mail");
+        return;
+    }
+    memcpy(swap, g->party[i], GEN3_PARTY_SIZE);
+    memcpy(g->party[i], g->enemy[j], GEN3_PARTY_SIZE);
+    memcpy(g->enemy[j], swap, GEN3_PARTY_SIZE);
+    /* SetMonData(FRIENDSHIP) re-encrypts with a new checksum */
+    if(gen3_pkm_decrypt(g->party[i], GEN3_PARTY_SIZE, &p) &&
+       gen3_pkm_get(&p, Gen3FieldIsEgg) == 0) {
+        gen3_pkm_set(&p, Gen3FieldFriendship, TRADE_FRIENDSHIP);
+        gen3_pkm_encrypt(&p, g->party[i]);
+    }
+    /* sub_804BA64 [TryEnableNationalDexFromLinkPartner]: gLinkPlayers[mpId ^ 1] */
+    if(g->received_link_players && g->link_players[0].lp_field_2 == LP_NATIONAL_DEX) {
+        g->national_dex = true;
+    }
+}
+
+/* sub_804D63C [HandleLinkDataReceive]: slot 0's DCBA ends the wait; its ABCD only marks unk_009c
+ * (a master's); this GBA's own echo is only reset. */
+static void trade_link_receive(FakeRuby* g) {
+    if(g->block_received & 1) {
+        const uint8_t* buf = g->block_recv_buffer[0];
+        if((uint16_t)(buf[0] | (buf[1] << 8)) == CODE_ANIM_ACK) {
+            if(!g->abcd_sent) {
+                set_error(g, "early dcba"); /* Ruby skips TradeMons, saves the untraded party */
+                return;
+            }
+            g->cb2_state = 0;
+            next_task(g, FakeRubyTaskTradeEvolution); /* SetMainCallback2(sub_804D588) */
+        }
+    }
+    g->block_received = 0; /* ResetBlockReceivedFlag(0), (1) */
+}
+
+/* sub_804B41C [CB2_LinkTrade] (§B4.1). It reads no block flags: a block that comes in waits for
+ * sub_804DB84. */
+static void run_link_trade(FakeRuby* g) {
+    switch(g->cb2_state) {
+    case 0: /* ResetTasks, CloseLink, gLinkType = 0x1144 */
+        close_link(g);
+        g->me.link_type = GEN3_LINKTYPE_TRADE_DISCONNECTED;
+        g->cb2_state = 1;
+        break;
+    case 1: /* OpenLink, with no Task_WaitForLinkPlayerConnection */
+        open_link(g);
+        g->cb2_count = 0;
+        g->cb2_state = 2;
+        break;
+    case 2:
+        if(++g->cb2_count > LINK_TRADE_DELAY_MAX) {
+            g->cb2_count = 0;
+            g->cb2_state = 3;
+        }
+        break;
+    case 3: /* the child's branch */
+        g->cb2_state = 4;
+        break;
+    case 4: /* sub_804B24C is a debug counter: no timeout */
+        if(!g->received_link_players) break;
+        if(!link_types_match(g)) {
+            set_error(g, "link type"); /* Ruby: state 4 never passes, a silent hang (§B8) */
+            break;
+        }
+        g->abcd_sent = false; /* state 5: unk_009c, unk_009d, unk_00bd = 0 */
+        g->cb2_frame = g->frame;
+        g->cb2_state = 5;
+        break;
+    default: /* 5-12: sub_804B2D0 loads both pictures, then the fade-in */
+        if(g->frame - g->cb2_frame < TRADE_PICS_FRAMES) break;
+        next_task(g, FakeRubyTaskTradeAnim); /* SetMainCallback2(sub_804DB84) */
+        break;
+    }
+}
+
+/* sub_804DB84 [CB2_UpdateLinkTrade]: the animation, then TradeMons and ABCD (§B4.3), then
+ * sub_804BB78 [HandleLinkDataSend] and sub_804D63C every frame. */
+static void run_trade_anim(FakeRuby* g) {
+    if(g->frame - g->task_frame >= TRADE_ANIM_FRAMES) { /* sub_804C29C returned TRUE */
+        trade_mons(g);
+        if(g->error) return;
+        g->link_data[0] = CODE_ANIM_DONE;
+        next_task(g, FakeRubyTaskWaitTrade); /* SetMainCallback2(sub_804DC18) */
+        /* sub_804BB78 with unk_00bd = 1: Trade_SendData once, only if IsLinkTaskFinished (else
+         * never: Ruby waits for DCBA forever) */
+        if(g->callback == FakeRubyCbNone) {
+            trade_send_data(g);
+            g->abcd_sent = true;
+        }
+    }
+    trade_link_receive(g);
+}
+
+/* sub_804D588 [CB2_TryLinkTradeEvolution]: state 0 disables soft reset; state 4's trade
+ * evolution (GetEvolutionTargetSpecies) isn't modelled, so straight to the save. */
+static void run_trade_evolution(FakeRuby* g) {
+    if(g->cb2_state == 0) {
+        g->cb2_state = 4;
+        return;
+    }
+    g->cb2_state = 0;
+    g->phase = FakeRubySave;
+    next_task(g, FakeRubyTaskSave); /* SetMainCallback2(sub_804DC88) */
+}
+
+/* ---- The link save (trade.c sub_804DC88, save.c, §B5) ---- */
+
+/* sub_80084A4 [SetLinkStandbyCallback]: only while gLinkCallback is NULL */
+static void set_link_standby_callback(FakeRuby* g) {
+    if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbStandby;
+}
+
+/* One flash write: IRQs stay on, the main loop stalls (§B5.2, T4). */
+static void write_sector(FakeRuby* g) {
+    g->save_dirty = true;
+    g->stall = g->sector_stall;
+}
+
+/* sub_8125E04: the signature byte of chunk 13 makes the new slot the valid save. */
+static void commit_save(FakeRuby* g) {
+    memcpy(g->saved_party, g->party, sizeof(g->saved_party));
+    g->saved_national_dex = g->national_dex;
+    g->saved_trades++;
+    g->save_dirty = false;
+}
+
+/* sub_804DC88 [CB2_SaveAndEndTrade] (§B5.1). */
+static void run_save(FakeRuby* g) {
+    switch(g->cb2_state) {
+    case SAVE_STANDBY_TEXT:
+        g->cb2_state = SAVE_SYNC1;
+        break;
+    case SAVE_SYNC1: /* sync 1 */
+        set_link_standby_callback(g);
+        g->cb2_count = 0;
+        g->cb2_state = SAVE_WAIT_SYNC1;
+        break;
+    case SAVE_WAIT_SYNC1:
+        if(++g->cb2_count > SAVE_SYNC1_SLOW) {
+            g->cb2_count = 0;
+            g->cb2_state = SAVE_WAIT_SYNC1_2;
+        }
+        if(g->callback == FakeRubyCbNone) g->cb2_state = SAVE_SAVING_TEXT;
+        break;
+    case SAVE_WAIT_SYNC1_2:
+        if(g->callback == FakeRubyCbNone) g->cb2_state = SAVE_SAVING_TEXT;
+        break;
+    case SAVE_SAVING_TEXT:
+        g->cb2_state = SAVE_INIT;
+        break;
+    case SAVE_INIT: /* IncrementGameStat, sub_8125D80 */
+        g->sectors = 0;
+        g->cb2_count = 0;
+        g->cb2_state = SAVE_WAIT_SECTOR;
+        break;
+    case SAVE_WAIT_SECTOR:
+        if(++g->cb2_count == SAVE_SECTOR_FRAMES) g->cb2_state = SAVE_SECTOR;
+        break;
+    case SAVE_SECTOR: /* sub_8125DA8 -> sub_812550C: chunks 0..12, then done */
+        if(++g->sectors < SAVE_CHUNKS) {
+            write_sector(g);
+            g->cb2_count = 0;
+            g->cb2_state = SAVE_WAIT_SECTOR;
+        } else {
+            g->cb2_state = SAVE_LAST_SECTOR;
+        }
+        break;
+    case SAVE_LAST_SECTOR: /* sub_8125DDC */
+        write_sector(g);
+        g->cb2_count = 0;
+        g->cb2_state = SAVE_WAIT_SYNC2;
+        break;
+    case SAVE_WAIT_SYNC2:
+        if(++g->cb2_count > SAVE_SYNC2_DELAY) {
+            g->cb2_count = 0;
+            g->cb2_state = SAVE_SYNC2;
+        }
+        break;
+    case SAVE_SYNC2: /* sync 2 */
+        set_link_standby_callback(g);
+        g->cb2_state = SAVE_COMMIT;
+        break;
+    case SAVE_COMMIT:
+        if(g->callback != FakeRubyCbNone) break;
+        commit_save(g); /* and gSoftResetDisabled = FALSE */
+        g->cb2_state = SAVE_WAIT_SYNC3;
+        break;
+    case SAVE_WAIT_SYNC3:
+        if(++g->cb2_count > SAVE_SYNC3_DELAY) { /* sync 3 */
+            set_link_standby_callback(g);
+            g->cb2_state = SAVE_FADE;
+        }
+        break;
+    case SAVE_FADE:
+        if(g->callback != FakeRubyCbNone) break;
+        g->cb2_frame = g->frame;
+        g->cb2_state = SAVE_BGM;
+        break;
+    case SAVE_BGM:
+        if(g->frame - g->cb2_frame < SAVE_FADE_FRAMES) break;
+        g->cb2_frame = g->frame;
+        g->cb2_state = SAVE_CLOSE;
+        break;
+    case SAVE_CLOSE: /* SetCloseLinkCallback, ignored while busy as on Ruby: then a hang */
+        if(g->frame - g->cb2_frame < SAVE_BGM_FRAMES) break;
+        set_close_link_callback(g);
+        g->cb2_state = SAVE_CLOSED;
+        break;
+    case SAVE_CLOSED:
+        if(g->received_link_players) break;
+        g->phase = FakeRubySave; /* not Closed: the trade menu reopens the link (§B6.1) */
+        next_task(g, FakeRubyTaskFreeTradeAnim); /* SetMainCallback2(sub_804E144) */
+        break;
+    default:
         break;
     }
 }
@@ -1344,13 +1630,34 @@ static void run_linkup_task(FakeRuby* g) {
     case FakeRubyTaskCreateMenu:
         run_create_menu(g);
         break;
+    case FakeRubyTaskLinkTrade:
+        run_link_trade(g);
+        break;
+    case FakeRubyTaskTradeAnim:
+        run_trade_anim(g);
+        break;
+    case FakeRubyTaskWaitTrade: /* sub_804DC18: the child only reads */
+        trade_link_receive(g);
+        break;
+    case FakeRubyTaskTradeEvolution:
+        run_trade_evolution(g);
+        break;
+    case FakeRubyTaskSave:
+        run_save(g);
+        break;
+    case FakeRubyTaskFreeTradeAnim: /* the fade is done: SetMainCallback2(sub_8047CD8) */
+        next_task(g, FakeRubyTaskStartMenu);
+        break;
     }
 }
 
 /* Part B's callbacks and tasks count frames between CloseLink and OpenLink too. */
 static bool runs_while_closed(FakeRubyTask task) {
     return task == FakeRubyTaskStartTrade || task == FakeRubyTaskStartMenu ||
-           task == FakeRubyTaskCreateMenu;
+           task == FakeRubyTaskCreateMenu || task == FakeRubyTaskLinkTrade ||
+           task == FakeRubyTaskTradeAnim || task == FakeRubyTaskWaitTrade ||
+           task == FakeRubyTaskTradeEvolution || task == FakeRubyTaskSave ||
+           task == FakeRubyTaskFreeTradeAnim;
 }
 
 /* Callback2's own step (it may OpenLink), then RunTasks: the timeout and the handshake trigger,
@@ -1385,6 +1692,7 @@ void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me) {
     g->phase = FakeRubyOff;
     g->state = FakeRubyLinkStart1; /* link closed: serial off */
     g->relink_frames = UINT32_MAX;
+    g->sector_stall = SECTOR_STALL;
     for(int i = 0; i < LINK_DATA_WORDS; i++) g->link_data[i] = LINK_DATA_LEFTOVER;
 }
 
@@ -1397,6 +1705,7 @@ void fake_ruby_open_link(FakeRuby* g) {
 }
 
 void fake_ruby_power_off(FakeRuby* g) {
+    if(g->save_dirty) g->save_corrupt = true; /* §B5.2 */
     g->powered = false;
     g->serial_on = false;
     g->link_open = false;
@@ -1538,4 +1847,24 @@ void fake_ruby_answer(FakeRuby* g, bool yes) {
 
 void fake_ruby_press_a(FakeRuby* g) {
     if(trade_menu_running(g)) g->press_a_pending = true;
+}
+
+void fake_ruby_press_r(FakeRuby* g) {
+    if(trade_menu_running(g)) g->press_r_pending = true;
+}
+
+uint32_t fake_ruby_saved_trades(const FakeRuby* g) {
+    return g->saved_trades;
+}
+
+bool fake_ruby_save_corrupt(const FakeRuby* g) {
+    return g->save_corrupt;
+}
+
+bool fake_ruby_national_dex(const FakeRuby* g) {
+    return g->saved_national_dex;
+}
+
+void fake_ruby_set_sector_stall(FakeRuby* g, uint8_t frames) {
+    g->sector_stall = frames;
 }

@@ -22,6 +22,7 @@ static const Gen3ClubConfig club_cfg_trade =
 
 #define BENCH_BLOCKS 96 /* f_blocks, g_blocks */
 #define BENCH_CCCC   32 /* f_cccc, f_cccc_burst */
+#define BENCH_SYNCS  16 /* f_2ffe_burst, g_2ffe_burst */
 
 /* One completed block as one side put it on the wire. */
 typedef struct {
@@ -56,6 +57,10 @@ typedef struct {
     uint32_t g_cafe_seen; /* bit k: the GBA sent CAFE k (k < 32) */
     uint32_t sent_cafe16; /* Flipper CAFE 0016 count */
     uint32_t f_cafe16_burst, g_cafe16_burst; /* latest CAFE 0016 burst per side */
+    /* every 2FFE of each side, by burst; the GBA's latest 5FFF */
+    uint32_t f_2ffe_burst[BENCH_SYNCS], g_2ffe_burst[BENCH_SYNCS];
+    uint8_t n_f_2ffe, n_g_2ffe;
+    uint32_t g_5fff_burst;
     bool muted; /* bench_mute */
     uint8_t party[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* the GBA's party as set, game form */
     uint8_t party_count;
@@ -187,6 +192,7 @@ static inline void bench_record(Bench* b, const MlinkTx* tx) {
         b->sent_cafe16++;
         b->f_cafe16_burst = burst;
     }
+    if(f[0] == 0x2FFE && b->n_f_2ffe < BENCH_SYNCS) b->f_2ffe_burst[b->n_f_2ffe++] = burst;
 
     if(b->rx.count != MLINK_BURST_LEN) return;
     if(bench_parse(&b->g_rx, &b->g_rx_first, &b->g_rx_id, b->g_blocks, &b->n_g_blocks, g, burst) &&
@@ -197,6 +203,8 @@ static inline void bench_record(Bench* b, const MlinkTx* tx) {
         b->g_cafe_seen |= 1u << g[1];
         if(g[1] == 0x0016) b->g_cafe16_burst = burst;
     }
+    if(g[0] == 0x2FFE && b->n_g_2ffe < BENCH_SYNCS) b->g_2ffe_burst[b->n_g_2ffe++] = burst;
+    if(g[0] == 0x5FFF) b->g_5fff_burst = burst;
 }
 
 /* While muted, step() doesn't call the club: the fake gets frames without transfers (a stalled
@@ -323,6 +331,65 @@ static inline bool bench_inject_code(Bench* b, uint16_t code, uint16_t arg) {
     uint8_t block[GEN3_TRADE_BLOCK_SIZE];
     gen3_trade_block_build(code, arg, block);
     return gen3_block_send(&b->club.link, block, sizeof(block), 0);
+}
+
+/* Queues one raw command {w0, w1, 0, 0, 0, 0, 0, 0} on b->club.link as if the club sent it. */
+static inline void bench_inject_cmd(Bench* b, uint16_t w0, uint16_t w1) {
+    const uint16_t cmd[GEN3_CMD_LEN] = {w0, w1};
+    gen3_link_send(&b->club.link, cmd);
+}
+
+/* From Browsing: the GBA offers its slot gba_slot (fake_ruby_offer), says YES once "Is this trade
+ * okay?" is up, then the trade, the link save and the post-trade exchange run until the club's
+ * trades_done has grown and the GBA's trade menu is Browsing again (<= 4000 frames). False on a
+ * fake error or a timeout. */
+static inline bool bench_trade(Bench* b, uint8_t gba_slot) {
+    const uint32_t done = club_status(b).trades_done;
+    bool answered = false;
+    fake_ruby_offer(&b->ruby, gba_slot);
+    for(uint32_t i = 0; i < 4000; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        const FakeRubyMenuState menu = fake_ruby_menu_state(&b->ruby);
+        if(!answered && menu == FakeRubyMenuPrompt) {
+            fake_ruby_answer(&b->ruby, true);
+            answered = true;
+        }
+        if(club_status(b).trades_done > done && menu == FakeRubyMenuBrowsing) return true;
+    }
+    return false;
+}
+
+/* From here the fake isn't stepped: for `frames` frames a scripted GBA link layer answers the
+ * club instead, on the same checksum chain (transfer #1 carries the previous burst's sum, §A2),
+ * sending the 20-byte block {code, arg, 0...} as slot 1, then idle bursts. For club branches a
+ * Ruby-faithful fake never reaches. Both sides' blocks are logged as usual. */
+static inline void bench_raw_gba_block(Bench* b, uint16_t code, uint16_t arg, uint32_t frames) {
+    uint16_t cmds[3][GEN3_CMD_LEN] = {{0xBBBB, GEN3_TRADE_BLOCK_SIZE, 0x81}, {0x8888}, {0x8888}};
+    uint8_t block[GEN3_TRADE_BLOCK_SIZE];
+    gen3_trade_block_build(code, arg, block);
+    for(size_t i = 0; i < GEN3_TRADE_BLOCK_SIZE / 2; i++) {
+        const uint16_t w = (uint16_t)(block[2 * i] | (block[2 * i + 1] << 8));
+        cmds[1 + i / 7][1 + i % 7] = w;
+    }
+    uint16_t sum = 0;
+    for(size_t i = 1; i < MLINK_BURST_LEN; i++) {
+        sum = (uint16_t)(sum + b->last_tx.word[i] + b->rx.word[i]);
+    }
+    for(uint32_t f = 0; f < frames; f++) {
+        MlinkTx tx;
+        gen3_club_frame(&b->club, &b->rx, &tx);
+        count_sent(b, &tx);
+        memset(&b->rx, 0, sizeof(b->rx));
+        b->rx.count = tx.count;
+        b->rx.word[0] = sum;
+        if(f < 3) memcpy(&b->rx.word[1], cmds[f], sizeof(cmds[f]));
+        sum = 0;
+        for(size_t i = 1; i < MLINK_BURST_LEN; i++) {
+            sum = (uint16_t)(sum + tx.word[i] + b->rx.word[i]);
+        }
+        bench_record(b, &tx);
+    }
 }
 
 /* The GBA player walks out of the room (§B7); the club must go through Closing to Waiting. */

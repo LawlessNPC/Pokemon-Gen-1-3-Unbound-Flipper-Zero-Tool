@@ -11,9 +11,9 @@
 
 /* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
  * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down, the
- * relink for the trade menu, its party exchange and the trade menu with the Flipper as the
- * arbiter (docs/gen3/link-protocol-trade.md §B1-B3). Pure C, no heap; gen3_club_frame runs in
- * the link frame ISR. */
+ * relink for the trade menu, its party exchange, the trade menu with the Flipper as the arbiter,
+ * the trade and the GBA's link save (docs/gen3/link-protocol-trade.md §B1-B6.1). Pure C, no heap;
+ * gen3_club_frame runs in the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
 /* Idle bursts before a party-exchange CCCC (§B2.2). Round 1's follows both LinkPlayerBlocks: the
@@ -26,8 +26,10 @@
 #define GEN3_CLUB_ROUND1_DELAY_BURSTS 10
 #define GEN3_CLUB_ROUND_DELAY_BURSTS  6
 #define GEN3_CLUB_GBA_PARTY           6 /* the GBA's party slots */
-/* Idle bursts between the last chunk of the GBA's block and the reply (§B3.4: >= 5) */
+/* Idle bursts between the last chunk of the GBA's block and the reply (§B3.4: >= 5; DCBA §B4.3:
+ * >= 2) */
 #define GEN3_CLUB_REPLY_DELAY_BURSTS  6
+#define GEN3_CLUB_SAVE_SYNCS          3 /* the GBA's 2FFEs in one link save (§B5.1) */
 
 /* The values are the phase numbers in the link log: append only. */
 typedef enum {
@@ -60,6 +62,16 @@ typedef enum {
     Gen3ClubMenuLeaving, /* EEBB sent */
 } Gen3ClubMenu;
 
+/* How the latest pending trade ended (D5, §B5.3), by the GBA 2FFEs the club had answered. */
+typedef enum {
+    Gen3TradeResultNone,
+    Gen3TradeResultDone, /* sync 3 seen */
+    Gen3TradeResultCanceled, /* lost before the club answered sync 1: nothing written on the GBA */
+    Gen3TradeResultRolledBack, /* lost after the sync-1 answer, before the sync-2 answer: the GBA
+                                  reports a corrupt save and loads the one from before the trade */
+    Gen3TradeResultAssumed, /* lost after the sync-2 answer, before sync 3: taken as done (D5) */
+} Gen3TradeResult;
+
 /* name must outlive the club (a string literal): the club keeps a copy of the config. */
 typedef struct {
     const char* name; /* up to 7 chars are sent */
@@ -83,14 +95,17 @@ typedef struct {
     bool has_offer;
     bool gba_seated; /* this room session: the GBA sent CAFE 0016 and hasn't sent 001D/001A since */
     bool flipper_seated; /* this room session: the Flipper sent CAFE 0016 */
-    uint32_t trades_done; /* finalized trades since init; stays 0 until Task 6 */
+    uint32_t trades_done; /* finalized trades since init (Done or Assumed) */
     uint8_t round; /* Exchange/Menu: the round in progress or done, 1..5; 0 before round 1 */
     Gen3ClubMenu menu; /* per link session: Idle until the trade menu */
     uint8_t gba_slot; /* arg of the GBA's latest AABB that got DDDD: the GBA mon offered */
     /* Reason the latest AABB got DDEE; None after a DDDD, or for a DDEE because the GBA was shown
      * no Flipper Pokemon (R8) */
     Gen3Refuse refused;
-    bool trade_pending; /* CCDD sent; until done or lost (Task 6) */
+    bool trade_pending; /* CCDD sent; until done or lost */
+    uint8_t save_syncs; /* GBA 2FFEs answered in this link save, 0..3 */
+    bool save_window; /* sync 1 answered, sync 3 not yet seen: don't stop the link (D10) */
+    Gen3TradeResult last_result; /* how the latest pending trade ended; None before any */
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -133,6 +148,9 @@ struct Gen3Club {
     uint16_t gba_code, gba_arg; /* that block's words 0 and 1 */
     uint8_t gba_slot;
     Gen3Refuse refused;
+    /* R8: round 1 showed the GBA a Flipper Pokemon (party_mon had one); else its partner column
+     * is empty */
+    bool party_shown;
     Gen3Pkm scratch; /* the GBA mon of the latest AABB, decrypted (R2) */
     /* Trade context: survives relinks (D3) */
     uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
@@ -142,6 +160,11 @@ struct Gen3Club {
     uint8_t gba_party[GEN3_CLUB_GBA_PARTY][GEN3_PARTY_SIZE]; /* game form, rounds 1-3 */
     bool trade_pending;
     uint8_t pending_mon[GEN3_PARTY_SIZE]; /* the GBA mon the pending trade takes, game form */
+    uint8_t save_syncs; /* GBA 2FFEs answered in this link save; the 0x1144 block zeroes it */
+    bool save_window;
+    Gen3TradeResult last_result;
+    uint8_t received[GEN3_PARTY_SIZE]; /* the latest finalized trade's Pokemon, game form */
+    bool national_dex; /* lp_field_2 of the Flipper's 0x1144 block (§B4.5); never reset */
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
@@ -165,9 +188,19 @@ void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg);
 void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx);
 void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out);
 /* Sets (game != NULL) or clears the offer: the Flipper's one party Pokemon, game form. false and
- * nothing changed if trades_seen != the club's trades_done (D6; trades_done is 0 until Task 6).
- * Unchecked (G6): the app offers only a Pokemon that passes gen3_trade_offer_check. */
+ * nothing changed if trades_seen != the club's trades_done (D6): an app that hasn't picked up the
+ * latest trade can't overwrite the received Pokemon. Unchecked (G6): the app offers only a
+ * Pokemon that passes gen3_trade_offer_check. */
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen);
+/* National Dex for the GBA (D10, §B4.5): while on, the Flipper's 0x1144 block carries lp_field_2
+ * 0x8000. Off after init; the club never changes it. */
+void gen3_club_set_national_dex(Gen3Club* club, bool on);
+/* The Pokemon of the latest finalized trade (game form; zeros before any) and trades_done
+ * (trades_done may be NULL). Copies 100 B and one counter. */
+void gen3_club_get_received(
+    const Gen3Club* club,
+    uint8_t out[GEN3_PARTY_SIZE],
+    uint32_t* trades_done);
 /* Tests only; production uses GEN3_CLUB_CARD_DELAY_BURSTS. */
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts);
 /* Tests only; production uses GEN3_CLUB_ROUND1_DELAY_BURSTS and GEN3_CLUB_ROUND_DELAY_BURSTS. */
