@@ -5,6 +5,10 @@
 #include <src/gen3/gen3_session_furi.h>
 #include <src/views/gen3_link_test.h>
 
+#include <furi_hal_random.h>
+#include <stdlib.h>
+#include <src/gen3/gen3_edit.h>
+
 static void gen3_menu_item_callback(void* context, uint32_t index) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
 
@@ -32,8 +36,21 @@ static void gen3_menu_end_link_test(PokemonFap* pokemon_fap) {
 void pokemon_scene_gen3_menu_on_enter(void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
 
+    /* The Pokemon being edited lives until the app exits */
+    if(!pokemon_fap->gen3_editor) {
+        pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
+        gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get());
+    }
+
     submenu_reset(pokemon_fap->submenu);
     submenu_set_header(pokemon_fap->submenu, "Gen III");
+
+    submenu_add_item(
+        pokemon_fap->submenu,
+        "Edit Pokemon",
+        PokemonSceneGen3Edit,
+        gen3_menu_item_callback,
+        pokemon_fap);
 
     submenu_add_item(
         pokemon_fap->submenu,
@@ -57,7 +74,8 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
 
     /* Only menu items. A Link Test refresh tick still queued when the Link Test closed may
      * arrive here too; ignore it. */
-    if(event.type == SceneManagerEventTypeCustom && event.event == PokemonSceneGen3LinkTest) {
+    if(event.type == SceneManagerEventTypeCustom &&
+       (event.event == PokemonSceneGen3Edit || event.event == PokemonSceneGen3LinkTest)) {
         scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
         consumed = true;
     }

@@ -30,6 +30,9 @@ PokemonFap* pokemon_alloc() {
     PokemonFap* pokemon_fap = (PokemonFap*)malloc(sizeof(PokemonFap));
     ViewDispatcher* view_dispatcher = NULL;
 
+    // Gen III editor, allocated by the Gen III menu
+    pokemon_fap->gen3_editor = NULL;
+
     // View dispatcher
     view_dispatcher = view_dispatcher_alloc();
     pokemon_fap->view_dispatcher = view_dispatcher;
@@ -105,6 +108,7 @@ void free_app(PokemonFap* pokemon_fap) {
     furi_record_close(RECORD_GUI);
 
     // Free rest
+    free(pokemon_fap->gen3_editor);
     free(pokemon_fap);
     pokemon_fap = NULL;
 }

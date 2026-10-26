@@ -1,0 +1,177 @@
+#include <furi.h>
+#include <gui/modules/submenu.h>
+
+#include <src/include/pokemon_app.h>
+#include <src/include/named_list.h>
+#include <src/include/stat_nl.h>
+
+#include <src/scenes/include/pokemon_scene.h>
+
+#include <src/gen3/gen3_data.h>
+#include <src/gen3/gen3_edit.h>
+
+/* IV/EV preset, nature, ability, shiny, gender, ball and Unown form: one list each. The scene it
+ * is entered as is the scene state of Gen3Preset. */
+
+/* The preset list shows stat_list, so a Gen3Preset must be the EvIv of the same name */
+_Static_assert((int)Gen3PresetRandIvZeroEv == (int)RANDIV_ZEROEV, "preset order != EvIv");
+_Static_assert((int)Gen3PresetRandIvLevelEv == (int)RANDIV_LEVELEV, "preset order != EvIv");
+_Static_assert((int)Gen3PresetRandIvMaxEv == (int)RANDIV_MAXEV, "preset order != EvIv");
+_Static_assert((int)Gen3PresetMaxIvZeroEv == (int)MAXIV_ZEROEV, "preset order != EvIv");
+_Static_assert((int)Gen3PresetMaxIvLevelEv == (int)MAXIV_LEVELEV, "preset order != EvIv");
+_Static_assert((int)Gen3PresetMaxIvMaxEv == (int)MAXIV_MAXEV, "preset order != EvIv");
+
+#define GEN3_PICK_PRESET_COUNT 6
+#define GEN3_PICK_BALL_MAX 12 /* gen3_edit_set_ball takes 1..12, MASTER BALL..PREMIER BALL */
+#define GEN3_PICK_UNOWN_COUNT 28 /* A..Z, '!', '?' */
+
+/* Indexed by Gen3Stat; HP is never raised or lowered by a nature */
+static const char* const gen3_pick_stat_names[Gen3StatCount] =
+    {"HP", "Atk", "Def", "Spe", "SpA", "SpD"};
+
+static void gen3_pick_callback(void* context, uint32_t index) {
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+    Gen3Editor* ed = pokemon_fap->gen3_editor;
+    uint32_t state =
+        scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Preset);
+    Gen3Traits traits;
+    bool changed = false;
+
+    /* A PID trait: the current traits with one of them changed. Choosing the value it already
+     * has keeps the PID, so a stray OK doesn't change a loaded Pokemon. */
+    gen3_traits_of(&ed->pkm, &traits);
+    switch(state) {
+    case PokemonSceneGen3Preset:
+        gen3_edit_set_preset(ed, (Gen3Preset)index);
+        break;
+    case PokemonSceneGen3Nature:
+        changed = traits.nature != index;
+        traits.nature = (uint8_t)index;
+        break;
+    case PokemonSceneGen3Ability:
+        changed = traits.ability_slot != index;
+        traits.ability_slot = (uint8_t)index;
+        break;
+    case PokemonSceneGen3Shiny:
+        changed = traits.shiny != (index != 0);
+        traits.shiny = index != 0;
+        break;
+    case PokemonSceneGen3Gender:
+        changed = traits.gender != (Gen3Gender)index;
+        traits.gender = (Gen3Gender)index;
+        break;
+    case PokemonSceneGen3Unown:
+        changed = traits.unown_letter != index;
+        traits.unown_letter = (uint8_t)index;
+        break;
+    case PokemonSceneGen3Ball:
+        gen3_edit_set_ball(ed, (uint8_t)index);
+        break;
+    default:
+        break;
+    }
+    if(changed) gen3_edit_set_traits(ed, &traits);
+
+    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, PokemonSceneBack);
+}
+
+static void gen3_pick_add(PokemonFap* pokemon_fap, const char* label, uint32_t index) {
+    submenu_add_item(pokemon_fap->submenu, label, index, gen3_pick_callback, pokemon_fap);
+}
+
+/* "HARDY", or e.g. "LONELY +Atk -Def" */
+static void gen3_pick_nature_label(uint8_t nature, char* out, size_t out_size) {
+    const char* up = NULL;
+    const char* down = NULL;
+
+    for(int s = Gen3StatAtk; s < Gen3StatCount; s++) {
+        int8_t effect = gen3_nature_effect(nature, (Gen3Stat)s);
+        if(effect > 0) up = gen3_pick_stat_names[s];
+        if(effect < 0) down = gen3_pick_stat_names[s];
+    }
+    if(up && down)
+        snprintf(out, out_size, "%s +%s -%s", gen3_nature_name(nature), up, down);
+    else
+        snprintf(out, out_size, "%s", gen3_nature_name(nature));
+}
+
+void pokemon_scene_gen3_pick_on_enter(void* context) {
+    PokemonFap* pokemon_fap = (PokemonFap*)context;
+    const Gen3Editor* ed = pokemon_fap->gen3_editor;
+    const Gen3SpeciesInfo* info = gen3_species(gen3_edit_national(ed));
+    uint32_t state =
+        scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Preset);
+    Gen3Traits traits;
+    uint32_t selected;
+    char label[24];
+
+    gen3_traits_of(&ed->pkm, &traits);
+    submenu_reset(pokemon_fap->submenu);
+
+    switch(state) {
+    case PokemonSceneGen3Preset:
+        for(uint32_t i = 0; i < GEN3_PICK_PRESET_COUNT; i++)
+            gen3_pick_add(pokemon_fap, namedlist_name_get_index(stat_list, i), i);
+        selected = ed->preset;
+        break;
+    case PokemonSceneGen3Nature:
+        for(uint8_t n = 0; n < GEN3_NATURE_COUNT; n++) {
+            gen3_pick_nature_label(n, label, sizeof(label));
+            gen3_pick_add(pokemon_fap, label, n);
+        }
+        selected = traits.nature;
+        break;
+    case PokemonSceneGen3Ability:
+        /* Only entered for a two-ability species */
+        gen3_pick_add(pokemon_fap, gen3_ability_name(info ? info->ability[0] : 0), 0);
+        gen3_pick_add(pokemon_fap, gen3_ability_name(info ? info->ability[1] : 0), 1);
+        selected = traits.ability_slot;
+        break;
+    case PokemonSceneGen3Shiny:
+        gen3_pick_add(pokemon_fap, "Shiny", 1);
+        gen3_pick_add(pokemon_fap, "Not Shiny", 0);
+        selected = traits.shiny;
+        break;
+    case PokemonSceneGen3Gender:
+        gen3_pick_add(pokemon_fap, "Female", Gen3GenderFemale);
+        gen3_pick_add(pokemon_fap, "Male", Gen3GenderMale);
+        selected = traits.gender;
+        break;
+    case PokemonSceneGen3Ball:
+        for(uint8_t ball = 1; ball <= GEN3_PICK_BALL_MAX; ball++)
+            gen3_pick_add(pokemon_fap, gen3_item_name(ball), ball);
+        selected = gen3_pkm_get(&ed->pkm, Gen3FieldBall);
+        break;
+    case PokemonSceneGen3Unown:
+        for(uint8_t letter = 0; letter < GEN3_PICK_UNOWN_COUNT; letter++) {
+            label[0] = letter < 26 ? (char)('A' + letter) : (letter == 26 ? '!' : '?');
+            label[1] = '\0';
+            gen3_pick_add(pokemon_fap, label, letter);
+        }
+        selected = traits.unown_letter;
+        break;
+    default:
+        furi_crash("Gen3 pick: invalid state");
+        break;
+    }
+
+    submenu_set_selected_item(pokemon_fap->submenu, selected);
+
+    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);
+}
+
+bool pokemon_scene_gen3_pick_on_event(void* context, SceneManagerEvent event) {
+    PokemonFap* pokemon_fap = context;
+    bool consumed = false;
+
+    if(event.type == SceneManagerEventTypeCustom && event.event == (uint32_t)PokemonSceneBack) {
+        scene_manager_previous_scene(pokemon_fap->scene_manager);
+        consumed = true;
+    }
+
+    return consumed;
+}
+
+void pokemon_scene_gen3_pick_on_exit(void* context) {
+    UNUSED(context);
+}

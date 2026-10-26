@@ -44,6 +44,11 @@ struct pokemon_fap {
      */
     void* gen3_link_test;
     struct Gen3Session* gen3_session;
+
+    /* Gen III editor (struct Gen3Editor from src/gen3/gen3_edit.h). Allocated the first
+     * time the Gen III menu is shown, then kept for the app's lifetime.
+     */
+    struct Gen3Editor* gen3_editor;
 };
 
 typedef struct pokemon_fap PokemonFap;
