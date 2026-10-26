@@ -157,6 +157,58 @@ TEST(test_learnset_get) {
     ASSERT_EQ(largest, GEN3_LEARNSET_MAX);
 }
 
+/* A reader over the in-memory copy that fails one read, the fail_at-th from now (1 = the next) */
+static int fail_at;
+
+static bool flaky_read(void* ctx, uint32_t offset, void* buf, uint32_t len) {
+    if(fail_at > 0 && --fail_at == 0) return false;
+    return mem_read(ctx, offset, buf, len);
+}
+
+/* A read that fails after a good open (the SD card pulled, say) closes the source, so the next
+ * Gen III menu visit opens the file again. */
+TEST(test_read_failure_closes) {
+    char name[GEN3_SPECIES_NAME_LEN + 1];
+    uint16_t e[GEN3_LEARNSET_MAX];
+    ASSERT_TRUE(mem_load());
+    fail_at = 0;
+    ASSERT_TRUE(gen3_bulk_open(flaky_read, NULL));
+
+    fail_at = 1; /* the name read */
+    ASSERT_TRUE(!gen3_species_name_get(1, name));
+    ASSERT_TRUE(!gen3_bulk_ready());
+    ASSERT_TRUE(!gen3_species_name_get(1, name)); /* reads would work again, but it is closed */
+    ASSERT_TRUE(gen3_bulk_open(flaky_read, NULL));
+    ASSERT_TRUE(gen3_species_name_get(1, name));
+    ASSERT_STR_EQ(name, "BULBASAUR");
+
+    /* A learnset is two reads: the starts, then the entries. Either failing closes it. */
+    for(int k = 1; k <= 2; k++) {
+        fail_at = k;
+        ASSERT_EQ(gen3_learnset_get(1, e, GEN3_LEARNSET_MAX), 0);
+        ASSERT_TRUE(!gen3_bulk_ready());
+        ASSERT_TRUE(gen3_bulk_open(flaky_read, NULL));
+        ASSERT_EQ(gen3_learnset_get(1, e, GEN3_LEARNSET_MAX), 11);
+    }
+
+    /* The file no longer matches what was checked at open (a learnset ending past the entries):
+     * closed too, so the next open checks it again */
+    uint32_t end_hi = 16 + 11 * 387 + 2 * 2 + 1; /* species 1's end, high byte */
+    uint8_t saved = mem_data[end_hi];
+    mem_data[end_hi] = 0xFF;
+    ASSERT_EQ(gen3_learnset_get(1, e, GEN3_LEARNSET_MAX), 0);
+    ASSERT_TRUE(!gen3_bulk_ready());
+    ASSERT_TRUE(!gen3_bulk_open(flaky_read, NULL)); /* the CRC no longer matches */
+    mem_data[end_hi] = saved;
+    ASSERT_TRUE(gen3_bulk_open(flaky_read, NULL));
+    ASSERT_EQ(gen3_learnset_get(1, e, GEN3_LEARNSET_MAX), 11);
+
+    /* A species out of range reads nothing, so it leaves the source open */
+    ASSERT_TRUE(!gen3_species_name_get(0, name));
+    ASSERT_EQ(gen3_learnset_get(GEN3_NATIONAL_COUNT + 1, e, GEN3_LEARNSET_MAX), 0);
+    ASSERT_TRUE(gen3_bulk_ready());
+}
+
 TEST(test_not_ready) {
     char name[GEN3_SPECIES_NAME_LEN + 1];
     uint16_t e[GEN3_LEARNSET_MAX];
@@ -179,6 +231,7 @@ int main(void) {
     RUN(test_bulk_open_short);
     RUN(test_species_name_get);
     RUN(test_learnset_get);
+    RUN(test_read_failure_closes);
     RUN(test_not_ready);
     TEST_EXIT();
 }

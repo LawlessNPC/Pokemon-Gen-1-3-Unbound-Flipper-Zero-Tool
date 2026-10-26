@@ -152,10 +152,23 @@ bool gen3_bulk_ready(void) {
     return bulk.read != NULL;
 }
 
+/* The installed source no longer reads, or no longer reads as it did when gen3_bulk_open checked
+ * it (the SD card pulled, say). Closing it makes gen3_bulk_ready false, so the Gen III menu opens
+ * the file again on its next visit. */
+static bool bulk_failed(void) {
+    gen3_bulk_close();
+    return false;
+}
+
+/* Reads from the installed source; a failed read closes it */
+static bool bulk_read(uint32_t offset, void* buf, uint32_t len) {
+    if(!bulk.read) return false;
+    return bulk.read(bulk.ctx, offset, buf, len) || bulk_failed();
+}
+
 /* Reads from the installed source for a species 1..386 */
 static bool bulk_get(uint16_t national, uint32_t offset, void* buf, uint32_t len) {
-    return bulk.read && national >= 1 && national <= GEN3_NATIONAL_COUNT &&
-           bulk.read(bulk.ctx, offset, buf, len);
+    return national >= 1 && national <= GEN3_NATIONAL_COUNT && bulk_read(offset, buf, len);
 }
 
 bool gen3_species_name_get(uint16_t national, char out[GEN3_SPECIES_NAME_LEN + 1]) {
@@ -169,11 +182,14 @@ size_t gen3_learnset_get(uint16_t national, uint16_t* out, size_t max) {
     if(!bulk_get(national, BULK_STARTS_OFF + 2 * national, se, sizeof(se))) return 0;
     uint32_t start = bulk_le16(se);
     uint32_t end = bulk_le16(se + 2);
-    if(end < start || end > GEN3_LEARNSET_COUNT) return 0;
+    if(end < start || end > GEN3_LEARNSET_COUNT) {
+        bulk_failed();
+        return 0;
+    }
     size_t count = end - start < max ? end - start : max;
     /* Read the bytes into out, then turn each pair into its entry in place */
     uint8_t* raw = (uint8_t*)out;
-    if(count == 0 || !bulk.read(bulk.ctx, BULK_ENTRIES_OFF + 2 * start, raw, 2 * count)) return 0;
+    if(count == 0 || !bulk_read(BULK_ENTRIES_OFF + 2 * start, raw, 2 * count)) return 0;
     for(size_t i = 0; i < count; i++) out[i] = (uint16_t)bulk_le16(raw + 2 * i);
     return count;
 }

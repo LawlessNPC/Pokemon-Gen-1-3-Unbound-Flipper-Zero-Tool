@@ -79,6 +79,9 @@ typedef bool (*Gen3BulkRead)(void* ctx, uint32_t offset, void* buf, uint32_t len
  * and no source is installed. */
 bool gen3_bulk_open(Gen3BulkRead read, void* ctx);
 void gen3_bulk_close(void);
+/* A source is installed. A read that fails after a good open (or reads data the open checks
+ * would have refused) uninstalls it, as gen3_bulk_close does, so this turns false and the caller
+ * can open the file again. */
 bool gen3_bulk_ready(void);
 /* Copies the uppercase ASCII name (female '\200', male '\201') + NUL. false (out = "") if not
  * ready, out of range (1..386) or unreadable. */

@@ -121,7 +121,8 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
 
     /* The bulk data file is opened once, then kept open until the app exits (free_app closes
-     * it). Until it opens, each visit to this menu tries again. */
+     * it). Until it opens, each visit to this menu tries again. A read that fails later (the SD
+     * card pulled and put back) uninstalls it, so the next visit opens it again. */
     if(!gen3_bulk_ready()) gen3_bulk_furi_open();
     if(!pokemon_fap->gen3_species_select) {
         pokemon_fap->gen3_species_select =
