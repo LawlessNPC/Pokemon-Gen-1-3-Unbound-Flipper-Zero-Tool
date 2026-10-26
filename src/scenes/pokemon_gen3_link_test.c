@@ -21,23 +21,26 @@ static void gen3_link_test_tick_callback(void* context) {
 }
 
 /* Until the session runs, check the cable and start it as soon as the cable reads OK. Then show
- * the latest status. */
+ * the latest status, with the driver's live cable guard on the cable line. */
 static void gen3_link_test_refresh(PokemonFap* pokemon_fap) {
     Gen3Session* session = pokemon_fap->gen3_session;
+    bool started =
+        scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3LinkTest) ==
+        GEN3_LINK_TEST_STARTED;
     bool cable_ok = true;
     Gen3ClubStatus status;
     bool log_ok;
 
-    if(scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3LinkTest) !=
-       GEN3_LINK_TEST_STARTED) {
+    if(!started) {
         cable_ok = gen3_session_check_cable(session) == MlinkCableOk;
-        if(cable_ok && gen3_session_start(session)) {
+        started = cable_ok && gen3_session_start(session);
+        if(started) {
             scene_manager_set_scene_state(
                 pokemon_fap->scene_manager, PokemonSceneGen3LinkTest, GEN3_LINK_TEST_STARTED);
         }
     }
 
-    gen3_session_status(session, &status, &log_ok);
+    gen3_session_status(session, &status, &log_ok, started ? &cable_ok : NULL);
     gen3_link_test_update(pokemon_fap->gen3_link_test, cable_ok, &status, log_ok);
 }
 
@@ -81,7 +84,7 @@ bool pokemon_scene_gen3_link_test_on_event(void* context, SceneManagerEvent even
         consumed = true;
     } else if(event.type == SceneManagerEventTypeBack) {
         Gen3ClubStatus status;
-        gen3_session_status(pokemon_fap->gen3_session, &status, NULL);
+        gen3_session_status(pokemon_fap->gen3_session, &status, NULL, NULL);
         if(gen3_link_test_in_club(status.phase)) {
             scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3LinkExit);
             consumed = true;

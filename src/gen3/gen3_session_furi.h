@@ -37,5 +37,6 @@ bool gen3_session_start(Gen3Session* s); /* false if cable reversed or TIM2 busy
 void gen3_session_stop(Gen3Session* s);
 
 /* Latest status published by the frame callback. log_ok (may be NULL): the log file is open and
- * no write to it has failed. */
-void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok);
+ * no write to it has failed. cable_ok (may be NULL): the driver's live cable guard
+ * (mlink_hw_cable_ok); while it reads false the driver skips every frame's transfers. */
+void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool* cable_ok);

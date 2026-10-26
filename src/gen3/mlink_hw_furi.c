@@ -95,6 +95,7 @@ struct MlinkHw {
     MlinkFrameCallback cb;
     void* ctx;
     bool running;
+    volatile bool cable_ok; /* written by the ISR at each frame start, read by any thread */
 
     /* Owned by the TIM2 ISR while running. */
     bool in_frame;
@@ -241,6 +242,14 @@ static void mlink_hw_transfer(MlinkHw* hw, uint8_t t) {
     }
 }
 
+/* Frame done: the callback gets hw->rx and fills the next frame's tx. Interrupts are enabled. */
+static void mlink_frame_done(MlinkHw* hw) {
+    hw->in_frame = false;
+    hw->next = hw->tx;
+    hw->cb(hw->ctx, &hw->rx, &hw->next);
+    mlink_load_tx(&hw->tx, &hw->next);
+}
+
 static void mlink_hw_isr(void* context) {
     MlinkHw* hw = context;
 
@@ -252,7 +261,6 @@ static void mlink_hw_isr(void* context) {
     if(!hw->in_frame) {
         if(hw->frame_acc < MLINK_FRAME_DECI_US) return;
         hw->frame_acc -= MLINK_FRAME_DECI_US;
-        hw->in_frame = true;
         hw->transfer = 0;
         hw->rx.count = hw->tx.count;
         for(uint8_t i = 0; i < MLINK_BURST_LEN; i++) {
@@ -260,17 +268,24 @@ static void mlink_hw_isr(void* context) {
         }
         hw->rx.timeout_mask = 0;
         hw->rx.framing_mask = 0;
+
+        /* Cable guard, one pin read before any line moves (interrupts on). The parent plug
+         * grounds SI; high through the pull-up means no cable or a reversed one. Skip the
+         * frame: no SC, SD or SO activity, and the callback sees a GBA that never answered. */
+        const bool cable_ok = !mlink_pin_read(hw->pins.si);
+        hw->cable_ok = cable_ok;
+        if(!cable_ok) {
+            hw->rx.timeout_mask = (uint16_t)((1u << hw->rx.count) - 1u); /* count is 1..9 */
+            mlink_frame_done(hw);
+            return;
+        }
+        hw->in_frame = true;
     }
 
     mlink_hw_transfer(hw, hw->transfer);
     hw->transfer++;
     if(hw->transfer < hw->tx.count) return;
-
-    /* Frame done. Interrupts are enabled again here. */
-    hw->in_frame = false;
-    hw->next = hw->tx;
-    hw->cb(hw->ctx, &hw->rx, &hw->next);
-    mlink_load_tx(&hw->tx, &hw->next);
+    mlink_frame_done(hw);
 }
 
 /* Each output gets its idle level before it becomes an output, so nothing glitches low. */
@@ -281,8 +296,9 @@ static void mlink_pins_run(const MlinkPins* pins) {
     furi_hal_gpio_init(pins->sc, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
     furi_hal_gpio_write(pins->sd, true);
 #if MLINK_SD_PUSH_PULL
-    /* Released between transfers: input with pull-up. OTYPER push-pull only takes effect while a
-     * transfer switches MODER to output (mlink_sd_drive). */
+    /* Released between transfers: input with pull-up. OTYPER push-pull only takes effect while
+     * mlink_hw_transfer switches MODER to output for the Flipper's own word (start bit through
+     * stop bit, mlink_moder_write). */
     furi_hal_gpio_init(pins->sd, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
     FURI_CRITICAL_ENTER();
     pins->sd->port->OTYPER &= ~(uint32_t)pins->sd->pin;
@@ -361,6 +377,7 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
     hw->in_frame = false;
     hw->transfer = 0;
     hw->frame_acc = 0; /* first frame after 16 ticks (17.2 ms) of idle lines */
+    hw->cable_ok = true; /* checked above; the ISR re-reads SI at every frame start */
 
     mlink_pins_run(&hw->pins);
     /* Stop mode would halt TIM2; plain WFI sleep keeps it running. */
@@ -380,6 +397,11 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
     LL_TIM_EnableIT_UPDATE(MLINK_TIM);
     LL_TIM_EnableCounter(MLINK_TIM);
     return true;
+}
+
+bool mlink_hw_cable_ok(const MlinkHw* hw) {
+    furi_check(hw);
+    return hw->cable_ok;
 }
 
 void mlink_hw_stop(MlinkHw* hw) {

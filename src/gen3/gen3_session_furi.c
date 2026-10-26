@@ -212,7 +212,7 @@ void gen3_session_stop(Gen3Session* s) {
     s->running = false;
 }
 
-void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok) {
+void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool* cable_ok) {
     furi_check(s);
     furi_check(out);
     uint32_t seq;
@@ -225,4 +225,5 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok) {
     } while(seq != s->status_seq);
 
     if(log_ok) *log_ok = s->log_open && !gen3_log_failed(&s->ring);
+    if(cable_ok) *cable_ok = mlink_hw_cable_ok(s->hw);
 }
