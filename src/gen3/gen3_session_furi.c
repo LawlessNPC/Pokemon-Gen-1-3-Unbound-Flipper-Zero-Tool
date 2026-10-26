@@ -187,7 +187,9 @@ MlinkCable gen3_session_check_cable(Gen3Session* s) {
 
 static bool gen3_session_start_with(Gen3Session* s, const Gen3ClubConfig* cfg, bool national_dex) {
     furi_check(s);
-    if(s->running) return true;
+    /* Already running: true only in the asked mode, so a Link Test run never passes for a trade
+     * session, nor the other way round */
+    if(s->running) return s->trade_mode == cfg->trading;
 
     MlinkTx first;
 
@@ -263,8 +265,9 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool
 /* ---- App <-> club hand-off (G5) ----
  * Each PRIMASK section masks every interrupt, TIM2 included, around exactly one gen3_club_* call,
  * so the frame callback never sees a half-made change. Inside: at most 104 bytes copied (one
- * 100-byte Pokemon plus scalars), nothing that blocks, no memcmp, no decrypt: a few microseconds
- * at most, which only delays the next TIM2 tick. */
+ * 100-byte Pokemon plus scalars), nothing that blocks, no memcmp, no decrypt: about 10-13 us at
+ * worst with the firmware's byte-loop memcpy. That only delays the start of a transfer the TIM2
+ * tick would begin meanwhile; the bit timing and the frame cadence are unaffected. */
 
 bool gen3_session_set_offer(Gen3Session* s, const uint8_t* offer, uint32_t trades_seen) {
     furi_check(s);

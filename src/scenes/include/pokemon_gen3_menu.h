@@ -34,3 +34,13 @@ void gen3_menu_show_notice(PokemonFap* pokemon_fap, const char* header, const ch
 /* Header (up to 24 characters) and text (up to 96) of the Gen3Result scene, copied; set them
  * before scene_manager_next_scene(..., PokemonSceneGen3Result). */
 void pokemon_scene_gen3_result_set(const char* header, const char* text);
+
+/* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
+ * file, so it is created only once the file reads, and Trade, Edit, Load and Save need the file:
+ * false if it can't be read. A read that failed since (the SD card pulled) closed it, so it is
+ * opened again here first. */
+bool gen3_menu_editor_ready(PokemonFap* pokemon_fap);
+
+/* Custom event the trade screen's OK (Edit) sends to Gen3Trade. Clear of scene ids and the other
+ * Gen III events. */
+#define GEN3_TRADE_EVENT_EDIT 0x47330201u

@@ -13,6 +13,8 @@
 #include <src/views/gen3_species_select.h>
 #include <gblink.h>
 #include <src/gen3/gen3_bulk_furi.h>
+#include <src/gen3/gen3_session_furi.h>
+#include <src/views/gen3_trade.h>
 
 bool pokemon_custom_event_callback(void* context, uint32_t event) {
     furi_assert(context);
@@ -25,6 +27,15 @@ bool pokemon_back_event_callback(void* context) {
     furi_assert(context);
     PokemonFap* pokemon_fap = context;
     return scene_manager_handle_back_event(pokemon_fap->scene_manager);
+}
+
+/* Every 100 ms the app thread is idle: the Gen III trade tick, which returns at once unless a
+ * trade screen exists. */
+static void pokemon_tick_event_callback(void* context) {
+    furi_assert(context);
+    PokemonFap* pokemon_fap = context;
+
+    pokemon_gen3_trade_tick(pokemon_fap);
 }
 
 
@@ -43,6 +54,14 @@ PokemonFap* pokemon_alloc() {
     view_dispatcher_set_event_callback_context(view_dispatcher, pokemon_fap);
     view_dispatcher_set_custom_event_callback(view_dispatcher, pokemon_custom_event_callback);
     view_dispatcher_set_navigation_event_callback(view_dispatcher, pokemon_back_event_callback);
+
+    // Gen III trade, allocated by the Gen III menu; its tick
+    pokemon_fap->gen3_trade_view = NULL;
+    pokemon_fap->gen3_trade_sync = NULL;
+    pokemon_fap->gen3_national_dex = false;
+    pokemon_fap->gen3_trade_ended = false;
+    view_dispatcher_set_tick_event_callback(
+        view_dispatcher, pokemon_tick_event_callback, furi_ms_to_ticks(100));
     view_dispatcher_attach_to_gui(
         view_dispatcher,
         (Gui*)furi_record_open(RECORD_GUI),
@@ -83,6 +102,12 @@ PokemonFap* pokemon_alloc() {
 void free_app(PokemonFap* pokemon_fap) {
     furi_assert(pokemon_fap);
 
+    // Gen III session (a trade session outlives the Gen III menu), before the pins it uses
+    if(pokemon_fap->gen3_session) {
+        gen3_session_free(pokemon_fap->gen3_session);
+        pokemon_fap->gen3_session = NULL;
+    }
+
     // gblink
     gblink_free(pokemon_fap->gblink_handle);
 
@@ -109,6 +134,15 @@ void free_app(PokemonFap* pokemon_fap) {
             AppViewGen3SpeciesSelect,
             pokemon_fap->gen3_species_select);
     }
+
+    // Gen III trade screen and sync
+    if(pokemon_fap->gen3_trade_view) {
+        gen3_trade_view_free(
+            pokemon_fap->view_dispatcher, AppViewGen3Trade, pokemon_fap->gen3_trade_view);
+        pokemon_fap->gen3_trade_view = NULL;
+    }
+    free(pokemon_fap->gen3_trade_sync);
+    pokemon_fap->gen3_trade_sync = NULL;
 
     view_dispatcher_free(pokemon_fap->view_dispatcher);
 

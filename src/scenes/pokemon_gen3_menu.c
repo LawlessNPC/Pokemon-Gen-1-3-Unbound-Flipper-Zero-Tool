@@ -3,7 +3,9 @@
 #include <src/scenes/include/pokemon_scene.h>
 
 #include <src/gen3/gen3_session_furi.h>
+#include <src/gen3/gen3_trade_sync.h>
 #include <src/views/gen3_link_test.h>
+#include <src/views/gen3_trade.h>
 
 #include <furi_hal_random.h>
 #include <stdlib.h>
@@ -39,8 +41,11 @@ static void gen3_menu_item_callback(void* context, uint32_t index) {
 
 /* The Link Test session and its view outlive the Link Test scene while the "Stop link?" dialog
  * is up, so that "Stay" returns to the running link. Every way out of the Link Test for good
- * (Back while not in the Cable Club, or "Stop") comes back to this menu, so it ends here. */
-static void gen3_menu_end_link_test(PokemonFap* pokemon_fap) {
+ * (Back while not in the Cable Club, or "Stop") comes back to this menu, so it ends here. A trade
+ * session, its trade screen and its sync live on behind every Gen III scene while it runs (D1),
+ * and end here too once it doesn't: not started yet, or stopped after the GBA left. Call with
+ * neither view shown. */
+static void gen3_menu_end_session(PokemonFap* pokemon_fap) {
     if(pokemon_fap->gen3_session) {
         gen3_session_free(pokemon_fap->gen3_session); /* stops the link, closes the log */
         pokemon_fap->gen3_session = NULL;
@@ -50,6 +55,35 @@ static void gen3_menu_end_link_test(PokemonFap* pokemon_fap) {
             pokemon_fap->view_dispatcher, AppViewGen3LinkTest, pokemon_fap->gen3_link_test);
         pokemon_fap->gen3_link_test = NULL;
     }
+    if(pokemon_fap->gen3_trade_view) {
+        gen3_trade_view_free(
+            pokemon_fap->view_dispatcher, AppViewGen3Trade, pokemon_fap->gen3_trade_view);
+        pokemon_fap->gen3_trade_view = NULL;
+    }
+    free(pokemon_fap->gen3_trade_sync);
+    pokemon_fap->gen3_trade_sync = NULL;
+}
+
+/* The trade screen's OK (Edit). App thread (view input): Gen3Trade handles the event. */
+static void gen3_menu_trade_edit_callback(void* context) {
+    PokemonFap* pokemon_fap = context;
+
+    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_TRADE_EVENT_EDIT);
+}
+
+/* A new trade session with its trade screen and sync. The tick starts it once the cable reads
+ * OK. A session left from before (one that stopped while this menu was shown) goes first. */
+static void gen3_menu_trade_alloc(PokemonFap* pokemon_fap) {
+    gen3_menu_end_session(pokemon_fap);
+
+    pokemon_fap->gen3_session = gen3_session_alloc(pokemon_fap->gblink_handle);
+    pokemon_fap->gen3_trade_view =
+        gen3_trade_view_alloc(pokemon_fap->view_dispatcher, AppViewGen3Trade);
+    gen3_trade_view_set_edit_callback(
+        pokemon_fap->gen3_trade_view, gen3_menu_trade_edit_callback, pokemon_fap);
+    pokemon_fap->gen3_trade_sync = malloc(sizeof(Gen3TradeSync));
+    gen3_trade_sync_init(pokemon_fap->gen3_trade_sync);
+    pokemon_fap->gen3_trade_ended = false;
 }
 
 static void gen3_menu_dialog_callback(DialogExResult result, void* context) {
@@ -113,10 +147,10 @@ static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
 }
 
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
- * file, so it is created only once the file reads, and Edit, Load and Save need the file: false
- * if it can't be read. A read that failed since (the SD card pulled) closed it, so it is opened
- * again here first. */
-static bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
+ * file, so it is created only once the file reads, and Trade, Edit, Load and Save need the file:
+ * false if it can't be read. A read that failed since (the SD card pulled) closed it, so it is
+ * opened again here first. */
+bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
     if(!gen3_bulk_ready()) gen3_bulk_furi_open();
     if(!gen3_bulk_ready()) return false;
     if(!pokemon_fap->gen3_editor) {
@@ -141,8 +175,14 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
             gen3_species_select_alloc(pokemon_fap->view_dispatcher, AppViewGen3SpeciesSelect);
     }
 
+    /* A trade session runs on behind this menu (D1) */
+    const bool trading = gen3_session_trading(pokemon_fap->gen3_session);
+
     submenu_reset(pokemon_fap->submenu);
     submenu_set_header(pokemon_fap->submenu, "Gen III");
+
+    submenu_add_item(
+        pokemon_fap->submenu, "Trade", PokemonSceneGen3Trade, gen3_menu_item_callback, pokemon_fap);
 
     submenu_add_item(
         pokemon_fap->submenu,
@@ -165,20 +205,37 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
         gen3_menu_item_callback,
         pokemon_fap);
 
-    submenu_add_item(
-        pokemon_fap->submenu,
-        "Link Test",
-        PokemonSceneGen3LinkTest,
-        gen3_menu_item_callback,
-        pokemon_fap);
+    /* TIM2 runs one link at a time: no Link Test while a trade session runs */
+    if(!trading) {
+        submenu_add_item(
+            pokemon_fap->submenu,
+            "Link Test",
+            PokemonSceneGen3LinkTest,
+            gen3_menu_item_callback,
+            pokemon_fap);
+    }
 
     submenu_set_selected_item(
         pokemon_fap->submenu,
         scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Menu));
 
-    /* Switch away from the Link Test view before freeing it */
+    /* Switch away from the Link Test or trade view before freeing it */
     gen3_menu_show_menu(pokemon_fap);
-    gen3_menu_end_link_test(pokemon_fap);
+    if(!trading) gen3_menu_end_session(pokemon_fap);
+}
+
+/* Edit Pokemon or Load .pk3 (scene): with a trade session running, the club holds the offer
+ * first (O1); if it can't (a trade is pending, or a pickup is being retried), the trade screen
+ * says why instead. begin_edit and the scene switch share this handler, so no tick runs between
+ * them. */
+static void gen3_menu_open_editor(PokemonFap* pokemon_fap, uint32_t scene) {
+    if(!gen3_menu_editor_ready(pokemon_fap)) {
+        gen3_menu_show_data_missing(pokemon_fap);
+    } else if(pokemon_gen3_trade_begin_edit(pokemon_fap)) {
+        scene_manager_next_scene(pokemon_fap->scene_manager, scene);
+    } else {
+        scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Trade);
+    }
 }
 
 bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
@@ -191,19 +248,19 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
         if(event.event == PokemonSceneGen3LinkTest) {
             scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
             consumed = true;
-        } else if(event.event == PokemonSceneGen3Edit) {
-            if(gen3_menu_editor_ready(pokemon_fap)) {
-                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
-            } else {
+        } else if(event.event == PokemonSceneGen3Trade) {
+            /* The tick needs the editor: it hands the GBA player to it and offers its Pokemon */
+            if(!gen3_menu_editor_ready(pokemon_fap)) {
                 gen3_menu_show_data_missing(pokemon_fap);
+            } else {
+                if(!gen3_session_trading(pokemon_fap->gen3_session)) {
+                    gen3_menu_trade_alloc(pokemon_fap);
+                }
+                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
             }
             consumed = true;
-        } else if(event.event == PokemonSceneGen3Load) {
-            if(gen3_menu_editor_ready(pokemon_fap)) {
-                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
-            } else {
-                gen3_menu_show_data_missing(pokemon_fap);
-            }
+        } else if(event.event == PokemonSceneGen3Edit || event.event == PokemonSceneGen3Load) {
+            gen3_menu_open_editor(pokemon_fap, event.event);
             consumed = true;
         } else if(event.event == PokemonSceneGen3SaveName) {
             if(gen3_menu_editor_ready(pokemon_fap)) {

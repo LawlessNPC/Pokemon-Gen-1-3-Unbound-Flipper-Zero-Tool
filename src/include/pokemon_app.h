@@ -59,6 +59,17 @@ struct pokemon_fap {
 
     /* Gen III .pk3 file name being saved, without the extension */
     char gen3_file_name[GEN3_PK3_NAME_MAX + 1];
+
+    /* Gen III trade: the trade screen's view and the sync between the editor and the link
+     * (struct Gen3TradeSync from src/gen3/gen3_trade_sync.h). Allocated with a trade session by
+     * Gen III -> Trade, which then lives behind every Gen III scene; freed with it.
+     */
+    void* gen3_trade_view;
+    struct Gen3TradeSync* gen3_trade_sync;
+    /* The next trade session unlocks the GBA's National Dex (per run, never saved) */
+    bool gen3_national_dex;
+    /* The trade session has stopped (the GBA left): the tick doesn't start it again */
+    bool gen3_trade_ended;
 };
 
 typedef struct pokemon_fap PokemonFap;
@@ -72,6 +83,22 @@ typedef enum {
     AppViewTrade,
     AppViewGen3LinkTest,
     AppViewGen3SpeciesSelect,
+    AppViewGen3Trade,
 } AppView;
+
+/* Gen III trade app tick (every 100 ms, app thread, between UI events): while the trade screen
+ * exists, starts the trade session once the cable reads OK, moves the received Pokemon, the GBA
+ * player and the offer between the editor and the link (only while the current scene is Gen3Trade
+ * or Gen3Menu, D6), stops the session once the GBA has left, and refreshes the trade screen. Does
+ * nothing otherwise. Defined in pokemon_gen3_trade.c. */
+void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap);
+
+/* Call before entering Gen3Edit or Gen3Load from Gen3Trade or Gen3Menu. Without a running
+ * trade session: true. Otherwise runs one tick (so a finished trade is picked up first), then
+ * false if the sync's pickup_fail is Gen3PickupNoData (a pickup is being retried), else
+ * gen3_session_set_editing(s, true, sync->trades_seen): false while a trade is pending or a
+ * received Pokemon isn't picked up yet. false: don't open the scene; show Gen3Trade. On true,
+ * open the scene in the same event handler, so no tick runs in between. */
+bool pokemon_gen3_trade_begin_edit(PokemonFap* pokemon_fap);
 
 #endif /* POKEMON_APP_H */

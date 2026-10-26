@@ -32,12 +32,13 @@ MlinkCable gen3_session_check_cable(Gen3Session* s);
  * status reset to Waiting, then the driver; once that is running, opens the log file
  * (FSOM_CREATE_ALWAYS) and starts the log thread. false (nothing started) if the cable is
  * reversed or TIM2 is busy. A missing SD card is not an error: the link runs and log_ok reads
- * false. true if already running. */
+ * false. Already running: true for a Link Test run, false (nothing changed) for a trade session. */
 bool gen3_session_start(Gen3Session* s); /* false if cable reversed or TIM2 busy */
 
 /* As gen3_session_start, but the club runs with trading on (GEN3_TEST_TRAINER_* identity, D7) and
  * the National Dex flag set before the driver starts. No offer yet: the app tick publishes one.
- * true if already running, in either mode (gen3_session_trading tells which). */
+ * Already running: true for a trade session, false (nothing changed) for a Link Test run, so a
+ * Link Test session never passes for a trade session. */
 bool gen3_session_start_trade(Gen3Session* s, bool national_dex);
 
 /* Started and not stopped since. false for a NULL session. */
