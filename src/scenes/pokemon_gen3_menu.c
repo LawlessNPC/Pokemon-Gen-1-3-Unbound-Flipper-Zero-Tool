@@ -79,6 +79,26 @@ void gen3_menu_show_data_missing(PokemonFap* pokemon_fap) {
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
 }
 
+static void gen3_notice_callback(DialogExResult result, void* context) {
+    PokemonFap* pokemon_fap = context;
+
+    if(result == DialogExResultCenter) {
+        view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_EVENT_NOTICE_OK);
+    }
+}
+
+void gen3_menu_show_notice(PokemonFap* pokemon_fap, const char* header, const char* text) {
+    DialogEx* dialog_ex = pokemon_fap->dialog_ex;
+
+    dialog_ex_reset(dialog_ex);
+    dialog_ex_set_header(dialog_ex, header, 64, 0, AlignCenter, AlignTop);
+    dialog_ex_set_text(dialog_ex, text, 64, 13, AlignCenter, AlignTop);
+    dialog_ex_set_center_button_text(dialog_ex, "OK");
+    dialog_ex_set_context(dialog_ex, pokemon_fap);
+    dialog_ex_set_result_callback(dialog_ex, gen3_notice_callback);
+    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
+}
+
 static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
     gen3_menu_dialog_shown = false;
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);

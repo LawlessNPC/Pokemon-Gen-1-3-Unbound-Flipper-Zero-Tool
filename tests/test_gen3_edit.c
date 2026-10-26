@@ -81,6 +81,12 @@ static bool pp_are(const Gen3Editor* ed, uint8_t a, uint8_t b, uint8_t c, uint8_
     return true;
 }
 
+/* The whole editor, the RNG included, field by field (no padding compared) */
+static bool editor_eq(const Gen3Editor* a, const Gen3Editor* b) {
+    return memcmp(a->pkm.raw, b->pkm.raw, GEN3_PARTY_SIZE) == 0 && a->preset == b->preset &&
+           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state;
+}
+
 TEST(test_edit_init_defaults) {
     Gen3Editor ed;
     gen3_edit_init(&ed, 7);
@@ -649,7 +655,7 @@ TEST(test_edit_ot_id_keeps_shiny) {
     gen3_edit_set_species(&ed, 280); /* Ralts: gendered, two abilities */
     Gen3Traits want = {10, Gen3GenderFemale, true, 1, 0};
     ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
-    gen3_edit_set_ot_id(&ed, 12345, 54321);
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 12345, 54321), Gen3OtIdOk);
     ASSERT_EQ(G(OtId), (54321u << 16) | 12345u);
     Gen3Traits got;
     gen3_traits_of(&ed.pkm, &got);
@@ -658,7 +664,7 @@ TEST(test_edit_ot_id_keeps_shiny) {
 
     want.shiny = false;
     ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
-    gen3_edit_set_ot_id(&ed, 22222, 0);
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 22222, 0), Gen3OtIdOk);
     ASSERT_EQ(G(OtId), 22222);
     gen3_traits_of(&ed.pkm, &got);
     ASSERT_TRUE(traits_match(&got, &want, false));
@@ -667,8 +673,63 @@ TEST(test_edit_ot_id_keeps_shiny) {
     /* No change in shininess: the PID stays. */
     uint32_t pid = G(Pid);
     ASSERT_TRUE(!gen3_is_shiny((7u << 16) | 7u, pid));
-    gen3_edit_set_ot_id(&ed, 7, 7);
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 7, 7), Gen3OtIdOk);
     ASSERT_EQ(G(Pid), pid);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* Unown HARDY/P has shiny PIDs for OT 22222/0 but none for 64893/0 (test_unown_shiny_possible).
+ * Asking for it there is refused at once and changes nothing. */
+TEST(test_edit_unown_shiny_impossible) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, GEN3_NATIONAL_UNOWN));
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 64893, 0), Gen3OtIdOk);
+    Gen3Traits want = {0 /* HARDY */, Gen3GenderNone, false, 0, 15 /* P */};
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    Gen3Editor before = ed;
+    want.shiny = true;
+    ASSERT_TRUE(!gen3_edit_set_traits(&ed, &want));
+    ASSERT_TRUE(editor_eq(&ed, &before)); /* the RNG too: no PID was tried */
+    ASSERT_TRUE(edit_consistent(&ed));
+    /* The same from a shiny Unown of another letter: the letter can't change */
+    want.unown_letter = 0;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    before = ed;
+    want.unown_letter = 15;
+    ASSERT_TRUE(!gen3_edit_set_traits(&ed, &want));
+    ASSERT_TRUE(editor_eq(&ed, &before));
+}
+
+/* A shiny HARDY/P Unown under 22222/0 gets OT TID 64893, where it can't be shiny: the OT ID is
+ * applied anyway, and the PID is kept: it isn't shiny for the new OT, and it keeps the nature
+ * and letter. */
+TEST(test_edit_ot_id_shiny_lost) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, GEN3_NATIONAL_UNOWN));
+    Gen3Traits want = {0, Gen3GenderNone, true, 0, 15};
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    Gen3Pkm before = ed.pkm;
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 64893, 0), Gen3OtIdShinyLost);
+    ASSERT_EQ(G(OtId), 64893);
+    Gen3Traits got;
+    gen3_traits_of(&ed.pkm, &got);
+    ASSERT_TRUE(!got.shiny);
+    ASSERT_EQ(got.nature, 0);
+    ASSERT_EQ(got.unown_letter, 15);
+    /* Only the OT ID changed (it is outside the checksummed bytes) */
+    for(int i = 0; i < GEN3_PARTY_SIZE; i++)
+        if(i < 4 || i > 7) ASSERT_EQ(ed.pkm.raw[i], before.raw[i]);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* Back to 22222/0, where that PID is shiny: not shiny now, so a new non-shiny PID */
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 22222, 0), Gen3OtIdOk);
+    gen3_traits_of(&ed.pkm, &got);
+    ASSERT_TRUE(!got.shiny);
+    ASSERT_EQ(got.nature, 0);
+    ASSERT_EQ(got.unown_letter, 15);
+    ASSERT_TRUE(G(Pid) != gen3_pkm_get(&before, Gen3FieldPid));
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
@@ -1004,11 +1065,6 @@ TEST(test_normalise_has_species) {
     ASSERT_MEM_EQ(p.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
 }
 
-static bool editor_eq(const Gen3Editor* a, const Gen3Editor* b) {
-    return memcmp(a->pkm.raw, b->pkm.raw, GEN3_PARTY_SIZE) == 0 && a->preset == b->preset &&
-           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state;
-}
-
 /* gen3_edit_load takes only what gen3_pkm_check accepts. Anything else leaves the editor as it
  * was. */
 TEST(test_edit_load_validates) {
@@ -1182,6 +1238,8 @@ int main(void) {
     RUN(test_edit_traits_preserve_other_bytes);
     RUN(test_edit_traits_same_keeps_pid);
     RUN(test_edit_ot_id_keeps_shiny);
+    RUN(test_edit_unown_shiny_impossible);
+    RUN(test_edit_ot_id_shiny_lost);
     RUN(test_edit_ball_item_pokerus);
     RUN(test_edit_load_keeps_bytes);
     RUN(test_edit_load_normalises);

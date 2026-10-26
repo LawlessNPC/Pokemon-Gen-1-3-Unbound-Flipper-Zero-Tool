@@ -166,6 +166,29 @@ uint32_t gen3_rng_next(Gen3Rng* rng) {
     return x;
 }
 
+bool gen3_unown_shiny_possible(uint32_t ot_id, uint8_t nature, uint8_t letter) {
+    if(nature >= GEN3_NATURE_COUNT || letter >= GEN3_UNOWN_LETTER_COUNT) return false;
+    uint32_t tid_sid = (ot_id & 0xFFFF) ^ (ot_id >> 16);
+    /* v is the letter's 8-bit value (gen3_unown_letter): bits 7-6 = PID bits 25-24 (high half
+     * bits 9-8), 5-4 = PID bits 17-16 (high bits 1-0), 3-2 = PID bits 9-8, 1-0 = PID bits 1-0. */
+    for(uint32_t v = letter; v < 256; v += GEN3_UNOWN_LETTER_COUNT) {
+        uint32_t lo98 = (v >> 2) & 3;
+        /* k < 8 doesn't reach high bits 9-8: they are the low half's xor tid ^ sid's */
+        if(((v >> 6) & 3) != (lo98 ^ ((tid_sid >> 8) & 3))) continue;
+        uint32_t hi10 = (v >> 4) & 3;
+        /* Each shiny PID with these letter bits: the low half's 12 other bits, and high bit 2
+         * (k bits 1-0 are whatever gives high bits 1-0 = hi10; k bit 2 is free) */
+        for(uint32_t f = 0; f < 4096; f++) {
+            uint32_t lo = (v & 3) | (f & 0x3F) << 2 | lo98 << 8 | (f >> 6) << 10;
+            uint32_t hi = ((tid_sid ^ lo) & ~3u) | hi10;
+            if(((hi << 16) | lo) % GEN3_NATURE_COUNT == nature ||
+               (((hi ^ 4) << 16) | lo) % GEN3_NATURE_COUNT == nature)
+                return true;
+        }
+    }
+    return false;
+}
+
 bool gen3_pid_find(
     Gen3Rng* rng,
     uint16_t national,
@@ -183,7 +206,11 @@ bool gen3_pid_find(
     if(want->nature >= GEN3_NATURE_COUNT) return false;
     if(two_abilities && want->ability_slot > 1) return false;
     if(unown && want->unown_letter >= GEN3_UNOWN_LETTER_COUNT) return false;
-    if(gender == Gen3GenderNone && !gen3_species_gender_fixed(national)) return false;
+    if(gender != Gen3GenderMale && gender != Gen3GenderFemale &&
+       !gen3_species_gender_fixed(national))
+        return false;
+    if(unown && want->shiny && !gen3_unown_shiny_possible(ot_id, want->nature, want->unown_letter))
+        return false;
     uint32_t tid_sid = (ot_id & 0xFFFF) ^ (ot_id >> 16);
 
     for(uint32_t i = 0; i < GEN3_PID_MAX_TRIES; i++) {

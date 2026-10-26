@@ -7,11 +7,14 @@
 #include <src/scenes/include/pokemon_scene.h>
 
 #include <src/gen3/gen3_edit.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* Level, OT TID and OT SID. The scene it is entered as is the scene state of Gen3Level. */
 
 static char gen3_level_buf[4]; /* "100" */
 static char gen3_id_buf[6]; /* "65535" */
+/* The new TID or SID was applied, but the Pokemon is no longer shiny (Gen3OtIdShinyLost) */
+static bool gen3_number_shiny_lost = false;
 
 static bool gen3_number_validator(const char* text, FuriString* error, void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
@@ -39,12 +42,14 @@ static bool gen3_number_validator(const char* text, FuriString* error, void* con
     }
 
     /* The other half of the OT ID is kept */
+    Gen3OtIdResult result = Gen3OtIdOk;
     if(level)
         gen3_edit_set_level(ed, (uint8_t)number);
     else if(state == PokemonSceneGen3Tid)
-        gen3_edit_set_ot_id(ed, (uint16_t)number, (uint16_t)(ot_id >> 16));
+        result = gen3_edit_set_ot_id(ed, (uint16_t)number, (uint16_t)(ot_id >> 16));
     else
-        gen3_edit_set_ot_id(ed, (uint16_t)ot_id, (uint16_t)number);
+        result = gen3_edit_set_ot_id(ed, (uint16_t)ot_id, (uint16_t)number);
+    gen3_number_shiny_lost = result == Gen3OtIdShinyLost;
 
     return true;
 }
@@ -89,6 +94,7 @@ void pokemon_scene_gen3_number_on_enter(void* context) {
         break;
     }
 
+    gen3_number_shiny_lost = false;
     text_input_reset(pokemon_fap->text_input);
     text_input_set_validator(pokemon_fap->text_input, gen3_number_validator, pokemon_fap);
     text_input_set_result_callback(
@@ -102,9 +108,16 @@ bool pokemon_scene_gen3_number_on_event(void* context, SceneManagerEvent event) 
     PokemonFap* pokemon_fap = context;
     bool consumed = false;
 
-    if(event.type == SceneManagerEventTypeCustom && event.event == (uint32_t)PokemonSceneBack) {
-        scene_manager_previous_scene(pokemon_fap->scene_manager);
-        consumed = true;
+    /* Back on the keyboard or the notice is left to the scene manager: the editor menu */
+    if(event.type == SceneManagerEventTypeCustom) {
+        if(event.event == (uint32_t)PokemonSceneBack && gen3_number_shiny_lost) {
+            gen3_number_shiny_lost = false;
+            gen3_menu_show_notice(pokemon_fap, "Shiny lost", "No shiny PID\nfor this OT ID.");
+            consumed = true;
+        } else if(event.event == (uint32_t)PokemonSceneBack || event.event == GEN3_EVENT_NOTICE_OK) {
+            scene_manager_previous_scene(pokemon_fap->scene_manager);
+            consumed = true;
+        }
     }
 
     return consumed;

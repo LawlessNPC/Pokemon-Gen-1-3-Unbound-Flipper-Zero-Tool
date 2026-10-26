@@ -9,6 +9,7 @@
 
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* IV/EV preset, nature, ability, shiny, gender, ball and Unown form: one list each. The scene it
  * is entered as is the scene state of Gen3Preset. */
@@ -32,6 +33,7 @@ static void gen3_pick_callback(void* context, uint32_t index) {
         scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Preset);
     Gen3Traits traits;
     bool trait = true;
+    uint32_t done = (uint32_t)PokemonSceneBack;
 
     /* A PID trait: the current traits with one of them changed. gen3_edit_set_traits keeps the
      * PID when that is the value it already has. */
@@ -64,9 +66,11 @@ static void gen3_pick_callback(void* context, uint32_t index) {
         trait = false;
         break;
     }
-    if(trait) gen3_edit_set_traits(ed, &traits);
+    /* Every want from these lists is in range, so it fails only for a shiny Unown whose nature
+     * and letter no shiny PID has for this OT. The Pokemon is unchanged then. */
+    if(trait && !gen3_edit_set_traits(ed, &traits)) done = GEN3_EVENT_NO_SHINY;
 
-    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, PokemonSceneBack);
+    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, done);
 }
 
 static void gen3_pick_add(PokemonFap* pokemon_fap, const char* label, uint32_t index) {
@@ -158,9 +162,16 @@ bool pokemon_scene_gen3_pick_on_event(void* context, SceneManagerEvent event) {
     PokemonFap* pokemon_fap = context;
     bool consumed = false;
 
-    if(event.type == SceneManagerEventTypeCustom && event.event == (uint32_t)PokemonSceneBack) {
-        scene_manager_previous_scene(pokemon_fap->scene_manager);
-        consumed = true;
+    /* Back on the list or the notice is left to the scene manager: the editor menu */
+    if(event.type == SceneManagerEventTypeCustom) {
+        if(event.event == (uint32_t)PokemonSceneBack || event.event == GEN3_EVENT_NOTICE_OK) {
+            scene_manager_previous_scene(pokemon_fap->scene_manager);
+            consumed = true;
+        } else if(event.event == GEN3_EVENT_NO_SHINY) {
+            gen3_menu_show_notice(
+                pokemon_fap, "No shiny PID", "for this letter,\nnature and OT ID.");
+            consumed = true;
+        }
     }
 
     return consumed;

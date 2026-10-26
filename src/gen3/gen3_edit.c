@@ -296,21 +296,23 @@ void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii) {
     ed_commit(ed);
 }
 
-void gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
+Gen3OtIdResult gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
+    Gen3OtIdResult result = Gen3OtIdOk;
     Gen3Traits old;
     gen3_traits_of(&ed->pkm, &old);
     uint32_t ot_id = ((uint32_t)sid << 16) | tid;
     gen3_pkm_set(&ed->pkm, Gen3FieldOtId, ot_id);
     /* Both paths keep the stored ability slot: set_traits asks for old.ability_slot (the stored
      * bit), and ed_commit leaves a two-ability species' bit alone. */
-    if(gen3_is_shiny(ot_id, gen3_pkm_get(&ed->pkm, Gen3FieldPid)) != old.shiny &&
-       gen3_edit_set_traits(ed, &old))
-        return;
-    /* Reached with flipped shininess only for an unknown species: for a real one, every want
-     * gen3_traits_of returns is in range (nature < 25, a 1-bit slot, letter < 28, the gender the
-     * ratio allows), and the rarest one (an Unown nature and letter, ~1 in 700 PIDs; shiny PIDs
-     * are built shiny) is found far inside GEN3_PID_MAX_TRIES, so set_traits doesn't fail. */
+    if(gen3_is_shiny(ot_id, gen3_pkm_get(&ed->pkm, Gen3FieldPid)) != old.shiny) {
+        if(gen3_edit_set_traits(ed, &old)) return result;
+        /* Every want gen3_traits_of returns for a real species is in range, and only a shiny
+         * Unown's nature and letter can have no PID (gen3_pid_find), so this is a shiny Pokemon
+         * whose PID isn't shiny for the new OT: keeping it keeps every other trait. */
+        result = Gen3OtIdShinyLost;
+    }
     ed_commit(ed);
+    return result;
 }
 
 void gen3_edit_set_item(Gen3Editor* ed, uint16_t item) {

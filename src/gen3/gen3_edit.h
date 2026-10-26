@@ -84,8 +84,17 @@ void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset);
  * the bulk file. */
 bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii);
 void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii);
-/* Keeps shininess (D6) by finding a new PID when needed, and the stored ability slot. */
-void gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid);
+
+typedef enum {
+    Gen3OtIdOk, /* applied, shininess kept */
+    /* Applied, but no shiny PID with the Pokemon's other traits exists for the new OT (only a
+     * shiny Unown's nature and letter can do this; gen3_unown_shiny_possible). The PID is kept:
+     * it isn't shiny for the new OT, so the Pokemon is no longer shiny. */
+    Gen3OtIdShinyLost,
+} Gen3OtIdResult;
+/* Keeps shininess (D6) by finding a new PID when needed, and the stored ability slot. The OT ID
+ * is always applied. */
+Gen3OtIdResult gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid);
 /* 0 (no item) or an id gen3_item_holdable accepts; anything else is refused (no-op). */
 void gen3_edit_set_item(Gen3Editor* ed, uint16_t item);
 /* A move: full base PP, that slot's PP Ups cleared. 0: clears the slot. Then the moves are packed
@@ -102,7 +111,8 @@ void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value);
 /* New PID with these traits (normalised as gen3_pid_find does); changes only the PID, the ability
  * bit, party stats and the checksum. If the normalised want already equals gen3_traits_of, true
  * and nothing changes (the PID and stored ability slot are kept). false (unchanged) only if
- * gen3_pid_find fails. */
+ * gen3_pid_find fails: an out-of-range want, or a shiny Unown nature and letter that no shiny PID
+ * has for this OT (gen3_unown_shiny_possible). Both are refused before any PID is tried. */
 bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want);
 /* 0 "Clean"; days != 0 "Infected"; else "Cured". */
 const char* gen3_pokerus_status(uint8_t value);

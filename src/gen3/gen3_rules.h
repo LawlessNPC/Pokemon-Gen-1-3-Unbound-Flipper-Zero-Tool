@@ -57,12 +57,24 @@ typedef struct {
 void gen3_rng_seed(Gen3Rng* rng, uint32_t seed); /* seed 0 -> 0x6D2B79F5 */
 uint32_t gen3_rng_next(Gen3Rng* rng);
 
+/* Whether a shiny PID for OT ot_id has this nature and Unown letter. A shiny PID's high half is
+ * tid ^ sid ^ (low half) ^ k with k < 8, so PID bits 24-25 (the letter's bits 6-7) are PID bits
+ * 8-9 (its bits 2-3) xor bits 8-9 of tid ^ sid. With the nature, some pairs then have no shiny
+ * PID at all: for OT 64893/0, 40 of the 700, HARDY/P among them; for 22222/0, none. Exact: it
+ * walks every shiny PID with matching letter bits (at most 4 x 8192), stopping at the first with
+ * the nature. false for nature >= 25 or letter >= 28. */
+bool gen3_unown_shiny_possible(uint32_t ot_id, uint8_t nature, uint8_t letter);
+
 #define GEN3_PID_MAX_TRIES 1000000u
 /* Finds a PID for species `national` (1..386) and OT ot_id whose traits equal want, after
  * normalising want: gender is ignored for ratios 0/254/255, ability_slot for one-ability
  * species, unown_letter unless Unown. false (and *pid untouched) for an unknown species, an
  * out-of-range want (nature >= 25; ability_slot > 1 on a two-ability species; unown_letter
- * >= 28 on Unown; gender None on a gendered species; no iteration), or after GEN3_PID_MAX_TRIES. */
+ * >= 28 on Unown; gender not Male or Female on a gendered species), a shiny Unown want that
+ * gen3_unown_shiny_possible rules out (these fail at once, with no iteration), or after
+ * GEN3_PID_MAX_TRIES. Every other want has at least 100 of the 2^19 shiny PIDs, or far more
+ * non-shiny ones, for any OT (checked exhaustively when this was written), so the tries never
+ * run out in practice. */
 bool gen3_pid_find(
     Gen3Rng* rng,
     uint16_t national,

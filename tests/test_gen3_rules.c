@@ -230,8 +230,65 @@ TEST(test_pid_find_rejects_bad_want) {
     Gen3Traits none_on_gendered = {0, Gen3GenderNone, false, 0, 0};
     ASSERT_TRUE(!gen3_pid_find(&rng, 1, 1, &none_on_gendered, &pid));
     ASSERT_TRUE(!gen3_pid_find(&rng, 0, 1, &none_on_gendered, &pid));
+    Gen3Traits bad_gender = {0, (Gen3Gender)(Gen3GenderNone + 1), false, 0, 0};
+    ASSERT_TRUE(!gen3_pid_find(&rng, 1, 1, &bad_gender, &pid));
     ASSERT_EQ(pid, 0xDEADBEEF);
     ASSERT_EQ(rng.state, state); /* failed fast, no tries */
+    /* On a fixed ratio the gender is ignored, whatever its value */
+    check_find(&rng, 29, 1, &bad_gender);
+}
+
+/* Every (nature, letter) of the shiny PIDs for ot_id, by brute force over all 2^19 of them */
+static void shiny_unown_table(uint32_t ot_id, uint8_t seen[25][28]) {
+    uint32_t tid_sid = (ot_id & 0xFFFF) ^ (ot_id >> 16);
+    memset(seen, 0, 25 * 28);
+    for(uint32_t lo = 0; lo < 0x10000; lo++)
+        for(uint32_t k = 0; k < 8; k++) {
+            uint32_t pid = ((tid_sid ^ lo ^ k) << 16) | lo;
+            seen[pid % 25][gen3_unown_letter(pid)] = 1;
+        }
+}
+
+/* A shiny PID's high half is tid ^ sid ^ lo ^ k with k < 8, which ties the letter's top bits
+ * (PID bits 24-25) to its bits 2-3 (PID bits 8-9); with the nature, some (nature, letter) pairs
+ * have no shiny PID for an OT. gen3_unown_shiny_possible must say exactly which. */
+TEST(test_unown_shiny_possible) {
+    /* the last is TID 0, SID 64893 */
+    static const uint32_t ot_ids[] = {22222, 64893, 0x1234ABCDu, 0xFFFF0000u, 64893u << 16};
+    static uint8_t seen[25][28];
+    int missing[sizeof(ot_ids) / sizeof(ot_ids[0])];
+    for(size_t i = 0; i < sizeof(ot_ids) / sizeof(ot_ids[0]); i++) {
+        shiny_unown_table(ot_ids[i], seen);
+        missing[i] = 0;
+        for(uint8_t n = 0; n < 25; n++)
+            for(uint8_t l = 0; l < 28; l++) {
+                ASSERT_EQ(gen3_unown_shiny_possible(ot_ids[i], n, l), seen[n][l]);
+                if(!seen[n][l]) missing[i]++;
+            }
+    }
+    ASSERT_EQ(missing[0], 0); /* 22222/0: every pair */
+    ASSERT_EQ(missing[1], 40); /* 64893/0: HARDY/P among them */
+    ASSERT_TRUE(gen3_unown_shiny_possible(22222, 0, 15));
+    ASSERT_TRUE(!gen3_unown_shiny_possible(64893, 0, 15));
+    ASSERT_EQ(missing[4], missing[1]); /* only tid ^ sid matters */
+    ASSERT_TRUE(!gen3_unown_shiny_possible(22222, 25, 0));
+    ASSERT_TRUE(!gen3_unown_shiny_possible(22222, 0, 28));
+}
+
+/* No shiny PID: refused at once, without spending GEN3_PID_MAX_TRIES. The same want for another
+ * OT, or not shiny, is found. */
+TEST(test_pid_find_unown_shiny_impossible) {
+    Gen3Rng rng;
+    gen3_rng_seed(&rng, 5);
+    uint32_t state = rng.state;
+    uint32_t pid = 0xDEADBEEF;
+    Gen3Traits want = {0 /* HARDY */, Gen3GenderNone, true, 0, 15 /* P */};
+    ASSERT_TRUE(!gen3_pid_find(&rng, GEN3_NATIONAL_UNOWN, 64893, &want, &pid));
+    ASSERT_EQ(pid, 0xDEADBEEF);
+    ASSERT_EQ(rng.state, state);
+    check_find(&rng, GEN3_NATIONAL_UNOWN, 22222, &want);
+    want.shiny = false;
+    check_find(&rng, GEN3_NATIONAL_UNOWN, 64893, &want);
 }
 
 TEST(test_pid_find_deterministic) {
@@ -300,6 +357,8 @@ int main(void) {
     RUN(test_pid_find_ignores_letter_off_unown);
     RUN(test_pid_find_normalises_out_of_range);
     RUN(test_pid_find_rejects_bad_want);
+    RUN(test_unown_shiny_possible);
+    RUN(test_pid_find_unown_shiny_impossible);
     RUN(test_pid_find_deterministic);
     RUN(test_default_moves);
     RUN(test_default_moves_no_data);
