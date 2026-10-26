@@ -56,8 +56,8 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 2. **Overwrite.** Save again with the same name → `Overwrite?`. `Cancel` returns to the name input and keeps the old file. `Overwrite` → `Saved`.
 3. **Load.** Change the level, then `Load .pk3` that file → `Loaded` / `<NICK>` / `<SPECIES> Lv. <n>`, and the Edit menu shows the saved level, nature, moves and OT. Back in the file browser returns to the Gen III menu.
 4. **Not a .pk3.** Copy any non-`.pk3` file to `gen3/` renamed to `x.pk3` → `Load failed` / `Not a .pk3 (size)`.
-5. **PKHeX (optional).** Open the saved file → no checksum warning, and species, level, nature, moves and OT match. Export a Gen III Pokemon from PKHeX as `.pk3` → it loads on the Flipper. If the file had a held Mail item, a duplicate move, a move gap, or an out-of-range level, the result also says `Fixed: mail moves level ability` (only the parts that changed).
-6. **No SD card.** Remove the SD card → `Load .pk3` shows `No SD card`.
+5. **PKHeX (optional).** Open the saved file → no checksum warning, and species, level, nature, moves and OT match. Export a Gen III Pokemon from PKHeX as `.pk3` → it loads on the Flipper. If the file had a held Mail item, a duplicate move, a move gap, an out-of-range level, or a wrong ability bit on a one-ability species, the result also says `Fixed: mail moves level ability` (only the parts that changed).
+6. **No SD card.** After opening `Edit Pokemon` in this session (so the Gen III data is ready), remove the SD card → `Load .pk3` shows `No SD card`.
 7. **Data missing.** With `gen3_bulk.bin` renamed (see E), `Load .pk3` and `Save .pk3` show `Data missing`.
 
 ## E. Data file

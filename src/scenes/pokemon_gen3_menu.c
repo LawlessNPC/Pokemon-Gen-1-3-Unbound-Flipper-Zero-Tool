@@ -86,7 +86,7 @@ static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
 
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
  * file, so it is created only once the file reads: false (no editor) if it can't be. */
-bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
+static bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_editor && gen3_bulk_ready()) {
         pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
         if(!gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get())) {

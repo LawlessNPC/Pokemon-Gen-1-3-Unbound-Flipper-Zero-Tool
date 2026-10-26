@@ -38,7 +38,13 @@ bool gen3_pk3_save_file(Storage* storage, const char* path, const Gen3Pkm* p) {
 
     gen3_pk3_export(p, buf);
     if(storage_file_open(file, path, FSAM_WRITE, FSOM_CREATE_ALWAYS)) {
-        ret = storage_file_write(file, buf, sizeof(buf)) == sizeof(buf);
+        size_t written = storage_file_write(file, buf, sizeof(buf));
+        /* Success only once the data is on the card */
+        ret = (written == sizeof(buf)) && storage_file_close(file);
+        if(!ret) {
+            storage_file_close(file);
+            storage_simply_remove(storage, path); /* no partial file */
+        }
     }
 
     storage_file_free(file);

@@ -12,10 +12,6 @@
  * dialog shows the menu. Call from a scene's on_event, not from a view callback. */
 void gen3_menu_show_data_missing(PokemonFap* pokemon_fap);
 
-/* Creates the editor on first use. false if the bulk data file can't be read, when there is no
- * editor: the caller shows gen3_menu_show_data_missing. */
-bool gen3_menu_editor_ready(PokemonFap* pokemon_fap);
-
 /* Header (up to 24 characters) and text (up to 96) of the Gen3Result scene, copied; set them
  * before scene_manager_next_scene(..., PokemonSceneGen3Result). */
 void pokemon_scene_gen3_result_set(const char* header, const char* text);

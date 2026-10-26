@@ -62,6 +62,48 @@ static void gen3_load_changes(const Gen3ImportInfo* info, char* out, size_t out_
         n->ability_fixed ? " ability" : "");
 }
 
+/* The text is formatted straight into the result scene's buffer. */
+static void gen3_load_show_loaded(PokemonFap* pokemon_fap, const Gen3ImportInfo* info) {
+    const Gen3Pkm* p = &pokemon_fap->gen3_editor->pkm;
+    char nick[GEN3_NICKNAME_LEN + 1];
+    char species[GEN3_SPECIES_NAME_LEN + 1];
+    char changes[40];
+
+    gen3_pkm_nickname(p, nick, sizeof(nick));
+    gen3_species_name_get(gen3_edit_national(pokemon_fap->gen3_editor), species);
+    gen3_load_changes(info, changes, sizeof(changes));
+    snprintf(gen3_result_header, sizeof(gen3_result_header), "Loaded");
+    snprintf(
+        gen3_result_text,
+        sizeof(gen3_result_text),
+        "%s\n%s Lv. %u%s",
+        nick,
+        species,
+        (unsigned)gen3_pkm_get(p, Gen3FieldLevel),
+        changes);
+    scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Result);
+}
+
+/* Own function, so the Pokemon and the text buffers aren't in load_on_enter's frame, which is
+ * held while the file browser runs. */
+__attribute__((noinline)) static void
+    gen3_load_picked(PokemonFap* pokemon_fap, Storage* storage, const char* path) {
+    Gen3Pkm pkm;
+    Gen3ImportInfo info;
+    Gen3Check check = gen3_pk3_load_file(storage, path, &pkm, &info);
+
+    if(check == Gen3CheckOk && !gen3_edit_load(pokemon_fap->gen3_editor, &pkm)) {
+        /* The import read the bulk file a moment ago; it can't any more */
+        check = Gen3CheckNoData;
+    }
+
+    if(check == Gen3CheckOk) {
+        gen3_load_show_loaded(pokemon_fap, &info);
+    } else {
+        gen3_pk3_show_result(pokemon_fap, "Load failed", gen3_check_text(check));
+    }
+}
+
 void pokemon_scene_gen3_load_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
     Storage* storage = furi_record_open(RECORD_STORAGE);
@@ -81,38 +123,7 @@ void pokemon_scene_gen3_load_on_enter(void* context) {
         if(!picked) {
             scene_manager_previous_scene(pokemon_fap->scene_manager);
         } else {
-            Gen3Pkm pkm;
-            Gen3ImportInfo info;
-            Gen3Check check =
-                gen3_pk3_load_file(storage, furi_string_get_cstr(path), &pkm, &info);
-
-            if(check == Gen3CheckOk && !gen3_edit_load(pokemon_fap->gen3_editor, &pkm)) {
-                /* The import read the bulk file a moment ago; it can't any more */
-                check = Gen3CheckNoData;
-            }
-
-            if(check == Gen3CheckOk) {
-                const Gen3Pkm* p = &pokemon_fap->gen3_editor->pkm;
-                char nick[GEN3_NICKNAME_LEN + 1];
-                char species[GEN3_SPECIES_NAME_LEN + 1];
-                char changes[40];
-                char text[GEN3_RESULT_TEXT_MAX + 1];
-
-                gen3_pkm_nickname(p, nick, sizeof(nick));
-                gen3_species_name_get(gen3_edit_national(pokemon_fap->gen3_editor), species);
-                gen3_load_changes(&info, changes, sizeof(changes));
-                snprintf(
-                    text,
-                    sizeof(text),
-                    "%s\n%s Lv. %u%s",
-                    nick,
-                    species,
-                    (unsigned)gen3_pkm_get(p, Gen3FieldLevel),
-                    changes);
-                gen3_pk3_show_result(pokemon_fap, "Loaded", text);
-            } else {
-                gen3_pk3_show_result(pokemon_fap, "Load failed", gen3_check_text(check));
-            }
+            gen3_load_picked(pokemon_fap, storage, furi_string_get_cstr(path));
         }
     }
 
