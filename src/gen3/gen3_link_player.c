@@ -1,4 +1,4 @@
-#include "gen3_link_player.h"
+#include <src/gen3/gen3_link_player.h>
 
 #include <string.h>
 

@@ -24,7 +24,7 @@ void pokemon_scene_gen3_link_exit_on_enter(void* context) {
     dialog_ex_set_header(dialog_ex, "Stop link?", 64, 0, AlignCenter, AlignTop);
     dialog_ex_set_text(
         dialog_ex,
-        "Your GBA will show a link\nerror and need a restart.\nIt saved before linking.",
+        "Your GBA may show a link\nerror and need a restart.\nIt saved before linking.",
         64,
         12,
         AlignCenter,
@@ -52,7 +52,8 @@ bool pokemon_scene_gen3_link_exit_on_event(void* context, SceneManagerEvent even
             furi_check(consumed);
         }
     } else if(event.type == SceneManagerEventTypeBack) {
-        consumed = true;
+        /* Back: same as Stay */
+        consumed = scene_manager_previous_scene(pokemon_fap->scene_manager);
     }
 
     return consumed;
