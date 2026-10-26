@@ -547,9 +547,12 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     if(rx) {
         uint16_t cmd[GEN3_CMD_LEN];
         const Gen3LinkEvent event = gen3_link_rx(&club->link, rx, cmd);
-        /* The last burst was a simultaneous exchange: unless the GBA has gone, it got every word
-         * we sent so far, the sync-2 answer too once nothing is left queued */
-        if(event != Gen3LinkEventDisconnected && gen3_link_queued(&club->link) == 0) {
+        /* Confirms the sync-2 answer once it has left (nothing queued) and a whole clean burst
+         * came back: every transfer answered (pokeruby's DoRecv queues a command only after all
+         * 8) and no checksum error (the GBA's CheckErrorStatus would link-error before its
+         * commit) */
+        if((event == Gen3LinkEventNone || event == Gen3LinkEventCommand) &&
+           rx->timeout_mask == 0 && gen3_link_queued(&club->link) == 0) {
             club->sync2_unconfirmed = false;
         }
         switch(event) {

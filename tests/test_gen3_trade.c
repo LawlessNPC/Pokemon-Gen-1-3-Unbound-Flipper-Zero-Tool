@@ -1420,6 +1420,100 @@ TEST(test_trade_sync2_answer_delivered) {
     ASSERT_MEM_EQ(got, x, GEN3_PARTY_SIZE);
 }
 
+/* From Browsing: trade until the frame in which the club queues its sync-2 answer. In that
+ * frame's burst the GBA answers transfers 0..answered-1 only and is gone: the club reads the rest
+ * as timeouts. Those words come from a copy of the fake that took the whole burst; the fake
+ * itself is switched off before the burst, since Ruby queues a command only after all 8 command
+ * transfers (DoRecv). With answered 9 the fake takes the whole burst and is switched off after
+ * it. Then 30 frames. */
+static bool cut_sync2_answer_burst(Bench* b, uint8_t answered) {
+    static FakeRuby copy;
+    if(!run_until_trade_link(b, 600)) return false;
+    for(uint32_t i = 0; i < 1000; i++) {
+        MlinkTx tx;
+        gen3_club_frame(&b->club, &b->rx, &tx);
+        count_sent(b, &tx);
+        if(club_status(b).save_syncs != 2) {
+            fake_ruby_frame(&b->ruby, &tx, &b->rx);
+            bench_record(b, &tx);
+            if(fake_ruby_error(&b->ruby) != NULL) return false;
+            continue;
+        }
+        if(answered >= MLINK_BURST_LEN) {
+            fake_ruby_frame(&b->ruby, &tx, &b->rx);
+        } else {
+            copy = b->ruby;
+            fake_ruby_frame(&copy, &tx, &b->rx);
+            for(uint8_t t = answered; t < MLINK_BURST_LEN; t++) {
+                b->rx.word[t] = MLINK_NO_DATA;
+                b->rx.timeout_mask |= (uint16_t)(1u << t);
+            }
+        }
+        fake_ruby_power_off(&b->ruby);
+        bench_record(b, &tx);
+        run(b, 30);
+        return true;
+    }
+    return false;
+}
+
+TEST(test_trade_sync2_answer_partial_burst) {
+    /* Fix round 2: only a whole burst after the sync-2 answer confirms it. Cut after 1..8 of its
+     * 9 transfers, the GBA never took the answer: RolledBack. All 9: it committed, Assumed */
+    for(uint8_t answered = 1; answered <= MLINK_BURST_LEN; answered++) {
+        Bench b;
+        const bool whole = answered == MLINK_BURST_LEN;
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        ASSERT_TRUE(cut_sync2_answer_burst(&b, answered));
+        ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), whole ? 1 : 0);
+        Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+        ASSERT_EQ(st.last_result, whole ? Gen3TradeResultAssumed : Gen3TradeResultRolledBack);
+        ASSERT_EQ(st.trades_done, whole ? 1 : 0);
+        ASSERT_TRUE(!st.trade_pending);
+    }
+}
+
+TEST(test_trade_sync2_answer_checksum_error) {
+    /* Fix round 2: a burst that fails the checksum check doesn't confirm the sync-2 answer. One
+     * idle word of the GBA's sync-2 burst is glitched as the Flipper reads it, so the two sides'
+     * checksums of it differ: the GBA's check fails in the frame it takes our answer, and its
+     * CheckErrorStatus link-errors before callback2 can commit; the club reads that burst as a
+     * ChecksumError and keeps the answer unconfirmed */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(run_until_trade_link(&b, 600));
+    bool glitched = false;
+    for(int i = 0; i < 1000 && !glitched; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        if(b.rx.word[1] == 0x2FFE && club_status(&b).save_syncs == 1) {
+            b.rx.word[8] ^= 1; /* the GBA's sync-2 2FFE is in; its last word is idle (0) */
+            glitched = true;
+        }
+    }
+    ASSERT_TRUE(glitched);
+    const uint32_t errors = club_status(&b).link.checksum_errors;
+    step(&b); /* the club answers; the GBA takes it and link-errors */
+    ASSERT_EQ(club_status(&b).save_syncs, 2);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "checksum");
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 0);
+    ASSERT_TRUE(fake_ruby_save_corrupt(&b.ruby));
+    step(&b); /* the burst that carried the answer: complete, but a checksum error */
+    ASSERT_EQ(club_status(&b).link.checksum_errors, errors + 1);
+    ASSERT_TRUE(b.club.sync2_unconfirmed);
+    fake_ruby_power_off(&b.ruby);
+    run(&b, 30);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(st.last_result, Gen3TradeResultRolledBack);
+    ASSERT_EQ(st.trades_done, 0);
+    ASSERT_TRUE(!st.trade_pending);
+}
+
 TEST(test_trade_early_2ffe_trips_fake) {
     /* §B5.3: a Flipper 2FFE that answers nothing, from the start of the GBA's save until its own
      * sync-1 2FFE is on the wire (Link standby set, or its 2FFE built but not sent yet), trips
@@ -1665,6 +1759,8 @@ int main(void) {
     RUN(test_trade_pending_dropped_by_relink);
     RUN(test_trade_sync2_answer_lost);
     RUN(test_trade_sync2_answer_delivered);
+    RUN(test_trade_sync2_answer_partial_burst);
+    RUN(test_trade_sync2_answer_checksum_error);
     RUN(test_trade_early_2ffe_trips_fake);
     RUN(test_trade_offer_without_species_bit);
     RUN(test_trade_second_trade);

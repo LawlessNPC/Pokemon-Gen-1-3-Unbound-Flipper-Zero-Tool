@@ -161,7 +161,8 @@ struct Gen3Club {
     bool trade_pending;
     uint8_t pending_mon[GEN3_PARTY_SIZE]; /* the GBA mon the pending trade takes, game form */
     uint8_t save_syncs; /* GBA 2FFEs answered in this link save; zeroed at CCDD */
-    /* The sync-2 answer is queued, and no burst since has shown the GBA there to take it */
+    /* The sync-2 answer is queued, and no whole clean burst (all 9 transfers answered, no
+     * checksum error) has come back since it left */
     bool sync2_unconfirmed;
     bool save_window;
     Gen3TradeResult last_result;
