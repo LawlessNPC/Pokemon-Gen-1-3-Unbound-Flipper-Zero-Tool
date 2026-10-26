@@ -96,9 +96,11 @@ void gen3_trade_sync_offer_taken(Gen3TradeSync* sync);
 bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count);
 
 /* R6 (as refined by the T6 review): the link may stop now. Not in the save window (D10), nor
- * while a trade is pending with the GBA linked (phase not Waiting). A pending trade whose 0x1144
- * relink hasn't come may stop: the GBA writes nothing before sync 1 (D1). left and leaving aren't
- * read (left is no "trade resolved"). A Link Test session sets neither flag. */
+ * while a trade is pending with the GBA linked. "Linked" here is a phase other than Waiting, or
+ * Waiting with relinking (a relink's gap, T13 fix round 2). A pending trade whose 0x1144 relink
+ * never came (the club's relink wait ran out) may stop: the GBA writes nothing before sync 1
+ * (D1). left and leaving aren't read (left is no "trade resolved"). A Link Test session sets
+ * neither flag. */
 bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
 
 /* What ending a trade session takes now. Decided again from a fresh status on every button that
@@ -106,7 +108,7 @@ bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
 typedef enum {
     Gen3TradeEndStop, /* stop and free it now: R6 allows it, and nothing is left to pick up */
     Gen3TradeEndSaving, /* the GBA is saving (D10): "The GBA is saving", OK only */
-    Gen3TradeEndAsk, /* a GBA is linked: "End trade?"; End asks it to walk out (D9) */
+    Gen3TradeEndAsk, /* a GBA is linked (or relinking): "End trade?"; End asks it to walk out */
     Gen3TradeEndPickup, /* it may stop, but a NoData pickup waits: Retry or End anyway */
     Gen3TradeEndMenu, /* it has stopped (the GBA left): back to the menu, which frees it */
 } Gen3TradeEndAction;

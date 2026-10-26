@@ -6,6 +6,7 @@
 #include <stdbool.h>
 #include <src/gen3/gen3_club.h>
 #include <src/gen3/gen3_text.h>
+#include <src/gen3/gen3_trade_sync.h>
 
 /* The Flipper (club) and fake Ruby through a Cable Club trade (docs/gen3/link-protocol-trade.md,
  * Part B). Unless a test says otherwise it starts with bench_init_trade: the fake is RUBY
@@ -2746,6 +2747,57 @@ TEST(test_leave_gba_gone) {
     }
 }
 
+TEST(test_status_relinking) {
+    /* T13 fix round 2: Waiting in a relink's gap is no "no GBA linked". status.relinking shows
+     * it from the club's 5FFF answer until the GBA connects again, or until the relink wait runs
+     * out (the GBA gone), and the end decisions read it: End trade asks, "Stop link?" is refused
+     * while the trade is pending, and both stop once the wait has run out (D1). */
+    {
+        /* The 0x1144 gap after CCDD, the relink made */
+        Bench b;
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        ASSERT_TRUE(!club_status(&b).relinking);
+        fake_ruby_offer(&b.ruby, 2);
+        ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+        fake_ruby_answer(&b.ruby, true);
+        ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 120)); /* the menu link closed */
+        Gen3ClubStatus st = club_status(&b);
+        ASSERT_TRUE(st.trade_pending);
+        ASSERT_TRUE(st.relinking);
+        ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndAsk);
+        ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+        ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseTrade, 200));
+        ASSERT_TRUE(!club_status(&b).relinking);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+    {
+        /* The same gap with the GBA switched off in it: relinking until the wait runs out */
+        Bench b;
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        fake_ruby_offer(&b.ruby, 2);
+        ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+        fake_ruby_answer(&b.ruby, true);
+        ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 120)); /* the Disconnected frame */
+        fake_ruby_power_off(&b.ruby);
+        run(&b, GEN3_CLUB_RELINK_WAIT_FRAMES - 2);
+        Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+        ASSERT_TRUE(st.trade_pending);
+        ASSERT_TRUE(st.relinking);
+        ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndAsk);
+        ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndAsk);
+        step(&b); /* GEN3_CLUB_RELINK_WAIT_FRAMES since the Disconnected */
+        st = club_status(&b);
+        ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+        ASSERT_TRUE(!st.relinking);
+        ASSERT_TRUE(gen3_trade_stop_allowed(&st));
+        ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndStop);
+        ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndStop);
+    }
+}
+
 TEST(test_leave_and_gba_exit) {
     /* D9: the GBA's own 0017 and the request make one 0017 between them */
     {
@@ -2991,6 +3043,7 @@ int main(void) {
     RUN(test_leave_when_waiting);
     RUN(test_leave_in_relink_gap);
     RUN(test_leave_gba_gone);
+    RUN(test_status_relinking);
     RUN(test_leave_and_gba_exit);
     RUN(test_leave_queue_busy);
     RUN(test_leave_during_linkup);

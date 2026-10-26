@@ -137,6 +137,11 @@ typedef struct {
     bool editing; /* gen3_club_set_editing (O1) */
     bool leaving; /* requested, not done yet */
     bool left; /* the GBA walked out and closed the link after a request, or no GBA was linked */
+    /* The GBA closed its link to open the next one at once (its 5FFF answered in Room for the
+     * trade menu, in Menu, or in Save): from that answer until it connects again, or until
+     * GEN3_CLUB_RELINK_WAIT_FRAMES of Waiting take it as gone. Waiting with relinking is no
+     * "no GBA linked" (T13 fix round 2). */
+    bool relinking;
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;

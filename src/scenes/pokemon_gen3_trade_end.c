@@ -15,8 +15,10 @@
  * from a confirmed "Stop link?".
  * - Saving: the GBA is saving; OK returns.
  * - Ask: Stay returns; End ends the trade.
- * - Pickup (T12 review (f)): a received Pokemon waits for the SD card. Retry tries the card again
- *   and, once it is picked up, goes on with the end; End anyway ends it, losing that Pokemon.
+ * - Pickup (T12 review (f)): a received Pokemon waits for the SD card. Retry (right) tries the
+ *   card again and, once it is picked up, goes on with the end; End anyway (left) ends it, losing
+ *   that Pokemon. Retry sits where End and "Stop link?"'s Stop are (fix round 2), so pressing the
+ *   right button again never loses the Pokemon.
  * Back is Stay (or OK), with the session still running.
  *
  * The session runs on behind the dialog, and the tick polls here (the dialog doesn't edit), so
@@ -61,8 +63,8 @@ void pokemon_scene_gen3_trade_end_on_enter(void* context) {
             12,
             AlignCenter,
             AlignTop);
-        dialog_ex_set_left_button_text(dialog_ex, "Retry");
-        dialog_ex_set_right_button_text(dialog_ex, "End anyway");
+        dialog_ex_set_left_button_text(dialog_ex, "End anyway");
+        dialog_ex_set_right_button_text(dialog_ex, "Retry");
     } else {
         dialog_ex_set_header(dialog_ex, "End trade?", 64, 0, AlignCenter, AlignTop);
         dialog_ex_set_text(
@@ -142,9 +144,12 @@ bool pokemon_scene_gen3_trade_end_on_event(void* context, SceneManagerEvent even
     if(event.type == SceneManagerEventTypeBack) return scene_manager_previous_scene(scene_manager);
     if(event.type != SceneManagerEventTypeCustom) return false;
 
-    if(event.event == DialogExResultLeft && shown == Gen3TradeEndPickup) {
+    const bool pickup = shown == Gen3TradeEndPickup;
+    if(pickup && event.event == DialogExResultRight) {
         /* Retry: open the bulk file again now; the decision polls once */
         if(!gen3_bulk_ready()) gen3_bulk_furi_open();
+    } else if(pickup && event.event == DialogExResultLeft) {
+        /* End anyway */
     } else if(event.event == DialogExResultLeft || event.event == DialogExResultCenter) {
         /* Stay, or OK on "The GBA is saving" */
         return scene_manager_previous_scene(scene_manager);
@@ -152,12 +157,11 @@ bool pokemon_scene_gen3_trade_end_on_event(void* context, SceneManagerEvent even
         return false;
     }
 
-    /* Retry, End or End anyway */
+    /* Retry, End anyway or End */
     if(!pokemon_fap->gen3_session) {
         scene_manager_search_and_switch_to_previous_scene(scene_manager, PokemonSceneGen3Menu);
     } else {
-        gen3_trade_end_go_on(
-            pokemon_fap, event.event == DialogExResultRight && shown == Gen3TradeEndPickup);
+        gen3_trade_end_go_on(pokemon_fap, pickup && event.event == DialogExResultLeft);
     }
     return true;
 }

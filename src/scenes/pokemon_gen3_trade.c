@@ -220,8 +220,10 @@ void pokemon_scene_gen3_trade_on_enter(void* context) {
     /* Fix round 1: never switch to a trade view that is gone (the menu freed it with its
      * session); the menu instead */
     if(!pokemon_fap->gen3_trade_view || !pokemon_fap->gen3_session) {
-        scene_manager_search_and_switch_to_previous_scene(
+        const bool found = scene_manager_search_and_switch_to_previous_scene(
             pokemon_fap->scene_manager, PokemonSceneGen3Menu);
+        /* NOTE: Gen3Trade is only ever opened over the Gen III menu */
+        furi_check(found);
         return;
     }
 

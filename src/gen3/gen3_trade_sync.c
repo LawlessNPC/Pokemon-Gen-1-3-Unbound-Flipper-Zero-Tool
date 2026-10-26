@@ -149,16 +149,22 @@ bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count)
     return received_count == sync->trades_seen && sync->pickup_fail != Gen3PickupNoData;
 }
 
+/* A GBA is linked, or in a relink's gap (fix round 2): stopping now would drop it mid-relink,
+ * a link error on the GBA. Waiting without relinking is "no GBA linked" (D1). */
+static bool gba_linked(const Gen3ClubStatus* st) {
+    return st->phase != Gen3ClubPhaseWaiting || st->relinking;
+}
+
 bool gen3_trade_stop_allowed(const Gen3ClubStatus* st) {
     if(st->save_window) return false;
-    return !(st->trade_pending && st->phase != Gen3ClubPhaseWaiting);
+    return !(st->trade_pending && gba_linked(st));
 }
 
 Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool running, bool settled) {
     if(!running) return Gen3TradeEndMenu;
     if(st->save_window) return Gen3TradeEndSaving;
-    if(st->phase != Gen3ClubPhaseWaiting) return Gen3TradeEndAsk;
-    /* No GBA linked, so R6 allows the stop (a pending trade here hasn't reached sync 1) */
+    if(gba_linked(st)) return Gen3TradeEndAsk;
+    /* No GBA linked, so R6 allows the stop (a pending trade here lost its relink before sync 1) */
     return settled ? Gen3TradeEndStop : Gen3TradeEndPickup;
 }
 

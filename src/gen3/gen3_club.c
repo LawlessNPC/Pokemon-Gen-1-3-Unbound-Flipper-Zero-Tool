@@ -777,6 +777,7 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->editing = club->editing;
     out->leaving = club->leaving;
     out->left = club->left;
+    out->relinking = club->relink_due;
 }
 
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {

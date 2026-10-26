@@ -790,19 +790,26 @@ TEST(test_sync_settled) {
 }
 
 /* The sweeps below cover every phase with every combination of the flags the T13 decisions read:
- * END_BITS bits 0-3 set these four, and bit 4 is the settled argument. */
-#define END_BITS 32u
+ * END_BITS bits 0-3 and 5 set these five, and bit 4 is the settled argument. */
+#define END_BITS 64u
 static void end_status(Gen3ClubStatus* st, int phase, unsigned bits) {
     status_reset(st, (Gen3ClubPhase)phase);
     st->save_window = bits & 1;
     st->trade_pending = (bits >> 1) & 1;
     st->leaving = (bits >> 2) & 1;
     st->left = (bits >> 3) & 1;
+    st->relinking = (bits >> 5) & 1;
 }
 
-/* R6, as refined by the T6 review: "Stop link?" may stop the link outside the save window, and
- * outside a pending trade with the GBA linked. A pending trade whose 0x1144 relink hasn't come
- * (Waiting) may stop (D1). left and leaving don't matter: left is no "trade resolved". */
+/* A GBA is linked, or in a relink's gap: Waiting is "no GBA linked" only without relinking */
+static bool end_linked(const Gen3ClubStatus* st) {
+    return st->phase != Gen3ClubPhaseWaiting || st->relinking;
+}
+
+/* R6, as refined by the T6 review and fix round 2: "Stop link?" may stop the link outside the
+ * save window, and outside a pending trade with the GBA linked, a relink's gap included. Once
+ * the relink has timed out (Waiting, not relinking), a pending trade may stop (D1): the GBA
+ * wrote nothing before sync 1. left and leaving don't matter: left is no "trade resolved". */
 TEST(test_trade_stop_allowed) {
     Gen3ClubStatus st;
 
@@ -816,7 +823,14 @@ TEST(test_trade_stop_allowed) {
     ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
     st.left = true; /* the 0x1144 timeout can set left with the trade still pending */
     ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+    /* Fix round 2: the 0x1144 gap (Waiting, the relink due) is still linked */
+    st.left = false;
     st.phase = Gen3ClubPhaseWaiting;
+    st.relinking = true;
+    ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+    /* The relink timed out: the GBA is gone, and may be stopped again */
+    st.relinking = false;
+    st.left = true;
     ASSERT_TRUE(gen3_trade_stop_allowed(&st));
 
     /* Independent invariants over every phase and flag (fix round 1: not the formula again) */
@@ -824,7 +838,7 @@ TEST(test_trade_stop_allowed) {
         for(unsigned bits = 0; bits < END_BITS; bits++) {
             end_status(&st, ph, bits);
             const bool allowed = gen3_trade_stop_allowed(&st);
-            const bool linked = st.phase != Gen3ClubPhaseWaiting;
+            const bool linked = end_linked(&st);
             if(st.save_window) ASSERT_TRUE(!allowed); /* D10: never in the save window */
             if(!linked && !st.save_window) ASSERT_TRUE(allowed); /* D1: no GBA linked */
             if(linked && st.trade_pending) ASSERT_TRUE(!allowed); /* R6 */
@@ -866,7 +880,18 @@ TEST(test_trade_end_action) {
     ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndStop);
     ASSERT_EQ(gen3_trade_end_action(&st, true, false), Gen3TradeEndPickup);
     st.left = false;
-    st.trade_pending = true; /* the 0x1144 relink hasn't come: nothing written on the GBA yet */
+    st.trade_pending = true; /* the 0x1144 relink timed out: nothing written on the GBA yet */
+    ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndStop);
+
+    /* Fix round 2: a relink's gap (the 0x1144 one after CCDD, the 0x1122 one after the save) is
+     * no "no GBA linked": ask it to walk out once it relinks, never drop it mid-relink */
+    st.relinking = true;
+    ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndAsk);
+    ASSERT_EQ(gen3_trade_end_action(&st, true, false), Gen3TradeEndAsk);
+    st.trade_pending = false; /* the post-save 0x1122 gap */
+    ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndAsk);
+    /* The relink timed out (the club cleared it): stop again */
+    st.relinking = false;
     ASSERT_EQ(gen3_trade_end_action(&st, true, true), Gen3TradeEndStop);
 
     /* Fix round 1: a stale dialog. The tick stopped the session (the GBA left, its Pokemon
@@ -893,7 +918,9 @@ TEST(test_trade_end_action) {
                 ASSERT_TRUE(gen3_trade_stop_allowed(&st));
                 ASSERT_TRUE(settled);
             }
-            if(a == Gen3TradeEndAsk) ASSERT_TRUE(st.phase != Gen3ClubPhaseWaiting);
+            if(a == Gen3TradeEndAsk) ASSERT_TRUE(end_linked(&st));
+            /* A stop or a pickup only with no GBA linked, a relink's gap included */
+            if(a == Gen3TradeEndStop || a == Gen3TradeEndPickup) ASSERT_TRUE(!end_linked(&st));
             if(a == Gen3TradeEndPickup) {
                 ASSERT_TRUE(!settled);
                 ASSERT_TRUE(gen3_trade_stop_allowed(&st));
@@ -921,8 +948,16 @@ TEST(test_trade_stop_link_action) {
     st.save_window = false;
     st.phase = Gen3ClubPhaseTrade;
     ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndAsk);
-    st.phase = Gen3ClubPhaseWaiting; /* the 0x1144 relink not seen: may stop (D1) */
+    st.phase = Gen3ClubPhaseWaiting; /* fix round 2: the 0x1144 gap is still linked */
+    st.relinking = true;
+    ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndAsk);
+    st.relinking = false; /* the relink timed out: may stop (D1) */
     ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndStop);
+    /* A relink's gap without a trade pending: a confirmed "Stop link?" may stop it */
+    st.trade_pending = false;
+    st.relinking = true;
+    ASSERT_EQ(gen3_trade_stop_link_action(&st, true, true), Gen3TradeEndStop);
+    st.relinking = false;
 
     /* Stopped meanwhile: back to the menu */
     ASSERT_EQ(gen3_trade_stop_link_action(&st, false, true), Gen3TradeEndMenu);
@@ -969,7 +1004,10 @@ TEST(test_trade_back_action) {
     st.phase = Gen3ClubPhaseTrade;
     st.leaving = true;
     ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLeave);
-    st.phase = Gen3ClubPhaseWaiting; /* the 0x1144 relink not seen yet: may stop (D1) */
+    st.phase = Gen3ClubPhaseWaiting; /* fix round 2: the 0x1144 gap: still no "Stop link?" */
+    st.relinking = true;
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLeave);
+    st.relinking = false; /* the relink timed out: may stop (D1) */
     ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackStopLink);
 
     /* A stopped session: a stale flag locks nothing */

@@ -52,8 +52,9 @@ bool gen3_menu_editor_ready(PokemonFap* pokemon_fap);
  * exist. A running trade session gets one tick first, so a finished trade's Pokemon is picked up
  * and the session never stops without it (T12 review (a)); the tick may also end the session
  * itself (then Menu). stop_link: gen3_trade_stop_link_action ("Stop link?" confirmed), else
- * gen3_trade_end_action (End trade, menu Back). A running Link Test session: Stop. Defined in
- * pokemon_gen3_trade.c. */
+ * gen3_trade_end_action (End trade, menu Back). A running Link Test session gets Stop with
+ * stop_link (Gen3LinkExit's only use for it); without stop_link its linked phases give Ask, but
+ * no caller asks that for a Link Test. Defined in pokemon_gen3_trade.c. */
 Gen3TradeEndAction pokemon_gen3_trade_end_decide(PokemonFap* pokemon_fap, bool stop_link);
 
 /* Opens Gen3TradeEnd over the Gen III menu (the current scene, or the one under Gen3LinkExit,
