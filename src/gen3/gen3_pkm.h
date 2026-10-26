@@ -104,6 +104,10 @@ void gen3_pkm_set_nickname(Gen3Pkm* p, const char* ascii);
 size_t gen3_pkm_ot_name(const Gen3Pkm* p, char* out, size_t out_size);
 /* Encodes at most 7 chars, EOS-filled. */
 void gen3_pkm_set_ot_name(Gen3Pkm* p, const char* ascii);
+/* The OT name's 7 bytes as stored, raw[0x14..0x1A] (game encoding, EOS 0xFF): unlike the ASCII
+ * pair above, no byte is decoded, replaced or lost. */
+void gen3_pkm_ot_name_raw(const Gen3Pkm* p, uint8_t out[GEN3_OT_NAME_LEN]);
+void gen3_pkm_set_ot_name_raw(Gen3Pkm* p, const uint8_t name[GEN3_OT_NAME_LEN]);
 
 /* u16 sum of the 24 little-endian words at 0x20..0x4F. */
 uint16_t gen3_pkm_checksum(const Gen3Pkm* p);

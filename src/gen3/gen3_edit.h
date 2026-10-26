@@ -11,7 +11,12 @@
  * (gen3_recalc_party, so Hp = MaxHp), and the checksum is fixed.
  *
  * Species names and default movesets come from the bulk file (gen3_data.h). A mutator that needs
- * one and can't read it fails closed: it returns false and the Pokemon is unchanged. */
+ * one and can't read it fails closed: it returns false and the Pokemon is unchanged.
+ *
+ * pristine (plan 3 R4): true from a successful gen3_edit_init until a mutator (gen3_edit_load
+ * and gen3_edit_use_trainer_ot included) changes the Pokemon's bytes; nothing sets it again. A
+ * call that refuses, fails or changes nothing keeps it, and gen3_edit_set_trainer never changes
+ * it. */
 
 #define GEN3_EDIT_DEFAULT_NATIONAL 1
 #define GEN3_EDIT_DEFAULT_LEVEL    5
@@ -34,11 +39,23 @@ typedef enum { /* same order and values as EvIv in src/include/stat_nl.h */
 } Gen3Preset;
 #define GEN3_PRESET_COUNT 6
 
+/* The GBA player (D7), as an OT: the Pokemon obeys them and counts as theirs */
+typedef struct {
+    /* game encoding, as the GBA's LinkPlayer name[0..6] (Ruby's OT name bytes) */
+    uint8_t name[GEN3_OT_NAME_LEN];
+    uint16_t tid;
+    uint16_t sid;
+    uint8_t gender; /* 0 male, 1 female */
+} Gen3Trainer;
+
 typedef struct Gen3Editor {
     Gen3Pkm pkm;
     Gen3Preset preset;
     bool preset_applied; /* false after gen3_edit_load until a preset or species is chosen */
     Gen3Rng rng;
+    bool pristine; /* still the initial default (R4, see above) */
+    bool has_trainer;
+    Gen3Trainer trainer; /* the GBA player, once has_trainer */
 } Gen3Editor;
 
 /* What gen3_normalise changed. Party stats are always recalculated, and HasSpecies set, without
@@ -63,8 +80,8 @@ typedef struct {
  * no move is left and the default moveset can't be read from the bulk file. */
 bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info);
 
-/* Bulbasaur L5, default OT, preset RandIvZeroEv. false if the bulk file can't be read; *ed is
- * then not a usable editor. */
+/* Bulbasaur L5, default OT, preset RandIvZeroEv; pristine, no trainer. false if the bulk file
+ * can't be read; *ed is then not a usable editor. */
 bool gen3_edit_init(Gen3Editor* ed, uint32_t seed);
 /* Takes pkm if gen3_pkm_check accepts it (gen3_pk3.h: not a Bad Egg or an egg, a real species,
  * moves < 355, item < 377; the checksum isn't checked) and runs gen3_normalise on it;
@@ -72,9 +89,11 @@ bool gen3_edit_init(Gen3Editor* ed, uint32_t seed);
  * gen3_normalise fails. */
 bool gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm);
 uint16_t gen3_edit_national(const Gen3Editor* ed);
-/* D5: a fresh Pokemon of that species, keeping OT name, TID, SID, OT gender, level and preset.
- * true and no change if it is the current species. false (unchanged) for an invalid species or
- * if its name or default moveset can't be read from the bulk file. */
+/* D5, amended by plan 3 D7: a fresh Pokemon of that species, keeping level and preset. Its OT
+ * name (raw bytes), TID, SID and OT gender are the trainer's once one is set, else the current
+ * Pokemon's; its PID is the first non-shiny one for that OT ID. true and no change if it is the
+ * current species. false (unchanged) for an invalid species or if its name or default moveset
+ * can't be read from the bulk file. */
 bool gen3_edit_set_species(Gen3Editor* ed, uint16_t national);
 /* Clamped 1..100; exp = exp_for_level. Nothing changes if that is the current level (exp stays
  * inside it, and a loaded Pokemon keeps its current HP). */
@@ -117,5 +136,24 @@ void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value);
  * gen3_pid_find fails: an out-of-range want, or a shiny Unown nature and letter that no shiny PID
  * has for this OT (gen3_unown_shiny_possible). Both are refused before any PID is tried. */
 bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want);
+
+/* Remember the GBA player (D7). A pristine editor (still the initial default) takes it as OT at
+ * once, as gen3_edit_use_trainer_ot does, and stays pristine; an edited Pokemon is left alone. */
+void gen3_edit_set_trainer(Gen3Editor* ed, const Gen3Trainer* t);
+const Gen3Trainer* gen3_edit_trainer(const Gen3Editor* ed); /* NULL until set */
+/* The OT name bytes, TID, SID and OT gender equal the trainer's. false without a trainer. */
+bool gen3_edit_ot_is_trainer(const Gen3Editor* ed);
+
+typedef enum {
+    Gen3UseTrainerOk, /* OT name (raw), OT gender, TID and SID applied; shininess kept */
+    /* applied, but no longer shiny (gen3_edit_set_ot_id gave Gen3OtIdShinyLost) */
+    Gen3UseTrainerShinyLost,
+    Gen3UseTrainerNoTrainer, /* no trainer set: nothing changed */
+} Gen3UseTrainerResult;
+/* The trainer's OT on the current Pokemon: OT name (raw), OT gender, then gen3_edit_set_ot_id(tid,
+ * sid), so shininess is kept where it can be (plan 2 D6). Nothing changes if it is already the
+ * trainer's. */
+Gen3UseTrainerResult gen3_edit_use_trainer_ot(Gen3Editor* ed);
+
 /* 0 "Clean"; days != 0 "Infected"; else "Cured". */
 const char* gen3_pokerus_status(uint8_t value);

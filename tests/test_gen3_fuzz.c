@@ -5,11 +5,14 @@
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_rules.h>
+#include <src/gen3/gen3_trade_block.h>
 
 /* A deterministic random sequence of editor calls (out-of-range arguments included), 80- and
- * 100-byte imports, direct gen3_edit_load calls and bulk reads that fail at random after a good
- * open. After every step the editor's Pokemon must be game-valid (fuzz_valid), and a call that
- * refuses or fails must leave the editor exactly as it was. The seed and step count are fixed,
+ * 100-byte imports, direct gen3_edit_load calls, GBA players (D7) and bulk reads that fail at
+ * random after a good open; now and then a new editor replaces the old one. After every step the
+ * editor's Pokemon must be game-valid (fuzz_valid), a call that refuses or fails must leave the
+ * editor exactly as it was, and pristine must follow R4: cleared by a call that changed the
+ * Pokemon's bytes, kept otherwise, and kept by set_trainer. The seed and step count are fixed,
  * so a failure reproduces; the step number is printed with it. Other seeds can be tried with
  * -DFUZZ_SEED=... -DFUZZ_STEPS=... (the coverage counts at the end are for this seed). */
 
@@ -118,6 +121,11 @@ static bool fuzz_valid(const Gen3Pkm* p) {
     CHECK(item < GEN3_ITEM_COUNT, "item id out of range");
     CHECK(!is_mail(item), "holds a Mail item");
     CHECK(gen3_pkm_get(p, Gen3FieldMail) == GEN3_MAIL_NONE, "mail index != 0xFF");
+    /* D8 cross-check: the trade refuses a game-valid Pokemon only for an item Ruby lacks */
+    bool ruby_lacks = item == GEN3_ITEM_ENIGMA_BERRY || item >= GEN3_RUBY_ITEMS_COUNT;
+    CHECK(
+        gen3_trade_offer_check(p) == (ruby_lacks ? Gen3RefuseItem : Gen3RefuseNone),
+        "offer check (D8)");
 
     /* The game form decrypts back to the same bytes */
     uint8_t game[GEN3_PARTY_SIZE];
@@ -147,10 +155,21 @@ static bool fuzz_valid(const Gen3Pkm* p) {
     return true;
 }
 
-/* The whole editor, the RNG included */
+/* The whole editor, the RNG included, field by field (no padding compared) */
 static bool editor_eq(const Gen3Editor* a, const Gen3Editor* b) {
     return memcmp(a->pkm.raw, b->pkm.raw, GEN3_PARTY_SIZE) == 0 && a->preset == b->preset &&
-           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state;
+           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state &&
+           a->pristine == b->pristine && a->has_trainer == b->has_trainer &&
+           memcmp(a->trainer.name, b->trainer.name, GEN3_OT_NAME_LEN) == 0 &&
+           a->trainer.tid == b->trainer.tid && a->trainer.sid == b->trainer.sid &&
+           a->trainer.gender == b->trainer.gender;
+}
+
+/* The same OT name bytes, OT ID and OT gender */
+static bool ot_eq(const Gen3Pkm* a, const Gen3Pkm* b) {
+    return memcmp(a->raw + 0x14, b->raw + 0x14, GEN3_OT_NAME_LEN) == 0 &&
+           gen3_pkm_get(a, Gen3FieldOtId) == gen3_pkm_get(b, Gen3FieldOtId) &&
+           gen3_pkm_get(a, Gen3FieldOtGender) == gen3_pkm_get(b, Gen3FieldOtGender);
 }
 
 /* ---- Inputs ---- */
@@ -270,6 +289,10 @@ typedef struct {
     int read_failures_seen; /* a step that found the bulk source closed after a failure */
     int imported[2]; /* Ok imports of 80 and 100 bytes */
     int loaded;
+    int trainer_set;
+    int pristine_trainer; /* set_trainer on a pristine editor, which takes the player's OT */
+    int trainer_applied; /* use_trainer_ot that had an OT to change */
+    int renewed; /* a new editor replaced the old one */
 } FuzzStats;
 
 static FuzzStats stats;
@@ -361,6 +384,80 @@ static bool step_ot_id(Gen3Editor* ed) {
     return true;
 }
 
+/* The GBA player: random name bytes (EOS 0xFF often), an OT ID as fz_ot_id picks them, gender 0
+ * or 1 */
+static bool step_trainer(Gen3Editor* ed) {
+    Gen3Trainer t;
+    memset(&t, 0, sizeof(t));
+    for(int i = 0; i < GEN3_OT_NAME_LEN; i++) t.name[i] = fz_below(3) ? (uint8_t)fz() : 0xFF;
+    uint32_t ot_id = fz_ot_id(ed);
+    t.tid = (uint16_t)ot_id;
+    t.sid = (uint16_t)(ot_id >> 16);
+    t.gender = (uint8_t)fz_below(2);
+    Gen3Editor before = *ed;
+    Gen3Traits old, got;
+    gen3_traits_of(&ed->pkm, &old);
+    gen3_edit_set_trainer(ed, &t);
+    const Gen3Trainer* kept = gen3_edit_trainer(ed);
+    CHECK(ed->has_trainer && kept != NULL, "set_trainer: no player");
+    CHECK(
+        memcmp(kept->name, t.name, GEN3_OT_NAME_LEN) == 0 && kept->tid == t.tid &&
+            kept->sid == t.sid && kept->gender == t.gender,
+        "set_trainer: a different player");
+    stats.trainer_set++;
+    if(!before.pristine) {
+        CHECK(memcmp(ed->pkm.raw, before.pkm.raw, GEN3_PARTY_SIZE) == 0, "edited Pokemon changed");
+        CHECK(ed->rng.state == before.rng.state, "set_trainer used the RNG");
+        return true;
+    }
+    /* The initial default takes the player's OT, and is otherwise the same Pokemon */
+    CHECK(gen3_edit_ot_is_trainer(ed), "pristine editor without the player's OT");
+    gen3_traits_of(&ed->pkm, &got);
+    CHECK(
+        got.nature == old.nature && got.gender == old.gender && got.shiny == old.shiny &&
+            got.ability_slot == old.ability_slot,
+        "set_trainer changed a trait");
+    CHECK(gen3_edit_national(ed) == gen3_edit_national(&before), "set_trainer species");
+    CHECK(
+        gen3_pkm_get(&ed->pkm, Gen3FieldExp) == gen3_pkm_get(&before.pkm, Gen3FieldExp),
+        "set_trainer exp");
+    stats.pristine_trainer++;
+    return true;
+}
+
+static bool step_use_trainer(Gen3Editor* ed) {
+    Gen3Editor before = *ed;
+    Gen3Traits old, got;
+    gen3_traits_of(&ed->pkm, &old);
+    bool already = gen3_edit_ot_is_trainer(ed);
+    Gen3UseTrainerResult r = gen3_edit_use_trainer_ot(ed);
+    CHECK((r == Gen3UseTrainerNoTrainer) == !before.has_trainer, "use_trainer_ot result");
+    if(r == Gen3UseTrainerNoTrainer || already) {
+        CHECK(r != Gen3UseTrainerShinyLost, "shiny lost, but the OT was the player's");
+        CHECK(editor_eq(ed, &before), "use_trainer_ot with nothing to do changed the editor");
+        stats.unchanged++;
+        return true;
+    }
+    stats.trainer_applied++;
+    CHECK(gen3_edit_ot_is_trainer(ed), "use_trainer_ot: not the player's OT");
+    gen3_traits_of(&ed->pkm, &got);
+    CHECK(got.nature == old.nature && got.gender == old.gender, "use_trainer_ot nature/gender");
+    CHECK(got.ability_slot == old.ability_slot, "use_trainer_ot ability slot");
+    bool unown = gen3_edit_national(ed) == GEN3_NATIONAL_UNOWN;
+    CHECK(!unown || got.unown_letter == old.unown_letter, "use_trainer_ot letter");
+    if(r == Gen3UseTrainerShinyLost) {
+        CHECK(old.shiny && !got.shiny && unown, "shiny lost, but not a shiny Unown");
+        CHECK(
+            !gen3_unown_shiny_possible(
+                gen3_pkm_get(&ed->pkm, Gen3FieldOtId), old.nature, old.unown_letter),
+            "lost needlessly");
+        stats.shiny_lost++;
+    } else {
+        CHECK(r == Gen3UseTrainerOk && got.shiny == old.shiny, "use_trainer_ot shininess");
+    }
+    return true;
+}
+
 static bool step_import(Gen3Editor* ed) {
     Gen3Pkm in, out;
     Gen3ImportInfo info;
@@ -430,8 +527,10 @@ static bool step(Gen3Editor* ed) {
     Gen3Editor before = *ed;
     char name[16];
     bool keep = false;
+    bool set_trainer = false;
+    bool renewed = false;
 
-    switch(fz_below(16)) {
+    switch(fz_below(18)) {
     case 0: {
         fz_what = "set_species";
         uint16_t national = fz_national();
@@ -439,7 +538,18 @@ static bool step(Gen3Editor* ed) {
         bool ok = gen3_edit_set_species(ed, national);
         if(!gen3_species(national)) CHECK(!ok, "set_species took an unknown species");
         if(same) CHECK(ok, "set_species refused the current species");
-        if(ok && !same) CHECK(gen3_edit_national(ed) == national, "set_species species");
+        if(ok && !same) {
+            CHECK(gen3_edit_national(ed) == national, "set_species species");
+            /* D5, amended by D7: the player's OT once known, else the one it had */
+            if(ed->has_trainer)
+                CHECK(gen3_edit_ot_is_trainer(ed), "set_species without the player's OT");
+            else
+                CHECK(ot_eq(&ed->pkm, &before.pkm), "set_species changed the OT");
+            CHECK(
+                !gen3_is_shiny(
+                    gen3_pkm_get(&ed->pkm, Gen3FieldOtId), gen3_pkm_get(&ed->pkm, Gen3FieldPid)),
+                "set_species made a shiny");
+        }
         keep = !ok || same;
         break;
     }
@@ -547,18 +657,43 @@ static bool step(Gen3Editor* ed) {
         fz_what = "load";
         if(!step_load(ed)) return false;
         break;
+    case 15:
+        fz_what = "set_trainer";
+        set_trainer = true;
+        if(!step_trainer(ed)) return false;
+        break;
+    case 16:
+        fz_what = "use_trainer_ot";
+        if(!step_use_trainer(ed)) return false;
+        break;
     default: {
         fz_what = "bulk";
         /* Reads fail now and then, often, or not at all; a closed source is opened again. A new
-         * editor made meanwhile is game-valid, or refused. */
+         * editor made meanwhile is game-valid and pristine, or refused; now and then it replaces
+         * the editor, as when the app makes a new one. */
         static const uint32_t rates[] = {0, 0, 2, 5, 20};
         fz_fail_one_in = rates[fz_below(5)];
         if(!gen3_bulk_ready()) CHECK(fuzz_reopen(), "reopen failed");
         Gen3Editor fresh;
-        if(gen3_edit_init(&fresh, fz()) && !fuzz_valid(&fresh.pkm)) return false;
+        if(gen3_edit_init(&fresh, fz())) {
+            if(!fuzz_valid(&fresh.pkm)) return false;
+            CHECK(fresh.pristine && !fresh.has_trainer, "a new editor: not pristine, or a player");
+            if(fz_below(8) == 0) {
+                *ed = fresh;
+                renewed = true;
+                stats.renewed++;
+            }
+        }
         break;
     }
     }
+
+    /* R4 */
+    bool same_pkm = memcmp(ed->pkm.raw, before.pkm.raw, GEN3_PARTY_SIZE) == 0;
+    if(set_trainer)
+        CHECK(ed->pristine == before.pristine, "set_trainer changed pristine");
+    else if(!renewed)
+        CHECK(ed->pristine == (before.pristine && same_pkm), "pristine (R4)");
 
     if(keep) {
         CHECK(editor_eq(ed, &before), "a refused, failed or no-op call changed the editor");
@@ -571,6 +706,7 @@ TEST(test_fuzz_invariant) {
     Gen3Editor ed;
     ASSERT_TRUE(fuzz_reopen());
     ASSERT_TRUE(gen3_edit_init(&ed, FUZZ_SEED));
+    ASSERT_TRUE(ed.pristine);
     ASSERT_TRUE(fuzz_valid(&ed.pkm));
     for(fz_step = 0; fz_step < FUZZ_STEPS; fz_step++) {
         bool was_ready = gen3_bulk_ready();
@@ -579,14 +715,19 @@ TEST(test_fuzz_invariant) {
         /* Mostly with the data: a closed source is opened again soon */
         if(!gen3_bulk_ready() && fz_below(4) == 0) ASSERT_TRUE(fuzz_reopen());
     }
-    /* Every path was taken (with this seed: 3537 unchanged, 9 no-shiny refusals, 3 shiny lost,
-     * 906 closed by a failed read, 351 + 373 imports, 753 loads) */
+    /* Every path was taken (with this seed: 3497 unchanged, 7 no-shiny refusals, 4 shiny lost,
+     * 817 closed by a failed read, 312 + 327 imports, 685 loads, 1068 players set, 10 of them on
+     * a pristine editor, 663 player OTs applied, 87 new editors) */
     ASSERT_TRUE(stats.unchanged > 0);
     ASSERT_TRUE(stats.no_shiny > 0);
     ASSERT_TRUE(stats.shiny_lost > 0);
     ASSERT_TRUE(stats.read_failures_seen > 0);
     ASSERT_TRUE(stats.imported[0] > 0 && stats.imported[1] > 0);
     ASSERT_TRUE(stats.loaded > 0);
+    ASSERT_TRUE(stats.trainer_set > 0);
+    ASSERT_TRUE(stats.pristine_trainer > 0);
+    ASSERT_TRUE(stats.trainer_applied > 0);
+    ASSERT_TRUE(stats.renewed > 0);
 }
 
 int main(void) {

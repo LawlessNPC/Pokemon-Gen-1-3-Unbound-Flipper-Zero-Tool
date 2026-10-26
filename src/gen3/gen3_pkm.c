@@ -123,6 +123,14 @@ void gen3_pkm_set_ot_name(Gen3Pkm* p, const char* ascii) {
     gen3_text_encode(ascii, p->raw + GEN3_OT_NAME_OFF, GEN3_OT_NAME_LEN, GEN3_OT_NAME_LEN);
 }
 
+void gen3_pkm_ot_name_raw(const Gen3Pkm* p, uint8_t out[GEN3_OT_NAME_LEN]) {
+    memcpy(out, p->raw + GEN3_OT_NAME_OFF, GEN3_OT_NAME_LEN);
+}
+
+void gen3_pkm_set_ot_name_raw(Gen3Pkm* p, const uint8_t name[GEN3_OT_NAME_LEN]) {
+    memcpy(p->raw + GEN3_OT_NAME_OFF, name, GEN3_OT_NAME_LEN);
+}
+
 static uint16_t gen3_sum_words(const uint8_t* secure) {
     uint16_t sum = 0;
     for(unsigned i = 0; i < GEN3_SECURE_LEN; i += 2)

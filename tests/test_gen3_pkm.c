@@ -87,6 +87,32 @@ TEST(test_names) {
     ASSERT_STR_EQ(out, "FLIPPER");
 }
 
+/* The OT name bytes as stored, raw[0x14..0x1A], with nothing decoded or lost */
+TEST(test_ot_name_raw) {
+    static const uint8_t ruby[GEN3_OT_NAME_LEN] = {0xCC, 0xCF, 0xBC, 0xD3, 0xFF, 0xFF, 0xFF};
+    static const uint8_t odd[GEN3_OT_NAME_LEN] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    Gen3Pkm p;
+    memset(&p, 0xEE, sizeof(p));
+    gen3_pkm_set_ot_name_raw(&p, ruby);
+    ASSERT_MEM_EQ(p.raw + 0x14, ruby, GEN3_OT_NAME_LEN);
+    ASSERT_EQ(p.raw[0x13], 0xEE);
+    ASSERT_EQ(p.raw[0x1B], 0xEE);
+    uint8_t got[GEN3_OT_NAME_LEN];
+    gen3_pkm_ot_name_raw(&p, got);
+    ASSERT_MEM_EQ(got, ruby, GEN3_OT_NAME_LEN);
+    char out[16];
+    ASSERT_EQ(gen3_pkm_ot_name(&p, out, sizeof(out)), 4);
+    ASSERT_STR_EQ(out, "RUBY");
+
+    /* Bytes the app can't show are kept byte for byte */
+    gen3_pkm_set_ot_name_raw(&p, odd);
+    ASSERT_MEM_EQ(p.raw + 0x14, odd, GEN3_OT_NAME_LEN);
+    gen3_pkm_ot_name_raw(&p, got);
+    ASSERT_MEM_EQ(got, odd, GEN3_OT_NAME_LEN);
+    ASSERT_EQ(p.raw[0x13], 0xEE);
+    ASSERT_EQ(p.raw[0x1B], 0xEE);
+}
+
 TEST(test_golden_build) {
     Gen3Pkm p;
     golden_build(&p);
@@ -188,6 +214,7 @@ int main(void) {
     RUN(test_field_extra_offsets);
     RUN(test_field_masking);
     RUN(test_names);
+    RUN(test_ot_name_raw);
     RUN(test_golden_build);
     RUN(test_golden_encrypt);
     RUN(test_golden_decrypt);

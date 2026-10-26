@@ -4,11 +4,25 @@
 
 #include <string.h>
 
-/* OT name bytes in the PKHeX .pk3 layout (gen3_pkm.c). A species change copies them raw so an
- * OT name with characters the app can't decode stays the game's own. */
-#define GEN3_EDIT_OT_NAME_OFF 0x14
-
 _Static_assert(Gen3PresetMaxIvMaxEv + 1 == GEN3_PRESET_COUNT, "GEN3_PRESET_COUNT");
+
+static bool ed_set_traits(Gen3Editor* ed, const Gen3Traits* want);
+
+/* R4: a call clears pristine only when the Pokemon's bytes differ from other's, the bytes it
+ * had on entry. */
+static void ed_note_change(Gen3Editor* ed, const Gen3Pkm* other) {
+    if(memcmp(ed->pkm.raw, other->raw, GEN3_PARTY_SIZE) != 0) ed->pristine = false;
+}
+
+/* The OT a Pokemon carries. The name bytes are copied raw, so an OT name with characters the app
+ * can't decode stays the game's own. */
+static void ed_ot_of(const Gen3Pkm* p, Gen3Trainer* out) {
+    gen3_pkm_ot_name_raw(p, out->name);
+    uint32_t ot_id = gen3_pkm_get(p, Gen3FieldOtId);
+    out->tid = (uint16_t)ot_id;
+    out->sid = (uint16_t)(ot_id >> 16);
+    out->gender = (uint8_t)gen3_pkm_get(p, Gen3FieldOtGender);
+}
 
 static const Gen3SpeciesInfo* ed_info(const Gen3Pkm* p) {
     return gen3_species(gen3_national_from_internal(gen3_pkm_get(p, Gen3FieldSpecies)));
@@ -105,9 +119,10 @@ static void ed_clear_move(Gen3Pkm* p, int slot) {
     gen3_pkm_set(p, Gen3FieldPpBonuses, ups & ~(3u << (2 * slot)));
 }
 
-/* D5: a fresh Pokemon (as CreateBoxMon) keeping OT name, OT ID, OT gender; the preset is
- * applied. The name and moves are read from the bulk file first: false, with the editor
- * unchanged, if either read fails. */
+/* D5, amended by D7: a fresh Pokemon (as CreateBoxMon) with the trainer's OT once one is set,
+ * else the current Pokemon's (name bytes, OT ID, OT gender); the preset is applied. The name and
+ * moves are read from the bulk file first: false, with the editor unchanged, if either read
+ * fails. */
 static bool ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
     const Gen3SpeciesInfo* info = gen3_species(national);
     if(!info) return false;
@@ -117,13 +132,17 @@ static bool ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
     uint16_t moves[4];
     if(!gen3_species_name_get(national, name) || !gen3_default_moves(national, level, moves))
         return false;
-    const Gen3Pkm* old = &ed->pkm;
-    uint32_t ot_id = gen3_pkm_get(old, Gen3FieldOtId);
+    Gen3Trainer ot;
+    if(ed->has_trainer)
+        ot = ed->trainer;
+    else
+        ed_ot_of(&ed->pkm, &ot);
+    uint32_t ot_id = ((uint32_t)ot.sid << 16) | ot.tid;
     Gen3Pkm p;
     memset(&p, 0, sizeof(p));
-    memcpy(p.raw + GEN3_EDIT_OT_NAME_OFF, old->raw + GEN3_EDIT_OT_NAME_OFF, GEN3_OT_NAME_LEN);
+    gen3_pkm_set_ot_name_raw(&p, ot.name);
     gen3_pkm_set(&p, Gen3FieldOtId, ot_id);
-    gen3_pkm_set(&p, Gen3FieldOtGender, gen3_pkm_get(old, Gen3FieldOtGender));
+    gen3_pkm_set(&p, Gen3FieldOtGender, ot.gender);
 
     uint32_t pid;
     do {
@@ -161,7 +180,9 @@ bool gen3_edit_init(Gen3Editor* ed, uint32_t seed) {
         &ed->pkm,
         Gen3FieldOtId,
         ((uint32_t)GEN3_EDIT_DEFAULT_SID << 16) | GEN3_EDIT_DEFAULT_TID);
-    return ed_new_mon(ed, GEN3_EDIT_DEFAULT_NATIONAL, GEN3_EDIT_DEFAULT_LEVEL);
+    if(!ed_new_mon(ed, GEN3_EDIT_DEFAULT_NATIONAL, GEN3_EDIT_DEFAULT_LEVEL)) return false;
+    ed->pristine = true;
+    return true;
 }
 
 bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
@@ -248,6 +269,7 @@ bool gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm) {
     if(gen3_pkm_check(pkm) != Gen3CheckOk) return false;
     Gen3Pkm p = *pkm;
     if(!gen3_normalise(&p, NULL)) return false;
+    ed_note_change(ed, &p);
     ed->pkm = p;
     ed->preset_applied = false;
     return true;
@@ -260,7 +282,9 @@ uint16_t gen3_edit_national(const Gen3Editor* ed) {
 bool gen3_edit_set_species(Gen3Editor* ed, uint16_t national) {
     if(!gen3_species(national)) return false;
     if(national == gen3_edit_national(ed)) return true;
-    return ed_new_mon(ed, national, ed_level(&ed->pkm));
+    if(!ed_new_mon(ed, national, ed_level(&ed->pkm))) return false;
+    ed->pristine = false; /* another species: the bytes changed, no copy needed to tell */
+    return true;
 }
 
 void gen3_edit_set_level(Gen3Editor* ed, uint8_t level) {
@@ -270,16 +294,20 @@ void gen3_edit_set_level(Gen3Editor* ed, uint8_t level) {
     if(level > 100) level = 100;
     /* The current level: keep exp inside it, and a loaded Pokemon's current HP */
     if(level == ed_level(&ed->pkm)) return;
+    Gen3Pkm before = ed->pkm;
     gen3_pkm_set(&ed->pkm, Gen3FieldExp, gen3_exp_for_level(info->growth, level));
     if(ed->preset_applied && ed_level_ev(ed->preset)) ed_apply_evs(ed);
     ed_commit(ed);
+    ed_note_change(ed, &before);
 }
 
 void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset) {
     if((unsigned)preset >= GEN3_PRESET_COUNT) return;
+    Gen3Pkm before = ed->pkm;
     ed->preset = preset;
     ed_apply_preset(ed);
     ed_commit(ed);
+    ed_note_change(ed, &before);
 }
 
 bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii) {
@@ -292,8 +320,10 @@ bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii) {
     /* The name shown: keep the bytes, which may include characters shown as '?' */
     gen3_pkm_nickname(&ed->pkm, shown, sizeof(shown));
     if(strcmp(ascii, shown) == 0) return true;
+    Gen3Pkm before = ed->pkm;
     gen3_pkm_set_nickname(&ed->pkm, ascii);
     ed_commit(ed);
+    ed_note_change(ed, &before);
     return true;
 }
 
@@ -303,11 +333,15 @@ void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii) {
     /* As for the nickname */
     gen3_pkm_ot_name(&ed->pkm, shown, sizeof(shown));
     if(strcmp(ascii, shown) == 0) return;
+    Gen3Pkm before = ed->pkm;
     gen3_pkm_set_ot_name(&ed->pkm, ascii);
     ed_commit(ed);
+    ed_note_change(ed, &before);
 }
 
-Gen3OtIdResult gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
+/* gen3_edit_set_ot_id without the pristine bookkeeping, which its callers do. Ends with
+ * ed_commit, on both paths. */
+static Gen3OtIdResult ed_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
     Gen3OtIdResult result = Gen3OtIdOk;
     Gen3Traits old;
     gen3_traits_of(&ed->pkm, &old);
@@ -316,7 +350,7 @@ Gen3OtIdResult gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
     /* Both paths keep the stored ability slot: set_traits asks for old.ability_slot (the stored
      * bit), and ed_commit leaves a two-ability species' bit alone. */
     if(gen3_is_shiny(ot_id, gen3_pkm_get(&ed->pkm, Gen3FieldPid)) != old.shiny) {
-        if(gen3_edit_set_traits(ed, &old)) return result;
+        if(ed_set_traits(ed, &old)) return result;
         /* Every want gen3_traits_of returns for a real species is in range, and only a shiny
          * Unown's nature and letter can have no PID (gen3_pid_find), so this is a shiny Pokemon
          * whose PID isn't shiny for the new OT: keeping it keeps every other trait. */
@@ -326,10 +360,19 @@ Gen3OtIdResult gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
     return result;
 }
 
+Gen3OtIdResult gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid) {
+    Gen3Pkm before = ed->pkm;
+    Gen3OtIdResult result = ed_set_ot_id(ed, tid, sid);
+    ed_note_change(ed, &before);
+    return result;
+}
+
 void gen3_edit_set_item(Gen3Editor* ed, uint16_t item) {
     if(item != 0 && !gen3_item_holdable(item)) return;
+    Gen3Pkm before = ed->pkm;
     gen3_pkm_set(&ed->pkm, Gen3FieldHeldItem, item);
     ed_commit(ed);
+    ed_note_change(ed, &before);
 }
 
 bool gen3_edit_set_move(Gen3Editor* ed, uint8_t slot, uint16_t move) {
@@ -343,6 +386,7 @@ bool gen3_edit_set_move(Gen3Editor* ed, uint8_t slot, uint16_t move) {
         if(move && m == move) return false;
     }
     if(!move && !others) return false;
+    Gen3Pkm before = *p;
     ed_clear_move(p, slot);
     if(move) {
         gen3_pkm_set(p, Gen3FieldMove1 + slot, move);
@@ -350,26 +394,33 @@ bool gen3_edit_set_move(Gen3Editor* ed, uint8_t slot, uint16_t move) {
     }
     ed_pack_moves(p);
     ed_commit(ed);
+    ed_note_change(ed, &before);
     return true;
 }
 
 bool gen3_edit_default_moves(Gen3Editor* ed) {
     uint16_t moves[4];
     if(!gen3_default_moves(gen3_edit_national(ed), ed_level(&ed->pkm), moves)) return false;
+    Gen3Pkm before = ed->pkm;
     ed_put_moves(&ed->pkm, moves);
     ed_commit(ed);
+    ed_note_change(ed, &before);
     return true;
 }
 
 void gen3_edit_set_ball(Gen3Editor* ed, uint8_t ball) {
     if(ball < 1 || ball > GEN3_EDIT_BALL_MAX) return;
+    Gen3Pkm before = ed->pkm;
     gen3_pkm_set(&ed->pkm, Gen3FieldBall, ball);
     ed_commit(ed);
+    ed_note_change(ed, &before);
 }
 
 void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value) {
+    Gen3Pkm before = ed->pkm;
     gen3_pkm_set(&ed->pkm, Gen3FieldPokerus, value);
     ed_commit(ed);
+    ed_note_change(ed, &before);
 }
 
 /* want equals the current traits once normalised as gen3_pid_find does: gender ignored for a
@@ -385,7 +436,8 @@ static bool ed_traits_same(uint16_t national, const Gen3Traits* want, const Gen3
     return true;
 }
 
-bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want) {
+/* gen3_edit_set_traits without the pristine bookkeeping, which its callers do */
+static bool ed_set_traits(Gen3Editor* ed, const Gen3Traits* want) {
     uint16_t national = gen3_edit_national(ed);
     Gen3Traits cur;
     gen3_traits_of(&ed->pkm, &cur);
@@ -398,6 +450,51 @@ bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want) {
     ed_ability_from_pid(&ed->pkm); /* the slot gen3_pid_find satisfied */
     ed_commit(ed);
     return true;
+}
+
+bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want) {
+    Gen3Pkm before = ed->pkm;
+    bool ok = ed_set_traits(ed, want);
+    ed_note_change(ed, &before);
+    return ok;
+}
+
+/* D7: the trainer's OT name bytes and gender, then their OT ID through ed_set_ot_id, which keeps
+ * shininess where it can and ends with ed_commit. Leaves pristine alone. */
+static Gen3OtIdResult ed_use_trainer_ot(Gen3Editor* ed) {
+    gen3_pkm_set_ot_name_raw(&ed->pkm, ed->trainer.name);
+    gen3_pkm_set(&ed->pkm, Gen3FieldOtGender, ed->trainer.gender);
+    return ed_set_ot_id(ed, ed->trainer.tid, ed->trainer.sid);
+}
+
+void gen3_edit_set_trainer(Gen3Editor* ed, const Gen3Trainer* t) {
+    ed->trainer = *t;
+    ed->has_trainer = true;
+    /* The untouched default becomes the player's own, and is still the default (R4) */
+    if(ed->pristine) ed_use_trainer_ot(ed);
+}
+
+const Gen3Trainer* gen3_edit_trainer(const Gen3Editor* ed) {
+    return ed->has_trainer ? &ed->trainer : NULL;
+}
+
+bool gen3_edit_ot_is_trainer(const Gen3Editor* ed) {
+    if(!ed->has_trainer) return false;
+    const Gen3Trainer* t = &ed->trainer;
+    Gen3Trainer ot;
+    ed_ot_of(&ed->pkm, &ot);
+    return memcmp(ot.name, t->name, GEN3_OT_NAME_LEN) == 0 && ot.tid == t->tid &&
+           ot.sid == t->sid && ot.gender == t->gender;
+}
+
+Gen3UseTrainerResult gen3_edit_use_trainer_ot(Gen3Editor* ed) {
+    if(!ed->has_trainer) return Gen3UseTrainerNoTrainer;
+    /* Already theirs: nothing to change (ed_commit would heal a loaded Pokemon) */
+    if(gen3_edit_ot_is_trainer(ed)) return Gen3UseTrainerOk;
+    Gen3Pkm before = ed->pkm;
+    Gen3OtIdResult r = ed_use_trainer_ot(ed);
+    ed_note_change(ed, &before);
+    return r == Gen3OtIdShinyLost ? Gen3UseTrainerShinyLost : Gen3UseTrainerOk;
 }
 
 const char* gen3_pokerus_status(uint8_t value) {

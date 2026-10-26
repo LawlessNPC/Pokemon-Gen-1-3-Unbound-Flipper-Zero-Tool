@@ -84,7 +84,28 @@ static bool pp_are(const Gen3Editor* ed, uint8_t a, uint8_t b, uint8_t c, uint8_
 /* The whole editor, the RNG included, field by field (no padding compared) */
 static bool editor_eq(const Gen3Editor* a, const Gen3Editor* b) {
     return memcmp(a->pkm.raw, b->pkm.raw, GEN3_PARTY_SIZE) == 0 && a->preset == b->preset &&
-           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state;
+           a->preset_applied == b->preset_applied && a->rng.state == b->rng.state &&
+           a->pristine == b->pristine && a->has_trainer == b->has_trainer &&
+           memcmp(a->trainer.name, b->trainer.name, GEN3_OT_NAME_LEN) == 0 &&
+           a->trainer.tid == b->trainer.tid && a->trainer.sid == b->trainer.sid &&
+           a->trainer.gender == b->trainer.gender;
+}
+
+/* The GBA player of the D7 tests: RUBY, TID 12345, SID 54321 (OT ID 0xD4313039), female */
+static const uint8_t RUBY_NAME[GEN3_OT_NAME_LEN] = {0xCC, 0xCF, 0xBC, 0xD3, 0xFF, 0xFF, 0xFF};
+static const uint8_t FLIPPER_NAME[GEN3_OT_NAME_LEN] = {0xC0, 0xC6, 0xC3, 0xCA, 0xCA, 0xBF, 0xCC};
+#define RUBY_OT_ID 0xD4313039u
+
+static void ruby_trainer(Gen3Trainer* t) {
+    memset(t, 0, sizeof(*t));
+    memcpy(t->name, RUBY_NAME, GEN3_OT_NAME_LEN);
+    t->tid = 12345;
+    t->sid = 54321;
+    t->gender = 1;
+}
+
+static bool ot_bytes_are(const Gen3Editor* ed, const uint8_t name[GEN3_OT_NAME_LEN]) {
+    return memcmp(ed->pkm.raw + 0x14, name, GEN3_OT_NAME_LEN) == 0;
 }
 
 TEST(test_edit_init_defaults) {
@@ -1279,6 +1300,281 @@ TEST(test_edit_no_data_load) {
     ASSERT_TRUE(bulk_file_open());
 }
 
+/* D7: the untouched initial default takes the GBA player's OT at once, and stays the default */
+TEST(test_edit_trainer_pristine) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(ed.pristine);
+    ASSERT_TRUE(!ed.has_trainer);
+    ASSERT_TRUE(gen3_edit_trainer(&ed) == NULL);
+    ASSERT_TRUE(!gen3_edit_ot_is_trainer(&ed));
+    Gen3Pkm before = ed.pkm;
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    gen3_edit_set_trainer(&ed, &t);
+    memset(&t, 0, sizeof(t)); /* the editor keeps its own copy */
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_EQ(G(OtId), RUBY_OT_ID);
+    ASSERT_EQ(G(OtGender), 1);
+    ASSERT_TRUE(!gen3_is_shiny(G(OtId), G(Pid)));
+    ASSERT_EQ(gen3_edit_national(&ed), 1);
+    ASSERT_EQ(G(Level), 5);
+    ASSERT_TRUE(ed.pristine);
+    ASSERT_TRUE(ed.has_trainer);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    const Gen3Trainer* got = gen3_edit_trainer(&ed);
+    ASSERT_TRUE(got != NULL);
+    ASSERT_MEM_EQ(got->name, RUBY_NAME, GEN3_OT_NAME_LEN);
+    ASSERT_EQ(got->tid, 12345);
+    ASSERT_EQ(got->sid, 54321);
+    ASSERT_EQ(got->gender, 1);
+    /* Only the OT changed: its ID, name and gender bit (0x47), and the checksum. The PID isn't
+     * shiny for either OT, so it stays. */
+    ASSERT_EQ(G(Pid), gen3_pkm_get(&before, Gen3FieldPid));
+    for(int i = 0; i < GEN3_PARTY_SIZE; i++) {
+        bool ot = (i >= 0x04 && i <= 0x07) || (i >= 0x14 && i <= 0x1A) || i == 0x1C || i == 0x1D ||
+                  i == 0x47;
+        if(!ot) ASSERT_EQ(ed.pkm.raw[i], before.raw[i]);
+    }
+    ASSERT_EQ(G(Ball), gen3_pkm_get(&before, Gen3FieldBall));
+    ASSERT_EQ(G(MetGame), gen3_pkm_get(&before, Gen3FieldMetGame));
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* An edited Pokemon keeps its OT: the player is only remembered */
+TEST(test_edit_trainer_after_edit) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_edit_set_level(&ed, 10);
+    ASSERT_TRUE(!ed.pristine);
+    Gen3Pkm before = ed.pkm;
+    uint32_t rng = ed.rng.state;
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+    ASSERT_EQ(ed.rng.state, rng);
+    ASSERT_TRUE(ot_bytes_are(&ed, FLIPPER_NAME));
+    ASSERT_EQ(G(OtId), 22222);
+    ASSERT_EQ(G(OtGender), 0);
+    ASSERT_TRUE(!gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(ed.has_trainer);
+    ASSERT_TRUE(gen3_edit_trainer(&ed) != NULL);
+    ASSERT_EQ(gen3_edit_trainer(&ed)->tid, 12345);
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* D7 amends D5: once the player is known, a new species is theirs, and its first non-shiny PID is
+ * searched against their OT ID. Without a player the OT is kept
+ * (test_edit_species_resets_keeps_ot). */
+TEST(test_edit_species_takes_trainer) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_edit_set_level(&ed, 10);
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 252));
+    ASSERT_EQ(gen3_edit_national(&ed), 252);
+    ASSERT_EQ(G(Level), 10);
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_EQ(G(OtId), RUBY_OT_ID);
+    ASSERT_EQ(G(OtGender), 1);
+    ASSERT_TRUE(!gen3_is_shiny(G(OtId), G(Pid)));
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* Another OT on the current Pokemon */
+    gen3_edit_set_ot_name(&ed, "ASH");
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 1, 2), Gen3OtIdOk);
+    ASSERT_TRUE(!gen3_edit_ot_is_trainer(&ed));
+
+    /* Fails closed: without the bulk data nothing changes, the OT included */
+    Gen3Editor before = ed;
+    bulk_file_failing = true;
+    ASSERT_TRUE(!gen3_edit_set_species(&ed, 4));
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_TRUE(bulk_file_open());
+
+    /* Make the next random PID shiny for the player's OT but not for the current one: the new
+     * Pokemon must not take it. */
+    Gen3Rng peek = ed.rng;
+    uint32_t r = gen3_rng_next(&peek);
+    t.sid = (uint16_t)((r >> 16) ^ (r & 0xFFFF) ^ t.tid);
+    gen3_edit_set_trainer(&ed, &t);
+    uint32_t ot_id = ((uint32_t)t.sid << 16) | t.tid;
+    ASSERT_TRUE(gen3_is_shiny(ot_id, r));
+    ASSERT_TRUE(!gen3_is_shiny(G(OtId), r));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
+    ASSERT_EQ(gen3_edit_national(&ed), 4);
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_EQ(G(OtId), ot_id);
+    ASSERT_EQ(G(OtGender), 1);
+    ASSERT_TRUE(G(Pid) != r);
+    ASSERT_TRUE(!gen3_is_shiny(ot_id, G(Pid)));
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* "OT: use <NAME>": the player's OT on any Pokemon, shininess kept where it can be (plan 2 D6) */
+TEST(test_edit_use_trainer_ot) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    /* No player yet: nothing changes */
+    Gen3Editor before = ed;
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerNoTrainer);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_TRUE(ed.pristine);
+
+    Gen3Pkm in;
+    golden_pkm(&in);
+    ASSERT_TRUE(gen3_edit_load(&ed, &in));
+    Gen3Traits old;
+    gen3_traits_of(&ed.pkm, &old);
+    old.shiny = true;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &old));
+    gen3_traits_of(&ed.pkm, &old);
+    ASSERT_TRUE(old.shiny);
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(ot_bytes_are(&ed, FLIPPER_NAME)); /* an edited Pokemon: not applied yet */
+    ASSERT_TRUE(!gen3_edit_ot_is_trainer(&ed));
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerOk);
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_EQ(G(OtId), RUBY_OT_ID);
+    ASSERT_EQ(G(OtGender), 1);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    Gen3Traits got;
+    gen3_traits_of(&ed.pkm, &got);
+    ASSERT_TRUE(got.shiny);
+    ASSERT_EQ(got.nature, old.nature);
+    ASSERT_EQ(got.gender, old.gender);
+    ASSERT_EQ(got.ability_slot, old.ability_slot);
+    ASSERT_EQ(gen3_edit_national(&ed), 252);
+    ASSERT_TRUE(edit_consistent(&ed));
+    /* Already the player's: nothing changes */
+    before = ed;
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerOk);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+
+    /* Unown HARDY/P is shiny for 22222/0 but can't be for 64893/0 (test_edit_ot_id_shiny_lost):
+     * the OT is applied and the Pokemon is no longer shiny */
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, GEN3_NATIONAL_UNOWN));
+    Gen3Traits want = {0, Gen3GenderNone, true, 0, 15};
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    t.tid = 64893;
+    t.sid = 0;
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerShinyLost);
+    ASSERT_EQ(G(OtId), 64893);
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_EQ(G(OtGender), 1);
+    gen3_traits_of(&ed.pkm, &got);
+    ASSERT_TRUE(!got.shiny);
+    ASSERT_EQ(got.nature, 0);
+    ASSERT_EQ(got.unown_letter, 15);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* The player's name bytes are taken as they are, even ones the app can't show */
+TEST(test_edit_trainer_raw_bytes) {
+    static const uint8_t odd[GEN3_OT_NAME_LEN] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07};
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    memcpy(t.name, odd, GEN3_OT_NAME_LEN);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(ot_bytes_are(&ed, odd));
+    ASSERT_MEM_EQ(gen3_edit_trainer(&ed)->name, odd, GEN3_OT_NAME_LEN);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* Another player while the editor is still the default: theirs replaces it */
+    ruby_trainer(&t);
+    t.tid = 1;
+    t.sid = 2;
+    t.gender = 0;
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_EQ(G(OtId), 0x00020001);
+    ASSERT_EQ(G(OtGender), 0);
+    ASSERT_TRUE(gen3_edit_ot_is_trainer(&ed));
+    ASSERT_TRUE(ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
+/* R4: pristine until a call changes the Pokemon's bytes. A call that refuses, fails or changes
+ * nothing keeps it; set_trainer keeps it although it rewrites the OT. */
+TEST(test_edit_pristine_flags) {
+    Gen3Editor ed;
+    Gen3Pkm golden, egg;
+    golden_pkm(&golden);
+    egg = golden;
+    gen3_pkm_set(&egg, Gen3FieldIsEgg, 1);
+    gen3_pkm_fix_checksum(&egg);
+
+    /* Changes: cleared */
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(ed.pristine);
+    gen3_edit_set_level(&ed, 10);
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, "BOB"));
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_edit_set_item(&ed, 200);
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_load(&ed, &golden));
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
+    ASSERT_TRUE(!ed.pristine);
+
+    /* No change: kept */
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    Gen3Editor before = ed;
+    gen3_edit_set_level(&ed, 5);
+    ASSERT_TRUE(gen3_edit_set_nickname(&ed, "")); /* the species name, as shown */
+    gen3_edit_set_item(&ed, 175); /* refused */
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 1));
+    ASSERT_TRUE(!gen3_edit_load(&ed, &egg)); /* refused */
+    gen3_edit_set_item(&ed, 0);
+    gen3_edit_set_ball(&ed, GEN3_EDIT_BALL);
+    gen3_edit_set_pokerus(&ed, 0);
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, GEN3_EDIT_DEFAULT_TID, GEN3_EDIT_DEFAULT_SID), Gen3OtIdOk);
+    gen3_edit_set_ot_name(&ed, GEN3_EDIT_DEFAULT_OT_NAME);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_TRUE(ed.pristine);
+
+    /* The player's OT: kept, and applying it again changes nothing */
+    Gen3Trainer t;
+    ruby_trainer(&t);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(ot_bytes_are(&ed, RUBY_NAME));
+    ASSERT_TRUE(ed.pristine);
+    before = ed;
+    ASSERT_EQ(gen3_edit_use_trainer_ot(&ed), Gen3UseTrainerOk);
+    gen3_edit_set_trainer(&ed, &t);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_TRUE(ed.pristine);
+
+    /* Cleared for good: an edit back to the same bytes doesn't set it again */
+    gen3_edit_set_level(&ed, 6);
+    ASSERT_TRUE(!ed.pristine);
+    gen3_edit_set_level(&ed, 5);
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
 int main(void) {
     if(!bulk_file_open()) return 1;
     RUN(test_edit_init_defaults);
@@ -1321,5 +1617,11 @@ int main(void) {
     RUN(test_edit_load_validates);
     RUN(test_edit_no_data_keeps_pokemon);
     RUN(test_edit_no_data_load);
+    RUN(test_edit_trainer_pristine);
+    RUN(test_edit_trainer_after_edit);
+    RUN(test_edit_species_takes_trainer);
+    RUN(test_edit_use_trainer_ot);
+    RUN(test_edit_trainer_raw_bytes);
+    RUN(test_edit_pristine_flags);
     TEST_EXIT();
 }
