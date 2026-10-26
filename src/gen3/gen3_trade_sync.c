@@ -246,6 +246,9 @@ static void guide_pick(
     }
     switch(st->phase) {
     case Gen3ClubPhaseWaiting:
+        /* A relink's gap (about 20 frames) is linked, as for ending (gba_linked): the GBA opens
+         * its next link at once, so no Waiting row flashes up (T14) */
+        if(st->relinking) SAY("Linking...", "", "");
         if(st->last_result == Gen3TradeResultRolledBack)
             SAY("Link lost while the", "GBA saved. It keeps", "its old save.");
         if(st->last_result == Gen3TradeResultAssumed)

@@ -2798,6 +2798,109 @@ TEST(test_status_relinking) {
     }
 }
 
+/* The trade screen's guide from the real status, frame by frame (test_guide_through_relinks) */
+typedef struct {
+    bool in_club; /* the club has reached Room */
+    bool in_gap; /* the last frame was Waiting with relinking */
+    uint32_t gaps; /* relink gaps entered */
+    uint32_t gap_frames;
+} GuideWatch;
+
+/* One step. False on a fake error, a guide text cut, or, once the club has reached Room, a
+ * Waiting row ("Go to the Cable Club", "Link lost ...") or, in a gap, anything but "Linking..."
+ * or "Trading...". */
+static bool guide_step(Bench* b, GuideWatch* w) {
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+    step(b);
+    const Gen3ClubStatus st = club_status(b);
+    const bool gap = st.phase == Gen3ClubPhaseWaiting && st.relinking;
+    if(st.phase == Gen3ClubPhaseRoom) w->in_club = true;
+    if(gap && !w->in_gap) w->gaps++;
+    if(gap) w->gap_frames++;
+    w->in_gap = gap;
+    if(fake_ruby_error(&b->ruby) != NULL) return false;
+    if(!gen3_trade_guide(&st, true, true, Gen3RefuseNone, Gen3PickupOk, out)) return false;
+    if(!w->in_club) return true;
+    const bool waiting_row = strcmp(out[0], "Go to the Cable Club:") == 0 ||
+                             strncmp(out[0], "Link lost", strlen("Link lost")) == 0;
+    const bool gap_row = strcmp(out[0], "Linking...") == 0 || strcmp(out[0], "Trading...") == 0;
+    if(waiting_row || (gap && !gap_row)) {
+        printf(
+            "  guide at burst %u, phase %d relinking %d: \"%s\"\n",
+            (unsigned)b->bursts,
+            st.phase,
+            st.relinking,
+            out[0]);
+        return false;
+    }
+    return true;
+}
+
+/* Steps with guide_step until cond holds; fails the test after max frames */
+#define GUIDE_UNTIL(b, w, cond, max) \
+    do { \
+        uint32_t n_ = 0; \
+        while(!(cond)) { \
+            ASSERT_TRUE(n_++ < (max)); \
+            ASSERT_TRUE(guide_step((b), (w))); \
+        } \
+    } while(0)
+
+TEST(test_guide_through_relinks) {
+    /* T14 (from the T13 fix round 2): every normal relink has a gap of about 20 frames in
+     * Waiting. The guide reads it as linked: "Linking...", or "Trading..." for the trade's own
+     * relink, never "Go to the Cable Club". Five gaps: the sit, the trade's 0x1144, the post-save
+     * 0x1122, the EEBB's 0x1111 back to the room, the re-sit. */
+    Bench b;
+    GuideWatch w = {0};
+    uint8_t z[GEN3_PARTY_SIZE];
+    bool answered = false;
+    make_z(z);
+    bench_init_trade(&b);
+    fake_ruby_open_link(&b.ruby);
+    GUIDE_UNTIL(
+        &b,
+        &w,
+        club_status(&b).phase == Gen3ClubPhaseRoom && fake_ruby_phase(&b.ruby) == FakeRubyRoom,
+        420);
+    ASSERT_EQ(w.gaps, 0);
+
+    fake_ruby_sit(&b.ruby, 1);
+    GUIDE_UNTIL(&b, &w, fake_ruby_menu_state(&b.ruby) == FakeRubyMenuBrowsing, 600);
+    ASSERT_EQ(w.gaps, 1);
+
+    fake_ruby_offer(&b.ruby, 2);
+    for(uint32_t i = 0;
+        !(club_status(&b).trades_done == 1 &&
+          fake_ruby_menu_state(&b.ruby) == FakeRubyMenuBrowsing);
+        i++) {
+        ASSERT_TRUE(i < 4000);
+        if(!answered && fake_ruby_menu_state(&b.ruby) == FakeRubyMenuPrompt) {
+            fake_ruby_answer(&b.ruby, true);
+            answered = true;
+        }
+        ASSERT_TRUE(guide_step(&b, &w));
+    }
+    ASSERT_EQ(w.gaps, 3);
+
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 1));
+    GUIDE_UNTIL(&b, &w, fake_ruby_phase(&b.ruby) == FakeRubyReturn, 200);
+    GUIDE_UNTIL(
+        &b,
+        &w,
+        club_status(&b).phase == Gen3ClubPhaseRoom && fake_ruby_phase(&b.ruby) == FakeRubyRoom,
+        200);
+    ASSERT_EQ(w.gaps, 4);
+
+    fake_ruby_resit(&b.ruby);
+    GUIDE_UNTIL(&b, &w, fake_ruby_menu_state(&b.ruby) == FakeRubyMenuBrowsing, 800);
+    ASSERT_EQ(w.gaps, 5);
+    ASSERT_TRUE(w.gap_frames >= 5);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
+}
+
+#undef GUIDE_UNTIL
+
 TEST(test_leave_and_gba_exit) {
     /* D9: the GBA's own 0017 and the request make one 0017 between them */
     {
@@ -3044,6 +3147,7 @@ int main(void) {
     RUN(test_leave_in_relink_gap);
     RUN(test_leave_gba_gone);
     RUN(test_status_relinking);
+    RUN(test_guide_through_relinks);
     RUN(test_leave_and_gba_exit);
     RUN(test_leave_queue_busy);
     RUN(test_leave_during_linkup);

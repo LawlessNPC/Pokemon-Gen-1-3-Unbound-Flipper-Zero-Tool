@@ -137,7 +137,8 @@ Gen3TradeBackAction gen3_trade_back_action(const Gen3ClubStatus* st, bool runnin
 /* What is happening and what to do on the GBA. started: the session runs (or ran and ended);
  * cable_ok: the cable reads right; offer_refuse and pickup_fail: the sync's. Unused lines are "".
  * The guide never reads left as "trade resolved", nor refused alone as "no offer" (an R8 DDEE
- * leaves it None). Written through gen3_trade_guide_copy: false if a text, row or reason, had to
+ * leaves it None). Waiting with relinking (a relink's gap) reads as linked: "Linking...", never
+ * the Waiting rows. Written through gen3_trade_guide_copy: false if a text, row or reason, had to
  * be cut to fit (test_guide_line_lengths: never). */
 bool gen3_trade_guide(
     const Gen3ClubStatus* st,

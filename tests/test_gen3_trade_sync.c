@@ -1189,6 +1189,29 @@ TEST(test_guide_texts) {
     st.resit_needed = true;
     GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
 
+    /* A relink's gap (T14, from the T13 fix round 2): Waiting with relinking is the GBA opening
+     * its next link, about 20 frames. It counts as linked, so never the Waiting rows */
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    st.relinking = true; /* the sit's 0x1122, to the trade menu */
+    GUIDE(&st, no, ok, "Linking...", "", "");
+    st.resit_needed = true; /* the 0x1111 back to the room, after an EEBB */
+    GUIDE(&st, no, ok, "Linking...", "", "");
+    st.resit_needed = false;
+    st.trades_done = 1; /* the 0x1122 back to the menu, after the save */
+    st.last_result = Gen3TradeResultDone;
+    GUIDE(&st, no, ok, "Linking...", "", "");
+    st.trade_pending = true; /* the trade's 0x1144, after CCDD */
+    GUIDE(&st, no, ok, "Trading...", "Watch the GBA.", "");
+    st.leaving = true;
+    GUIDE(&st, no, ok, "Ending: the GBA walks", "out of the Trade", "Center by itself.");
+    /* The rows above the phase rows still come first */
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    st.relinking = true;
+    GUIDE(&st, Gen3RefuseItem, ok, "Can't offer it:", REASON[Gen3RefuseItem], "Edit it first.");
+    /* The relink wait ran out: the GBA is gone, plain Waiting again */
+    st.relinking = false;
+    GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+
     status_reset(&st, Gen3ClubPhaseLinked);
     GUIDE(&st, no, ok, "Linking...", "", "");
     status_reset(&st, Gen3ClubPhasePlayers);
@@ -1275,6 +1298,16 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
             out[2]);
         return false;
     }
+    /* A relink's gap is linked (T14): never the Waiting rows, whatever else is set */
+    if(st->relinking && (strcmp(out[0], "Go to the Cable Club:") == 0 ||
+                         strncmp(out[0], "Link lost", strlen("Link lost")) == 0)) {
+        printf(
+            "  guide in a relink gap: phase %d result %d: \"%s\"\n",
+            st->phase,
+            st->last_result,
+            out[0]);
+        return false;
+    }
     guide_saw_confirm |= strcmp(out[0], "Confirm the trade") == 0;
     guide_saw_next |= strcmp(out[0], "Edit it (OK), or pick") == 0;
     return true;
@@ -1282,7 +1315,7 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
 
 /* Every text fits FontSecondary across 128 px (21 characters): gen3_trade_guide reports any text
  * it had to cut. Every phase x last_error x {save_window, left, leaving, trade_pending,
- * offer_stale, resit_needed, gba_seated} x menu x trades_done (0, 1), then
+ * offer_stale, resit_needed, gba_seated, relinking} x menu x trades_done (0, 1), then
  * (a) refused x last_result with no pickup failure and no offer refusal, and
  * (b) offer_refuse x pickup_fail with refused and last_result None.
  * A pickup failure or an offer refusal decides the guide before any row that reads refused or
@@ -1294,7 +1327,7 @@ TEST(test_guide_line_lengths) {
     guide_saw_next = false;
     for(int phase = Gen3ClubPhaseWaiting; phase <= Gen3ClubPhaseSave; phase++) {
         for(int err = Gen3ClubErrorNone; err <= Gen3ClubErrorUnexpected; err++) {
-            for(unsigned flags = 0; flags < (1u << 7); flags++) {
+            for(unsigned flags = 0; flags < (1u << 8); flags++) {
                 for(int menu = Gen3ClubMenuIdle; menu <= Gen3ClubMenuLeaving; menu++) {
                     for(uint32_t done = 0; done <= 1; done++) {
                         status_reset(&st, (Gen3ClubPhase)phase);
@@ -1306,6 +1339,7 @@ TEST(test_guide_line_lengths) {
                         st.offer_stale = flags & 16;
                         st.resit_needed = flags & 32;
                         st.gba_seated = flags & 64;
+                        st.relinking = flags & 128;
                         st.menu = (Gen3ClubMenu)menu;
                         st.trades_done = done;
                         for(int r = Gen3RefuseNone; r <= Gen3RefuseBadData; r++) {
@@ -1329,7 +1363,7 @@ TEST(test_guide_line_lengths) {
         }
     }
     ASSERT_EQ(GEN3_GUIDE_LINE_LEN, 22);
-    ASSERT_EQ(guide_calls, 11ul * 5 * 128 * 4 * 2 * (7 * 5 + 7 * 3));
+    ASSERT_EQ(guide_calls, 11ul * 5 * 256 * 4 * 2 * (7 * 5 + 7 * 3));
     ASSERT_TRUE(guide_saw_confirm);
     ASSERT_TRUE(guide_saw_next);
 }
