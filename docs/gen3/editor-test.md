@@ -50,6 +50,16 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 8. **Item filters.** Letter `E` has no ENIGMA BERRY, and `M` has no MACH BIKE (nor any Mail).
 9. **Pokerus.** Strain `A`, days `3` → the row shows `Infected`. Days `0` → `Cured`. Strain `None` → `Clean`, and Days is hidden. Back and reopen → the strain and days are as left.
 
+## D. Files
+
+1. **Save.** `Save .pk3` suggests the nickname → OK → `Saved` / `<name>.pk3`. The file `apps_data/pokemon/gen3/<name>.pk3` is 80 bytes (check with qFlipper). A name with a bad character shows `Use A-Z, 0-9,` / `_ or -`.
+2. **Overwrite.** Save again with the same name → `Overwrite?`. `Cancel` returns to the name input and keeps the old file. `Overwrite` → `Saved`.
+3. **Load.** Change the level, then `Load .pk3` that file → `Loaded` / `<NICK>` / `<SPECIES> Lv. <n>`, and the Edit menu shows the saved level, nature, moves and OT. Back in the file browser returns to the Gen III menu.
+4. **Not a .pk3.** Copy any non-`.pk3` file to `gen3/` renamed to `x.pk3` → `Load failed` / `Not a .pk3 (size)`.
+5. **PKHeX (optional).** Open the saved file → no checksum warning, and species, level, nature, moves and OT match. Export a Gen III Pokemon from PKHeX as `.pk3` → it loads on the Flipper. If the file had a held Mail item, a duplicate move, a move gap, or an out-of-range level, the result also says `Fixed: mail moves level ability` (only the parts that changed).
+6. **No SD card.** Remove the SD card → `Load .pk3` shows `No SD card`.
+7. **Data missing.** With `gen3_bulk.bin` renamed (see E), `Load .pk3` and `Save .pk3` show `Data missing`.
+
 ## E. Data file
 
 The species names and learnsets are not in the app's memory. They are in `gen3_bulk.bin`, which ships inside the `.fap`. The Flipper unpacks the app's files to `apps_assets/pokemon/` when the app starts and that folder is missing or out of date. Reinstalling the same `.fap` doesn't unpack them again while `apps_assets/pokemon/.assets.signature` still matches, so the remedy is to delete the folder.
@@ -92,4 +102,11 @@ The species names and learnsets are not in the app's memory. They are in `gen3_b
 | C7 Held item | | |
 | C8 Item filters | | |
 | C9 Pokerus | | |
+| D1 Save | | |
+| D2 Overwrite | | |
+| D3 Load | | |
+| D4 Not a .pk3 | | |
+| D5 PKHeX | | |
+| D6 No SD card | | |
+| D7 Data missing | | |
 | E1 Data missing | | |

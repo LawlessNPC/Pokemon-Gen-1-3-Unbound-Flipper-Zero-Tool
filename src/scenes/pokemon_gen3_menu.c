@@ -86,7 +86,7 @@ static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
 
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
  * file, so it is created only once the file reads: false (no editor) if it can't be. */
-static bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
+bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_editor && gen3_bulk_ready()) {
         pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
         if(!gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get())) {
@@ -120,6 +120,20 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
 
     submenu_add_item(
         pokemon_fap->submenu,
+        "Load .pk3",
+        PokemonSceneGen3Load,
+        gen3_menu_item_callback,
+        pokemon_fap);
+
+    submenu_add_item(
+        pokemon_fap->submenu,
+        "Save .pk3",
+        PokemonSceneGen3SaveName,
+        gen3_menu_item_callback,
+        pokemon_fap);
+
+    submenu_add_item(
+        pokemon_fap->submenu,
         "Link Test",
         PokemonSceneGen3LinkTest,
         gen3_menu_item_callback,
@@ -146,6 +160,27 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
             consumed = true;
         } else if(event.event == PokemonSceneGen3Edit) {
             if(gen3_menu_editor_ready(pokemon_fap)) {
+                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+            } else {
+                gen3_menu_show_data_missing(pokemon_fap);
+            }
+            consumed = true;
+        } else if(event.event == PokemonSceneGen3Load) {
+            if(gen3_menu_editor_ready(pokemon_fap)) {
+                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+            } else {
+                gen3_menu_show_data_missing(pokemon_fap);
+            }
+            consumed = true;
+        } else if(event.event == PokemonSceneGen3SaveName) {
+            if(gen3_menu_editor_ready(pokemon_fap)) {
+                gen3_pk3_default_name(
+                    &pokemon_fap->gen3_editor->pkm,
+                    pokemon_fap->gen3_file_name,
+                    sizeof(pokemon_fap->gen3_file_name));
+                /* The text scene's mode, as the Gen III editor sets it for a nickname */
+                scene_manager_set_scene_state(
+                    pokemon_fap->scene_manager, PokemonSceneGen3Nickname, event.event);
                 scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
             } else {
                 gen3_menu_show_data_missing(pokemon_fap);

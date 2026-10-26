@@ -14,6 +14,7 @@
 #include <gblink.h>
 
 #include <src/include/pokemon_data.h>
+#include <src/gen3/gen3_pk3.h>
 
 #define TAG "Pokemon"
 
@@ -52,6 +53,9 @@ struct pokemon_fap {
 
     /* Gen III species picker view, allocated next to the editor */
     void* gen3_species_select;
+
+    /* Gen III .pk3 file name being saved, without the extension */
+    char gen3_file_name[GEN3_PK3_NAME_MAX + 1];
 };
 
 typedef struct pokemon_fap PokemonFap;
