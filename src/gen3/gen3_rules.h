@@ -32,8 +32,11 @@ typedef enum {
 
 Gen3Gender gen3_gender_of(uint8_t gender_ratio, uint32_t pid);
 bool gen3_is_shiny(uint32_t ot_id, uint32_t pid);
+#define GEN3_UNOWN_LETTER_COUNT 28 /* A..Z, '!', '?' */
 /* 0..25 = A..Z, 26 = '!', 27 = '?'. */
 uint8_t gen3_unown_letter(uint32_t pid);
+/* The letter as shown: 'A'..'Z', '!', '?'; '?' for anything past 27 too. */
+char gen3_unown_char(uint8_t letter);
 
 typedef struct {
     uint8_t nature; /* pid % 25 */

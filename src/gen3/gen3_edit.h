@@ -18,6 +18,7 @@
 #define GEN3_EDIT_DEFAULT_SID      0
 #define GEN3_EDIT_MET_GAME         2 /* Ruby */
 #define GEN3_EDIT_BALL             4 /* POKE BALL */
+#define GEN3_EDIT_BALL_MAX         12 /* balls are items 1..12, MASTER BALL..PREMIER BALL */
 #define GEN3_EDIT_MAX_EV           85 /* 6 x 85 = 510, the game's MAX_TOTAL_EVS */
 
 typedef enum { /* same order and values as EvIv in src/include/stat_nl.h */
@@ -28,6 +29,7 @@ typedef enum { /* same order and values as EvIv in src/include/stat_nl.h */
     Gen3PresetMaxIvLevelEv,
     Gen3PresetMaxIvMaxEv,
 } Gen3Preset;
+#define GEN3_PRESET_COUNT 6
 
 typedef struct Gen3Editor {
     Gen3Pkm pkm;
@@ -63,7 +65,7 @@ uint16_t gen3_edit_national(const Gen3Editor* ed);
 void gen3_edit_set_species(Gen3Editor* ed, uint16_t national);
 /* Clamped 1..100; exp = exp_for_level. */
 void gen3_edit_set_level(Gen3Editor* ed, uint8_t level);
-/* Applies IVs (re-rolls random ones) and EVs. No-op for a value past Gen3PresetMaxIvMaxEv. */
+/* Applies IVs (re-rolls random ones) and EVs. No-op for a value >= GEN3_PRESET_COUNT. */
 void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset);
 /* "" -> species name (game encoding). */
 void gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii);
@@ -78,12 +80,14 @@ void gen3_edit_set_item(Gen3Editor* ed, uint16_t item);
 bool gen3_edit_set_move(Gen3Editor* ed, uint8_t slot, uint16_t move);
 /* gen3_default_moves for the species and level, each with full base PP; PP Ups 0. */
 void gen3_edit_default_moves(Gen3Editor* ed);
-/* 1..12; anything else is a no-op. */
+/* 1..GEN3_EDIT_BALL_MAX; anything else is a no-op. */
 void gen3_edit_set_ball(Gen3Editor* ed, uint8_t ball);
 /* raw byte: strain << 4 | days */
 void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value);
 /* New PID with these traits (normalised as gen3_pid_find does); changes only the PID, the ability
- * bit, party stats and the checksum. false (unchanged) only if gen3_pid_find fails. */
+ * bit, party stats and the checksum. If the normalised want already equals gen3_traits_of, true
+ * and nothing changes (the PID and stored ability slot are kept). false (unchanged) only if
+ * gen3_pid_find fails. */
 bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want);
 /* 0 "Clean"; days != 0 "Infected"; else "Cured". */
 const char* gen3_pokerus_status(uint8_t value);

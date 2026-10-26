@@ -220,6 +220,29 @@ TEST(test_data_small_lists) {
     ASSERT_STR_EQ(gen3_type_name(GEN3_TYPE_COUNT), "???");
 }
 
+TEST(test_data_species_predicates) {
+    ASSERT_TRUE(gen3_species_two_abilities(280)); /* Ralts: Synchronize / Trace */
+    ASSERT_TRUE(!gen3_species_two_abilities(1)); /* Bulbasaur: Overgrow */
+    ASSERT_TRUE(!gen3_species_two_abilities(0));
+    ASSERT_TRUE(!gen3_species_two_abilities(GEN3_NATIONAL_COUNT + 1));
+    ASSERT_TRUE(!gen3_species_gender_fixed(1)); /* ratio 31 */
+    ASSERT_TRUE(!gen3_species_gender_fixed(280)); /* ratio 127 */
+    ASSERT_TRUE(gen3_species_gender_fixed(29)); /* female only */
+    ASSERT_TRUE(gen3_species_gender_fixed(32)); /* male only */
+    ASSERT_TRUE(gen3_species_gender_fixed(GEN3_NATIONAL_UNOWN)); /* genderless */
+    /* Unknown species: nothing to choose */
+    ASSERT_TRUE(gen3_species_gender_fixed(0));
+    ASSERT_TRUE(gen3_species_gender_fixed(GEN3_NATIONAL_COUNT + 1));
+    for(uint16_t n = 1; n <= GEN3_NATIONAL_COUNT; n++) {
+        const Gen3SpeciesInfo* s = gen3_species(n);
+        uint8_t r = s->gender_ratio;
+        ASSERT_EQ(gen3_species_two_abilities(n), s->ability[1] != 0);
+        ASSERT_EQ(
+            gen3_species_gender_fixed(n),
+            r == GEN3_GENDER_MALE_ONLY || r == GEN3_GENDER_FEMALE_ONLY || r == GEN3_GENDERLESS);
+    }
+}
+
 int main(void) {
     RUN(test_data_internal_national_map);
     RUN(test_data_bulbasaur);
@@ -233,5 +256,6 @@ int main(void) {
     RUN(test_data_moves);
     RUN(test_data_items);
     RUN(test_data_small_lists);
+    RUN(test_data_species_predicates);
     TEST_EXIT();
 }

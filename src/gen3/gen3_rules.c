@@ -134,7 +134,12 @@ bool gen3_is_shiny(uint32_t ot_id, uint32_t pid) {
 uint8_t gen3_unown_letter(uint32_t pid) {
     uint32_t v = ((pid & 0x03000000) >> 18) | ((pid & 0x00030000) >> 12) |
                  ((pid & 0x00000300) >> 6) | (pid & 0x00000003);
-    return v % 28;
+    return v % GEN3_UNOWN_LETTER_COUNT;
+}
+
+char gen3_unown_char(uint8_t letter) {
+    if(letter < 26) return (char)('A' + letter);
+    return letter == 26 ? '!' : '?';
 }
 
 void gen3_traits_of(const Gen3Pkm* p, Gen3Traits* out) {
@@ -169,20 +174,16 @@ bool gen3_pid_find(
     uint32_t* pid) {
     const Gen3SpeciesInfo* info = gen3_species(national);
     if(!info) return false;
-    Gen3Gender gender = want->gender;
-    if(info->gender_ratio == 0)
-        gender = Gen3GenderMale;
-    else if(info->gender_ratio == 254)
-        gender = Gen3GenderFemale;
-    else if(info->gender_ratio == 255)
-        gender = Gen3GenderNone;
+    /* A fixed ratio has one gender for every PID */
+    Gen3Gender gender =
+        gen3_species_gender_fixed(national) ? gen3_gender_of(info->gender_ratio, 0) : want->gender;
     /* Unsatisfiable wants fail fast instead of spinning through GEN3_PID_MAX_TRIES. */
-    bool two_abilities = info->ability[1] != 0;
+    bool two_abilities = gen3_species_two_abilities(national);
     bool unown = national == GEN3_NATIONAL_UNOWN;
-    if(want->nature >= 25) return false;
+    if(want->nature >= GEN3_NATURE_COUNT) return false;
     if(two_abilities && want->ability_slot > 1) return false;
-    if(unown && want->unown_letter >= 28) return false;
-    if(gender == Gen3GenderNone && info->gender_ratio != 255) return false;
+    if(unown && want->unown_letter >= GEN3_UNOWN_LETTER_COUNT) return false;
+    if(gender == Gen3GenderNone && !gen3_species_gender_fixed(national)) return false;
     uint32_t tid_sid = (ot_id & 0xFFFF) ^ (ot_id >> 16);
 
     for(uint32_t i = 0; i < GEN3_PID_MAX_TRIES; i++) {

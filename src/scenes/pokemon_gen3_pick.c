@@ -21,10 +21,6 @@ _Static_assert((int)Gen3PresetMaxIvZeroEv == (int)MAXIV_ZEROEV, "preset order !=
 _Static_assert((int)Gen3PresetMaxIvLevelEv == (int)MAXIV_LEVELEV, "preset order != EvIv");
 _Static_assert((int)Gen3PresetMaxIvMaxEv == (int)MAXIV_MAXEV, "preset order != EvIv");
 
-#define GEN3_PICK_PRESET_COUNT 6
-#define GEN3_PICK_BALL_MAX 12 /* gen3_edit_set_ball takes 1..12, MASTER BALL..PREMIER BALL */
-#define GEN3_PICK_UNOWN_COUNT 28 /* A..Z, '!', '?' */
-
 /* Indexed by Gen3Stat; HP is never raised or lowered by a nature */
 static const char* const gen3_pick_stat_names[Gen3StatCount] =
     {"HP", "Atk", "Def", "Spe", "SpA", "SpD"};
@@ -35,42 +31,40 @@ static void gen3_pick_callback(void* context, uint32_t index) {
     uint32_t state =
         scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Preset);
     Gen3Traits traits;
-    bool changed = false;
+    bool trait = true;
 
-    /* A PID trait: the current traits with one of them changed. Choosing the value it already
-     * has keeps the PID, so a stray OK doesn't change a loaded Pokemon. */
+    /* A PID trait: the current traits with one of them changed. gen3_edit_set_traits keeps the
+     * PID when that is the value it already has. */
     gen3_traits_of(&ed->pkm, &traits);
     switch(state) {
     case PokemonSceneGen3Preset:
         gen3_edit_set_preset(ed, (Gen3Preset)index);
+        trait = false;
         break;
     case PokemonSceneGen3Nature:
-        changed = traits.nature != index;
         traits.nature = (uint8_t)index;
         break;
     case PokemonSceneGen3Ability:
-        changed = traits.ability_slot != index;
         traits.ability_slot = (uint8_t)index;
         break;
     case PokemonSceneGen3Shiny:
-        changed = traits.shiny != (index != 0);
         traits.shiny = index != 0;
         break;
     case PokemonSceneGen3Gender:
-        changed = traits.gender != (Gen3Gender)index;
         traits.gender = (Gen3Gender)index;
         break;
     case PokemonSceneGen3Unown:
-        changed = traits.unown_letter != index;
         traits.unown_letter = (uint8_t)index;
         break;
     case PokemonSceneGen3Ball:
         gen3_edit_set_ball(ed, (uint8_t)index);
+        trait = false;
         break;
     default:
+        trait = false;
         break;
     }
-    if(changed) gen3_edit_set_traits(ed, &traits);
+    if(trait) gen3_edit_set_traits(ed, &traits);
 
     view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, PokemonSceneBack);
 }
@@ -110,7 +104,7 @@ void pokemon_scene_gen3_pick_on_enter(void* context) {
 
     switch(state) {
     case PokemonSceneGen3Preset:
-        for(uint32_t i = 0; i < GEN3_PICK_PRESET_COUNT; i++)
+        for(uint32_t i = 0; i < GEN3_PRESET_COUNT; i++)
             gen3_pick_add(pokemon_fap, namedlist_name_get_index(stat_list, i), i);
         selected = ed->preset;
         break;
@@ -138,13 +132,13 @@ void pokemon_scene_gen3_pick_on_enter(void* context) {
         selected = traits.gender;
         break;
     case PokemonSceneGen3Ball:
-        for(uint8_t ball = 1; ball <= GEN3_PICK_BALL_MAX; ball++)
+        for(uint8_t ball = 1; ball <= GEN3_EDIT_BALL_MAX; ball++)
             gen3_pick_add(pokemon_fap, gen3_item_name(ball), ball);
         selected = gen3_pkm_get(&ed->pkm, Gen3FieldBall);
         break;
     case PokemonSceneGen3Unown:
-        for(uint8_t letter = 0; letter < GEN3_PICK_UNOWN_COUNT; letter++) {
-            label[0] = letter < 26 ? (char)('A' + letter) : (letter == 26 ? '!' : '?');
+        for(uint8_t letter = 0; letter < GEN3_UNOWN_LETTER_COUNT; letter++) {
+            label[0] = gen3_unown_char(letter);
             label[1] = '\0';
             gen3_pick_add(pokemon_fap, label, letter);
         }

@@ -47,6 +47,11 @@ typedef struct {
 } Gen3SpeciesInfo; /* 16 bytes */
 
 const Gen3SpeciesInfo* gen3_species(uint16_t national); /* NULL unless 1..386 */
+/* ability[1] != 0. false for an unknown species. */
+bool gen3_species_two_abilities(uint16_t national);
+/* Male only, female only or genderless (ratio 0, 254 or 255): the PID can't choose the gender.
+ * true for an unknown species, which has no gender to choose either. */
+bool gen3_species_gender_fixed(uint16_t national);
 const char* gen3_species_name(uint16_t national); /* "?" unless 1..386 */
 uint16_t gen3_national_from_internal(uint16_t internal); /* 0 = not a real species */
 uint16_t gen3_internal_from_national(uint16_t national); /* 0 unless 1..386 */

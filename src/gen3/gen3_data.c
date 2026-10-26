@@ -9,6 +9,18 @@ const Gen3SpeciesInfo* gen3_species(uint16_t national) {
     return &gen3_species_info_tab[national];
 }
 
+bool gen3_species_two_abilities(uint16_t national) {
+    const Gen3SpeciesInfo* info = gen3_species(national);
+    return info && info->ability[1] != 0;
+}
+
+bool gen3_species_gender_fixed(uint16_t national) {
+    const Gen3SpeciesInfo* info = gen3_species(national);
+    if(!info) return true;
+    return info->gender_ratio == GEN3_GENDER_MALE_ONLY ||
+           info->gender_ratio == GEN3_GENDER_FEMALE_ONLY || info->gender_ratio == GEN3_GENDERLESS;
+}
+
 const char* gen3_species_name(uint16_t national) {
     if(national < 1 || national > GEN3_NATIONAL_COUNT) return "?";
     return gen3_species_name_tab[national];

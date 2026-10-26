@@ -129,6 +129,17 @@ TEST(test_unown_letter) {
     ASSERT_EQ(gen3_unown_letter(0x00010203), 27);
 }
 
+TEST(test_unown_char) {
+    ASSERT_EQ(GEN3_UNOWN_LETTER_COUNT, 28);
+    ASSERT_EQ(gen3_unown_char(0), 'A');
+    ASSERT_EQ(gen3_unown_char(1), 'B');
+    ASSERT_EQ(gen3_unown_char(25), 'Z');
+    ASSERT_EQ(gen3_unown_char(26), '!');
+    ASSERT_EQ(gen3_unown_char(27), '?');
+    ASSERT_EQ(gen3_unown_char(28), '?');
+    ASSERT_EQ(gen3_unown_char(255), '?');
+}
+
 TEST(test_traits_of_golden) {
     Gen3Pkm p;
     golden_build(&p);
@@ -264,6 +275,7 @@ int main(void) {
     RUN(test_gender_of);
     RUN(test_is_shiny);
     RUN(test_unown_letter);
+    RUN(test_unown_char);
     RUN(test_traits_of_golden);
     RUN(test_rng);
     RUN(test_pid_find_matrix);

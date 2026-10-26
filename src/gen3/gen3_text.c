@@ -80,6 +80,16 @@ size_t gen3_text_encode(const char* ascii, uint8_t* out, size_t field_len, size_
     return n;
 }
 
+/* Per char: encode never yields GEN3_EOS, so a string round-trips exactly when each of its chars
+ * does and none is cut off. */
+bool gen3_text_encodable(const char* ascii, size_t max_chars) {
+    for(size_t n = 0; ascii[n] != '\0'; n++) {
+        if(n >= max_chars) return false;
+        if(gen3_char_decode(gen3_char_encode(ascii[n])) != ascii[n]) return false;
+    }
+    return true;
+}
+
 size_t gen3_text_decode(const uint8_t* in, size_t in_len, char* out, size_t out_size) {
     if(out_size == 0) return 0;
     size_t n = 0;

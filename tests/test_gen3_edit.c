@@ -285,7 +285,9 @@ TEST(test_edit_presets) {
     gen3_edit_set_level(&ed, 50);
     /* EV per preset at level 50: zero, 85 * 50 / 100, max. */
     static const uint8_t ev[6] = {0, 42, 85, 0, 42, 85};
-    for(int pr = Gen3PresetRandIvZeroEv; pr <= Gen3PresetMaxIvMaxEv; pr++) {
+    ASSERT_EQ(GEN3_PRESET_COUNT, 6);
+    ASSERT_EQ(Gen3PresetMaxIvMaxEv + 1, GEN3_PRESET_COUNT);
+    for(int pr = Gen3PresetRandIvZeroEv; pr < GEN3_PRESET_COUNT; pr++) {
         gen3_edit_set_preset(&ed, (Gen3Preset)pr);
         ASSERT_EQ(ed.preset, pr);
         ASSERT_TRUE(ed.preset_applied);
@@ -309,7 +311,7 @@ TEST(test_edit_presets) {
         ASSERT_EQ(ed.rng.state, peek.state);
     }
     Gen3Pkm before = ed.pkm;
-    gen3_edit_set_preset(&ed, (Gen3Preset)6);
+    gen3_edit_set_preset(&ed, (Gen3Preset)GEN3_PRESET_COUNT);
     ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
     ASSERT_EQ(ed.preset, Gen3PresetRandIvLevelEv);
     ASSERT_TRUE(edit_consistent(&ed));
@@ -501,6 +503,92 @@ TEST(test_edit_unown_letters) {
     }
 }
 
+/* Asking for the traits it already has (after normalising the want as gen3_pid_find does)
+ * keeps all 100 bytes: no new PID, no recalculation. */
+TEST(test_edit_traits_same_keeps_pid) {
+    Gen3Editor ed;
+    gen3_edit_init(&ed, 7); /* Bulbasaur: gendered, one ability, not Unown */
+    Gen3Pkm before = ed.pkm;
+    Gen3Traits want;
+    gen3_traits_of(&ed.pkm, &want);
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+    /* Ignored: the slot of a one-ability species, the letter of a non-Unown */
+    want.ability_slot = !want.ability_slot;
+    want.unown_letter = (want.unown_letter + 1) % GEN3_UNOWN_LETTER_COUNT;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+    /* An out-of-range want is still refused, untouched */
+    want.nature = GEN3_NATURE_COUNT;
+    ASSERT_TRUE(!gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+    /* The gender of a gendered species is not ignored: the other one is a real change */
+    gen3_traits_of(&ed.pkm, &want);
+    want.gender = want.gender == Gen3GenderMale ? Gen3GenderFemale : Gen3GenderMale;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_TRUE(G(Pid) != gen3_pkm_get(&before, Gen3FieldPid));
+    Gen3Traits got;
+    gen3_traits_of(&ed.pkm, &got);
+    ASSERT_EQ(got.gender, want.gender);
+    ASSERT_EQ(got.nature, want.nature);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* Ignored: the gender of a female-only species */
+    gen3_edit_set_species(&ed, 29);
+    before = ed.pkm;
+    gen3_traits_of(&ed.pkm, &want);
+    ASSERT_EQ(want.gender, Gen3GenderFemale);
+    want.gender = Gen3GenderMale;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+
+    /* Unown (genderless): the gender is ignored, the letter is not */
+    gen3_edit_set_species(&ed, GEN3_NATIONAL_UNOWN);
+    before = ed.pkm;
+    gen3_traits_of(&ed.pkm, &want);
+    want.gender = Gen3GenderMale;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+    want.unown_letter = (want.unown_letter + 1) % GEN3_UNOWN_LETTER_COUNT;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_TRUE(G(Pid) != gen3_pkm_get(&before, Gen3FieldPid));
+    ASSERT_EQ(gen3_unown_letter(G(Pid)), want.unown_letter);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* A loaded two-ability Pokemon whose stored slot isn't pid & 1, with HP below MaxHp: the
+     * same traits keep the PID, the slot and the HP. */
+    gen3_edit_set_species(&ed, 280); /* Ralts */
+    Gen3Pkm in = ed.pkm;
+    uint32_t bit = !(gen3_pkm_get(&in, Gen3FieldPid) & 1);
+    gen3_pkm_set(&in, Gen3FieldAbilityBit, bit);
+    gen3_pkm_set(&in, Gen3FieldHp, 1);
+    gen3_pkm_fix_checksum(&in);
+    gen3_edit_load(&ed, &in);
+    ASSERT_EQ(G(AbilityBit), bit);
+    ASSERT_EQ(G(Hp), 1);
+    before = ed.pkm;
+    gen3_traits_of(&ed.pkm, &want);
+    ASSERT_EQ(want.ability_slot, bit);
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(edit_consistent_hp(&ed, false));
+    /* The other slot is a real change */
+    want.ability_slot = !bit;
+    ASSERT_TRUE(gen3_edit_set_traits(&ed, &want));
+    ASSERT_EQ(G(AbilityBit), !bit);
+    ASSERT_EQ(G(AbilityBit), G(Pid) & 1);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    /* An unknown species (copied raw by gen3_edit_load) is still refused, untouched */
+    in = ed.pkm;
+    gen3_pkm_set(&in, Gen3FieldSpecies, 260); /* a "?" placeholder */
+    gen3_edit_load(&ed, &in);
+    before = ed.pkm;
+    gen3_traits_of(&ed.pkm, &want);
+    ASSERT_TRUE(!gen3_edit_set_traits(&ed, &want));
+    ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+}
+
 TEST(test_edit_traits_preserve_other_bytes) {
     Gen3Pkm in;
     golden_pkm(&in);
@@ -581,11 +669,13 @@ TEST(test_edit_ot_id_keeps_shiny) {
 TEST(test_edit_ball_item_pokerus) {
     Gen3Editor ed;
     gen3_edit_init(&ed, 7);
-    gen3_edit_set_ball(&ed, 12);
-    ASSERT_EQ(G(Ball), 12);
+    ASSERT_EQ(GEN3_EDIT_BALL_MAX, 12);
+    ASSERT_STR_EQ(gen3_item_name(GEN3_EDIT_BALL_MAX), "PREMIER BALL");
+    gen3_edit_set_ball(&ed, GEN3_EDIT_BALL_MAX);
+    ASSERT_EQ(G(Ball), GEN3_EDIT_BALL_MAX);
     gen3_edit_set_ball(&ed, 0);
-    gen3_edit_set_ball(&ed, 13);
-    ASSERT_EQ(G(Ball), 12);
+    gen3_edit_set_ball(&ed, GEN3_EDIT_BALL_MAX + 1);
+    ASSERT_EQ(G(Ball), GEN3_EDIT_BALL_MAX);
     gen3_edit_set_item(&ed, 200);
     ASSERT_EQ(G(HeldItem), 200);
     /* Refused: mail (121..132), a key item, an unused id, out of range. */
@@ -871,6 +961,7 @@ int main(void) {
     RUN(test_edit_ability_bit_single_ability);
     RUN(test_edit_unown_letters);
     RUN(test_edit_traits_preserve_other_bytes);
+    RUN(test_edit_traits_same_keeps_pid);
     RUN(test_edit_ot_id_keeps_shiny);
     RUN(test_edit_ball_item_pokerus);
     RUN(test_edit_load_keeps_bytes);

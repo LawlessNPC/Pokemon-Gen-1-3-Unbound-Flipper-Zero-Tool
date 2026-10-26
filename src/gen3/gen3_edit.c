@@ -6,7 +6,8 @@
 /* OT name bytes in the PKHeX .pk3 layout (gen3_pkm.c). A species change copies them raw so an
  * OT name with characters the app can't decode stays the game's own. */
 #define GEN3_EDIT_OT_NAME_OFF 0x14
-#define GEN3_EDIT_BALL_MAX    12
+
+_Static_assert(Gen3PresetMaxIvMaxEv + 1 == GEN3_PRESET_COUNT, "GEN3_PRESET_COUNT");
 
 static const Gen3SpeciesInfo* ed_info(const Gen3Pkm* p) {
     return gen3_species(gen3_national_from_internal(gen3_pkm_get(p, Gen3FieldSpecies)));
@@ -19,8 +20,8 @@ static uint8_t ed_level(const Gen3Pkm* p) {
 }
 
 static bool ed_two_abilities(const Gen3Pkm* p) {
-    const Gen3SpeciesInfo* info = ed_info(p);
-    return info && info->ability[1] != 0;
+    return gen3_species_two_abilities(
+        gen3_national_from_internal(gen3_pkm_get(p, Gen3FieldSpecies)));
 }
 
 /* After a new PID: the ability slot it was chosen for, which is pid & 1 (CreateBoxMon; and
@@ -198,7 +199,7 @@ bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
         ed_set_default_moves(pkm, national, ed_level(pkm));
         info->moves_defaulted = true;
     }
-    if(sp->ability[1] == 0 && gen3_pkm_get(pkm, Gen3FieldAbilityBit)) {
+    if(!gen3_species_two_abilities(national) && gen3_pkm_get(pkm, Gen3FieldAbilityBit)) {
         gen3_pkm_set(pkm, Gen3FieldAbilityBit, 0);
         info->ability_fixed = true;
     }
@@ -236,7 +237,7 @@ void gen3_edit_set_level(Gen3Editor* ed, uint8_t level) {
 }
 
 void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset) {
-    if((unsigned)preset > Gen3PresetMaxIvMaxEv) return;
+    if((unsigned)preset >= GEN3_PRESET_COUNT) return;
     ed->preset = preset;
     ed_apply_preset(ed);
     ed_commit(ed);
@@ -313,14 +314,27 @@ void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value) {
     ed_commit(ed);
 }
 
+/* want equals the current traits once normalised as gen3_pid_find does: gender ignored for a
+ * fixed ratio, the slot for one ability, the letter unless Unown. Never for an unknown species,
+ * which gen3_pid_find refuses. */
+static bool ed_traits_same(uint16_t national, const Gen3Traits* want, const Gen3Traits* cur) {
+    if(!gen3_species(national)) return false;
+    if(want->nature != cur->nature || want->shiny != cur->shiny) return false;
+    if(!gen3_species_gender_fixed(national) && want->gender != cur->gender) return false;
+    if(gen3_species_two_abilities(national) && want->ability_slot != cur->ability_slot)
+        return false;
+    if(national == GEN3_NATIONAL_UNOWN && want->unown_letter != cur->unown_letter) return false;
+    return true;
+}
+
 bool gen3_edit_set_traits(Gen3Editor* ed, const Gen3Traits* want) {
+    uint16_t national = gen3_edit_national(ed);
+    Gen3Traits cur;
+    gen3_traits_of(&ed->pkm, &cur);
+    /* Nothing to change: keep the PID (and every other byte) */
+    if(ed_traits_same(national, want, &cur)) return true;
     uint32_t pid;
-    if(!gen3_pid_find(
-           &ed->rng,
-           gen3_edit_national(ed),
-           gen3_pkm_get(&ed->pkm, Gen3FieldOtId),
-           want,
-           &pid))
+    if(!gen3_pid_find(&ed->rng, national, gen3_pkm_get(&ed->pkm, Gen3FieldOtId), want, &pid))
         return false;
     gen3_pkm_set(&ed->pkm, Gen3FieldPid, pid);
     ed_ability_from_pid(&ed->pkm); /* the slot gen3_pid_find satisfied */

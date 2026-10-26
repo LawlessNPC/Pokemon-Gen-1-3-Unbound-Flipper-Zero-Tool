@@ -79,6 +79,24 @@ TEST(test_decode_gender_symbols) {
     ASSERT_STR_EQ(out, "\200\201");
 }
 
+TEST(test_text_encodable) {
+    /* decode(encode(x)) == x */
+    ASSERT_TRUE(gen3_text_encodable("Leafy", 10));
+    ASSERT_TRUE(gen3_text_encodable("", 10));
+    ASSERT_TRUE(gen3_text_encodable("az09 !?.-,/:'\"", 14));
+    ASSERT_TRUE(gen3_text_encodable("NIDORAN\200", 10));
+    ASSERT_TRUE(gen3_text_encodable("\201", 1));
+    /* Unsupported chars encode as '?' and decode back as '?' */
+    ASSERT_TRUE(!gen3_text_encodable("A_B", 10));
+    ASSERT_TRUE(!gen3_text_encodable("x@", 10));
+    ASSERT_TRUE(!gen3_text_encodable("#", 1));
+    /* Past max_chars the encoding drops the tail */
+    ASSERT_TRUE(gen3_text_encodable("FLIPPER", 7));
+    ASSERT_TRUE(!gen3_text_encodable("FLIPPERZ", 7));
+    ASSERT_TRUE(!gen3_text_encodable("A", 0));
+    ASSERT_TRUE(gen3_text_encodable("", 0));
+}
+
 int main(void) {
     RUN(test_encode_name);
     RUN(test_encode_truncates);
@@ -89,5 +107,6 @@ int main(void) {
     RUN(test_decode_no_eos_truncates);
     RUN(test_encode_gender_symbols);
     RUN(test_decode_gender_symbols);
+    RUN(test_text_encodable);
     TEST_EXIT();
 }

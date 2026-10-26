@@ -36,12 +36,6 @@ static const char* gen3_edit_gender_text(Gen3Gender gender) {
     }
 }
 
-/* 0..25 = A..Z, 26 = '!', 27 = '?' (gen3_unown_letter) */
-static char gen3_edit_unown_char(uint8_t letter) {
-    if(letter < 26) return (char)('A' + letter);
-    return letter == 26 ? '!' : '?';
-}
-
 void pokemon_scene_gen3_edit_on_enter(void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
     const Gen3Editor* ed = pokemon_fap->gen3_editor;
@@ -92,7 +86,7 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Gender);
 
     if(national == GEN3_NATIONAL_UNOWN) {
-        snprintf(buf, sizeof(buf), "Unown Form: %c", gen3_edit_unown_char(traits.unown_letter));
+        snprintf(buf, sizeof(buf), "Unown Form: %c", gen3_unown_char(traits.unown_letter));
         gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Unown);
     }
 
@@ -122,7 +116,7 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
 
 bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
     PokemonFap* pokemon_fap = context;
-    const Gen3SpeciesInfo* info = gen3_species(gen3_edit_national(pokemon_fap->gen3_editor));
+    uint16_t national = gen3_edit_national(pokemon_fap->gen3_editor);
     uint32_t alias;
 
     /* Back is left to the scene manager, which returns to the Gen III menu */
@@ -142,14 +136,12 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
         break;
     case PokemonSceneGen3Ability:
         /* Nothing to choose for a one-ability species */
-        if(!info || info->ability[1] == 0) return true;
+        if(!gen3_species_two_abilities(national)) return true;
         alias = PokemonSceneGen3Preset;
         break;
     case PokemonSceneGen3Gender:
         /* Nor for a male-only, female-only or genderless one */
-        if(!info || info->gender_ratio == GEN3_GENDER_MALE_ONLY ||
-           info->gender_ratio == GEN3_GENDER_FEMALE_ONLY || info->gender_ratio == GEN3_GENDERLESS)
-            return true;
+        if(gen3_species_gender_fixed(national)) return true;
         alias = PokemonSceneGen3Preset;
         break;
     case PokemonSceneGen3Preset:

@@ -1,7 +1,6 @@
 #include <furi.h>
 #include <gui/modules/text_input.h>
 #include <gui/view_dispatcher.h>
-#include <string.h>
 
 #include <src/include/pokemon_app.h>
 
@@ -14,16 +13,6 @@
 
 static char gen3_nickname_buf[GEN3_NICKNAME_LEN + 1];
 static char gen3_ot_name_buf[GEN3_OT_NAME_LEN + 1];
-
-/* True if every char of text survives the game's encoding: decode(encode(text)) == text. */
-static bool gen3_text_encodable(const char* text, size_t max_chars) {
-    uint8_t encoded[GEN3_NICKNAME_LEN];
-    char decoded[GEN3_NICKNAME_LEN + 1];
-
-    gen3_text_encode(text, encoded, max_chars, max_chars);
-    gen3_text_decode(encoded, max_chars, decoded, sizeof(decoded));
-    return strcmp(decoded, text) == 0;
-}
 
 static bool gen3_text_validator(const char* text, FuriString* error, void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
