@@ -410,7 +410,7 @@ The `Gen III  (GBA non-JPN)` menu has `Edit Pokemon`, `Load .pk3`, `Save .pk3` a
 - EV/IV preset (Max EV means 85 per stat, 510 in total)
 - Nature
 - Ability (only for species with two abilities)
-- Shininess
+- Shininess (for some OT IDs, some Unown nature and letter pairs can't be shiny; the editor says so)
 - Gender
 - Unown form
 - Moves
@@ -419,7 +419,7 @@ The `Gen III  (GBA non-JPN)` menu has `Edit Pokemon`, `Load .pk3`, `Save .pk3` a
 - Poke ball
 - OT name, OT TID and OT SID
 
-Files are PKHeX `.pk3` files in `apps_data/pokemon/gen3/` on the SD card. `Save .pk3` writes 80 bytes; `Load .pk3` reads 80 or 100 bytes. A loaded file is checked and tidied so the Pokemon is valid in game (stats recalculated, duplicate moves and move gaps removed, a held Mail item removed), and the result says what was fixed.
+Files are PKHeX `.pk3` files in `apps_data/pokemon/gen3/` on the SD card. `Save .pk3` writes 80 bytes; `Load .pk3` reads 80 or 100 bytes. A loaded file is checked and tidied so the Pokemon is valid in game (stats recalculated, duplicate moves and move gaps removed, a held Mail item and any mail index removed), and the result says what was fixed.
 
 The species names and learnsets are in `files/gen3_bulk.bin`, which ships inside the `.fap` as an asset and is unpacked to `apps_assets/pokemon/` on the SD card. If the editor says `Data missing`, delete the `apps_assets/pokemon` folder on the SD card and reopen the app. See the [editor test checklist](docs/gen3/editor-test.md).
 

@@ -46,12 +46,15 @@ struct pokemon_fap {
     void* gen3_link_test;
     struct Gen3Session* gen3_session;
 
-    /* Gen III editor (struct Gen3Editor from src/gen3/gen3_edit.h). Allocated the first
-     * time the Gen III menu is shown, then kept for the app's lifetime.
+    /* Gen III editor (struct Gen3Editor from src/gen3/gen3_edit.h). Allocated on the
+     * first Edit Pokemon, Load .pk3 or Save .pk3 that finds the Gen III data file
+     * readable (gen3_menu_editor_ready), then kept for the app's lifetime.
      */
     struct Gen3Editor* gen3_editor;
 
-    /* Gen III species picker view, allocated next to the editor */
+    /* Gen III species picker view. Allocated the first time the Gen III menu is shown,
+     * then kept for the app's lifetime.
+     */
     void* gen3_species_select;
 
     /* Gen III .pk3 file name being saved, without the extension */
