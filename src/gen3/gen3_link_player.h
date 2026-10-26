@@ -27,3 +27,10 @@ bool gen3_link_player_block_parse(const uint8_t in[GEN3_LINK_PLAYER_BLOCK_SIZE],
 
 /* 100-byte trainer card for block request type 2 (§A5 table), from lp's gender, TID and name[0..7] */
 void gen3_trainer_card_build(const Gen3LinkPlayer* lp, uint8_t out[GEN3_TRAINER_CARD_BLOCK_SIZE]);
+
+/* Part B link types (docs/gen3/link-protocol-trade.md §B0) */
+#define GEN3_LINKTYPE_TRADE              0x1111 /* room again after the trade menu (§B0 row 1') */
+#define GEN3_LINKTYPE_TRADE_CONNECTING   0x1122 /* trade menu (§B1.6) */
+#define GEN3_LINKTYPE_TRADE_DISCONNECTED 0x1144 /* trade animation and link save (§B4.1) */
+/* lp_field_2 that makes Ruby unlock its National Dex (§B4.5) */
+#define GEN3_LP_NATIONAL_DEX 0x8000
