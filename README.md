@@ -394,7 +394,7 @@ Version 2.0 of the Pokemon Trade tool fixes a bug on MALVEKE boards that are Rev
 ## Gen III (experimental): link test
 The main menu has a `Gen III  (GBA non-JPN)` entry with a `Link Test`. The Flipper acts as the other player in Pokemon Ruby's Cable Club Trade Center (Pokemon Center 2F, right counter); no Pokemon is traded yet. The SD pin is shown on the Pinout screen.
 
-Plug one end of the GBA link cable into the Flipper's module. The test screen shows `Cable: plug in/swap ends` until the cable is correctly oriented, because a missing and a reversed cable look the same. If it does not change to `Cable: OK` with the cable plugged in, swap the two plugs. Note which plug works for you.
+Plug one end of the GBA link cable into the Flipper's module first, with the other end free, and open the Link Test. The screen shows `Cable: plug in/swap ends` until the right plug is in the Flipper, because a missing and a reversed cable look the same; if it does, put the cable's other plug into the Flipper instead. Once it reads `Cable: OK`, plug the other end into the GBA. Note which plug works for you. The cable line stays live: if it shows `Cable: plug in/swap ends` during the test, the Flipper pauses its transfers.
 
 A log is written to `apps_data/pokemon/gen3_link.log` on the SD card (overwritten each time the Link Test is opened). See the [hardware test checklist](docs/gen3/hardware-test-1.md).
 
