@@ -12,6 +12,9 @@
 /* Gen III editor menu. Each row's item index is the scene it opens. The spaces after each label
  * line the values up at the same pixel column in the submenu font, as in pokemon_gen.c. */
 
+/* name_buf holds the species name too */
+_Static_assert(GEN3_NICKNAME_LEN >= GEN3_SPECIES_NAME_LEN, "name_buf too small");
+
 static void gen3_edit_item_callback(void* context, uint32_t index) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
 
@@ -52,7 +55,8 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
 
     submenu_reset(pokemon_fap->submenu);
 
-    snprintf(buf, sizeof(buf), "Pokemon:     %s", gen3_species_name(national));
+    gen3_species_name_get(national, name_buf);
+    snprintf(buf, sizeof(buf), "Pokemon:     %s", name_buf);
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Species);
 
     gen3_pkm_nickname(p, name_buf, sizeof(name_buf));

@@ -1,4 +1,5 @@
 #include "test.h"
+#include "bulk_file.h"
 #include "gen3_golden.h"
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_rules.h>
@@ -265,6 +266,7 @@ TEST(test_default_moves) {
 }
 
 int main(void) {
+    if(!bulk_file_open()) return 1;
     RUN(test_exp_table);
     RUN(test_level_for_exp);
     RUN(test_nature_effect);

@@ -6,7 +6,11 @@
 
 /* Gen III game data, indexed by National Dex number. The game's internal species ids appear only
  * in the Pokemon bytes and in gen3_internal_to_national_tab. Names keep the game's spelling,
- * mapped to ASCII: e-acute -> 'E', female '\200', male '\201'. */
+ * mapped to ASCII: e-acute -> 'E', female '\200', male '\201'.
+ *
+ * Species names and learnsets are read rarely, so they live in files/gen3_bulk.bin on the SD card
+ * rather than in RAM. Both come from tools/gen3_tables.py. The bulk accessors read through the
+ * installed Gen3BulkRead source; call them from the UI thread only. */
 
 #define GEN3_NATIONAL_COUNT      386 /* National Dex 1..386 */
 #define GEN3_INTERNAL_COUNT      412 /* game species ids 0..411 (412 is the egg, excluded) */
@@ -15,7 +19,9 @@
 #define GEN3_ABILITY_COUNT       78
 #define GEN3_NATURE_COUNT        25
 #define GEN3_TYPE_COUNT          18
-#define GEN3_LEARNSET_COUNT      3947
+#define GEN3_LEARNSET_COUNT      3947 /* all species' learnset entries */
+#define GEN3_LEARNSET_MAX        17 /* the most entries one species has */
+#define GEN3_SPECIES_NAME_LEN    10
 #define GEN3_HOLDABLE_COUNT      231 /* no key items, HMs, Enigma Berry or mail */
 #define GEN3_SPRITE_MAX_NATIONAL 251 /* files/all_sprites.fxbm covers 1..251 */
 #define GEN3_NATIONAL_MEW        151
@@ -52,11 +58,8 @@ bool gen3_species_two_abilities(uint16_t national);
 /* Male only, female only or genderless (ratio 0, 254 or 255): the PID can't choose the gender.
  * true for an unknown species, which has no gender to choose either. */
 bool gen3_species_gender_fixed(uint16_t national);
-const char* gen3_species_name(uint16_t national); /* "?" unless 1..386 */
 uint16_t gen3_national_from_internal(uint16_t internal); /* 0 = not a real species */
 uint16_t gen3_internal_from_national(uint16_t national); /* 0 unless 1..386 */
-/* entries are (level << 9) | move, in game order; 0 + NULL if invalid */
-size_t gen3_learnset(uint16_t national, const uint16_t** entries);
 const char* gen3_move_name(uint16_t move); /* "???" if >= GEN3_MOVE_COUNT; move 0 is "-" */
 uint8_t gen3_move_pp(uint16_t move); /* base PP; 0 if out of range */
 uint16_t gen3_move_by_name(size_t i); /* i < GEN3_MOVE_COUNT - 1: ids 1..354 sorted by name */
@@ -67,13 +70,24 @@ const char* gen3_ability_name(uint8_t ability); /* "???" if out of range */
 const char* gen3_nature_name(uint8_t nature); /* "???" if >= 25 */
 const char* gen3_type_name(uint8_t type); /* "???" if >= 18 */
 
+/* Bulk tables (files/gen3_bulk.bin). The source reads len bytes at offset into buf; false if it
+ * can't, including past the end of the file. */
+typedef bool (*Gen3BulkRead)(void* ctx, uint32_t offset, void* buf, uint32_t len);
+/* Install the source. Validates magic, version, counts and CRC-32 of the payload. false = unusable,
+ * and no source is installed. */
+bool gen3_bulk_open(Gen3BulkRead read, void* ctx);
+void gen3_bulk_close(void);
+bool gen3_bulk_ready(void);
+/* Copies the uppercase ASCII name (female '\200', male '\201') + NUL. false (out = "") if not
+ * ready, out of range (1..386) or unreadable. */
+bool gen3_species_name_get(uint16_t national, char out[GEN3_SPECIES_NAME_LEN + 1]);
+/* Fills up to max packed (level << 9) | move entries in level order; returns the count (0 if not
+ * ready, out of range or unreadable). GEN3_LEARNSET_MAX entries always hold a whole learnset. */
+size_t gen3_learnset_get(uint16_t national, uint16_t* out, size_t max);
+
 /* Generated arrays (gen3_data_gen.c). Use the functions above. */
 extern const Gen3SpeciesInfo gen3_species_info_tab[GEN3_NATIONAL_COUNT + 1];
-extern const char gen3_species_name_tab[GEN3_NATIONAL_COUNT + 1][11];
 extern const uint16_t gen3_internal_to_national_tab[GEN3_INTERNAL_COUNT];
-/* [n]..[n+1]; [0]=[1]=0, [387]=3947 */
-extern const uint16_t gen3_learnset_start_tab[GEN3_NATIONAL_COUNT + 2];
-extern const uint16_t gen3_learnset_tab[GEN3_LEARNSET_COUNT];
 extern const char gen3_move_name_tab[GEN3_MOVE_COUNT][13];
 extern const uint8_t gen3_move_pp_tab[GEN3_MOVE_COUNT];
 extern const uint16_t gen3_move_by_name_tab[GEN3_MOVE_COUNT - 1];

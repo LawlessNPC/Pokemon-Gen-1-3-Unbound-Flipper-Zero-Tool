@@ -7,8 +7,13 @@
 
 #include <furi_hal_random.h>
 #include <stdlib.h>
+#include <src/gen3/gen3_bulk_furi.h>
+#include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
 #include <src/views/gen3_species_select.h>
+
+/* The "Data missing" dialog is up instead of the menu */
+static bool gen3_menu_dialog_shown = false;
 
 static void gen3_menu_item_callback(void* context, uint32_t index) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
@@ -34,11 +39,38 @@ static void gen3_menu_end_link_test(PokemonFap* pokemon_fap) {
     }
 }
 
+/* Everything but the Link Test needs the species names and learnsets from gen3_bulk.bin. The
+ * dialog has no buttons; Back returns to this menu. */
+static void gen3_menu_show_data_missing(PokemonFap* pokemon_fap) {
+    DialogEx* dialog_ex = pokemon_fap->dialog_ex;
+
+    dialog_ex_reset(dialog_ex);
+    dialog_ex_set_header(dialog_ex, "Data missing", 64, 0, AlignCenter, AlignTop);
+    dialog_ex_set_text(
+        dialog_ex,
+        "Gen III data file is missing.\nReinstall the app.",
+        64,
+        36,
+        AlignCenter,
+        AlignCenter);
+
+    gen3_menu_dialog_shown = true;
+    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
+}
+
+static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
+    gen3_menu_dialog_shown = false;
+    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);
+}
+
 void pokemon_scene_gen3_menu_on_enter(void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
 
-    /* The Pokemon being edited lives until the app exits */
-    if(!pokemon_fap->gen3_editor) {
+    /* The bulk data file is opened once, then kept open until the app exits (free_app closes
+     * it). The Pokemon being edited lives until the app exits too. Its nickname and moves come
+     * from the bulk file, so without the file there is no editor. */
+    bool have_data = gen3_bulk_ready() || gen3_bulk_furi_open();
+    if(!pokemon_fap->gen3_editor && have_data) {
         pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
         gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get());
     }
@@ -69,7 +101,7 @@ void pokemon_scene_gen3_menu_on_enter(void* context) {
         scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Menu));
 
     /* Switch away from the Link Test view before freeing it */
-    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);
+    gen3_menu_show_menu(pokemon_fap);
     gen3_menu_end_link_test(pokemon_fap);
 }
 
@@ -79,9 +111,22 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
 
     /* Only menu items. A Link Test refresh tick still queued when the Link Test closed may
      * arrive here too; ignore it. */
-    if(event.type == SceneManagerEventTypeCustom &&
-       (event.event == PokemonSceneGen3Edit || event.event == PokemonSceneGen3LinkTest)) {
-        scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+    if(event.type == SceneManagerEventTypeCustom) {
+        if(event.event == PokemonSceneGen3LinkTest) {
+            scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+            consumed = true;
+        } else if(event.event == PokemonSceneGen3Edit) {
+            /* There is an editor only once the bulk file is open, and it stays open */
+            if(pokemon_fap->gen3_editor) {
+                scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+            } else {
+                gen3_menu_show_data_missing(pokemon_fap);
+            }
+            consumed = true;
+        }
+    } else if(event.type == SceneManagerEventTypeBack && gen3_menu_dialog_shown) {
+        /* Back on the dialog returns to this menu, not to the main menu */
+        gen3_menu_show_menu(pokemon_fap);
         consumed = true;
     }
 

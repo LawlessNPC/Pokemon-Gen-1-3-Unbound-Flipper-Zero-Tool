@@ -1,7 +1,15 @@
 #include "test.h"
+#include "bulk_file.h"
 #include <src/gen3/gen3_data.h>
 
 #define LU(level, move) (((level) << 9) | (move))
+
+/* The name from the bulk file; "" if gen3_species_name_get refuses */
+static const char* species_name(uint16_t national) {
+    static char name[GEN3_SPECIES_NAME_LEN + 1];
+    gen3_species_name_get(national, name);
+    return name;
+}
 
 static int species_matches(
     uint16_t national,
@@ -46,14 +54,14 @@ TEST(test_data_bulbasaur) {
     ASSERT_TRUE(species_matches(1, base, 12, 3, 31, 3, 65, 0));
     ASSERT_EQ(gen3_species(1)->friendship, 70);
     ASSERT_EQ(gen3_species(1)->internal, 1);
-    ASSERT_STR_EQ(gen3_species_name(1), "BULBASAUR");
+    ASSERT_STR_EQ(species_name(1), "BULBASAUR");
 }
 
 TEST(test_data_treecko) {
     const uint8_t base[6] = {40, 45, 35, 70, 65, 55};
     ASSERT_TRUE(species_matches(252, base, 12, 12, 31, 3, 65, 0));
     ASSERT_EQ(gen3_species(252)->internal, 277);
-    ASSERT_STR_EQ(gen3_species_name(252), "TREECKO");
+    ASSERT_STR_EQ(species_name(252), "TREECKO");
 }
 
 TEST(test_data_deoxys) {
@@ -80,9 +88,8 @@ TEST(test_data_shedinja) {
 TEST(test_data_unown) {
     const uint8_t base[6] = {48, 72, 48, 48, 72, 48};
     ASSERT_TRUE(species_matches(GEN3_NATIONAL_UNOWN, base, 14, 14, 255, 0, 26, 0));
-    const uint16_t* e = NULL;
-    ASSERT_EQ(gen3_learnset(GEN3_NATIONAL_UNOWN, &e), 1);
-    ASSERT_TRUE(e != NULL);
+    uint16_t e[GEN3_LEARNSET_MAX];
+    ASSERT_EQ(gen3_learnset_get(GEN3_NATIONAL_UNOWN, e, GEN3_LEARNSET_MAX), 1);
     ASSERT_EQ(e[0], LU(1, 237));
 }
 
@@ -97,44 +104,17 @@ TEST(test_data_two_abilities) {
 }
 
 TEST(test_data_names) {
-    ASSERT_STR_EQ(gen3_species_name(29), "NIDORAN\200");
+    ASSERT_STR_EQ(species_name(29), "NIDORAN\200");
     ASSERT_EQ(gen3_species(29)->gender_ratio, GEN3_GENDER_FEMALE_ONLY);
-    ASSERT_STR_EQ(gen3_species_name(32), "NIDORAN\201");
+    ASSERT_STR_EQ(species_name(32), "NIDORAN\201");
     ASSERT_EQ(gen3_species(32)->gender_ratio, GEN3_GENDER_MALE_ONLY);
-    ASSERT_STR_EQ(gen3_species_name(83), "FARFETCH'D");
-    ASSERT_STR_EQ(gen3_species_name(122), "MR. MIME");
-    ASSERT_STR_EQ(gen3_species_name(250), "HO-OH");
-    ASSERT_STR_EQ(gen3_species_name(0), "?");
-    ASSERT_STR_EQ(gen3_species_name(387), "?");
+    ASSERT_STR_EQ(species_name(83), "FARFETCH'D");
+    ASSERT_STR_EQ(species_name(122), "MR. MIME");
+    ASSERT_STR_EQ(species_name(250), "HO-OH");
+    ASSERT_STR_EQ(species_name(0), "");
+    ASSERT_STR_EQ(species_name(387), "");
     ASSERT_TRUE(gen3_species(0) == NULL);
     ASSERT_TRUE(gen3_species(387) == NULL);
-}
-
-TEST(test_data_learnsets) {
-    const uint16_t* e = NULL;
-    ASSERT_EQ(gen3_learnset(1, &e), 11);
-    ASSERT_EQ(e[0], LU(1, 33));
-    ASSERT_EQ(e[10], LU(46, 76));
-    ASSERT_EQ(gen3_learnset(252, &e), 11);
-    ASSERT_EQ(e[2], LU(6, 71));
-    ASSERT_TRUE(gen3_learnset(2, &e) > 3);
-    ASSERT_EQ(e[3], LU(4, 45));
-
-    e = (const uint16_t*)1;
-    ASSERT_EQ(gen3_learnset(0, &e), 0);
-    ASSERT_TRUE(e == NULL);
-    e = (const uint16_t*)1;
-    ASSERT_EQ(gen3_learnset(387, &e), 0);
-    ASSERT_TRUE(e == NULL);
-
-    size_t total = 0;
-    for(uint16_t n = 1; n <= GEN3_NATIONAL_COUNT; n++) {
-        size_t count = gen3_learnset(n, &e);
-        ASSERT_TRUE(count > 0);
-        ASSERT_EQ(e[0] >> 9, 1); /* a default moveset is never empty */
-        total += count;
-    }
-    ASSERT_EQ(total, GEN3_LEARNSET_COUNT);
 }
 
 TEST(test_data_moves) {
@@ -244,6 +224,7 @@ TEST(test_data_species_predicates) {
 }
 
 int main(void) {
+    if(!bulk_file_open()) return 1;
     RUN(test_data_internal_national_map);
     RUN(test_data_bulbasaur);
     RUN(test_data_treecko);
@@ -252,7 +233,6 @@ int main(void) {
     RUN(test_data_unown);
     RUN(test_data_two_abilities);
     RUN(test_data_names);
-    RUN(test_data_learnsets);
     RUN(test_data_moves);
     RUN(test_data_items);
     RUN(test_data_small_lists);

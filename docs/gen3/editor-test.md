@@ -50,6 +50,12 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 8. **Item filters.** Letter `E` has no ENIGMA BERRY, and `M` has no MACH BIKE (nor any Mail).
 9. **Pokerus.** Strain `A`, days `3` → the row shows `Infected`. Days `0` → `Cured`. Strain `None` → `Clean`, and Days is hidden. Back and reopen → the strain and days are as left.
 
+## D. Data file
+
+The species names and learnsets are not in the app's memory. They are in `gen3_bulk.bin`, which ships inside the `.fap`. The Flipper unpacks it to `apps_assets/pokemon/` the first time the app starts.
+
+1. **Data missing.** Exit the app. In qFlipper, rename `apps_assets/pokemon/gen3_bulk.bin` to `gen3_bulk.bak`. Start the app → Gen III → `Edit Pokemon` → a dialog `Data missing`, `Gen III data file is missing.` / `Reinstall the app.`, with no buttons. OK does nothing; Back returns to the Gen III menu (not the main menu). `Link Test` still opens. Exit the app, rename the file back to `gen3_bulk.bin`, start the app → `Edit Pokemon` opens the editor with `Pokemon: BULBASAUR`.
+
 ## Results
 
 | Step | Pass / fail | What the Flipper showed |
@@ -83,3 +89,4 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 | C7 Held item | | |
 | C8 Item filters | | |
 | C9 Pokerus | | |
+| D1 Data missing | | |

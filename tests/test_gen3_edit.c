@@ -1,4 +1,5 @@
 #include "test.h"
+#include "bulk_file.h"
 #include "gen3_golden.h"
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
@@ -939,6 +940,7 @@ TEST(test_edit_load_no_moves) {
 }
 
 int main(void) {
+    if(!bulk_file_open()) return 1;
     RUN(test_edit_init_defaults);
     RUN(test_edit_species_resets_keeps_ot);
     RUN(test_edit_species_stores_internal);

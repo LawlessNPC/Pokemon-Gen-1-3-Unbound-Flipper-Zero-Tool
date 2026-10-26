@@ -15,6 +15,7 @@
 
 typedef struct {
     uint16_t national;
+    char name[GEN3_SPECIES_NAME_LEN + 1]; /* read from the SD card with the sprite */
     bool has_sprite;
     uint8_t sprite[SPRITE_DATA_SIZE]; /* width, height, then the pixels */
 } Gen3SpeciesSelectModel;
@@ -45,7 +46,7 @@ static void gen3_species_select_draw(Canvas* canvas, void* model_ptr) {
     canvas_draw_str_aligned(canvas, 90, 5, AlignCenter, AlignTop, "Select Pokemon");
 
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str_aligned(canvas, 58, 21, AlignLeft, AlignTop, gen3_species_name(model->national));
+    canvas_draw_str_aligned(canvas, 58, 21, AlignLeft, AlignTop, model->name);
 
     canvas_set_font(canvas, FontSecondary);
     snprintf(buf, sizeof(buf), "#%03u", (unsigned)model->national);
@@ -69,8 +70,9 @@ static void gen3_species_select_draw(Canvas* canvas, void* model_ptr) {
     elements_button_center(canvas, "OK");
 }
 
-/* Reads the sprite for the current species into the model. Never from the draw callback. */
-static void gen3_species_select_load_sprite(View* view) {
+/* Reads the name and sprite for the current species into the model. Both come from the SD card,
+ * so never from the draw callback, which runs in the GUI thread. */
+static void gen3_species_select_load(View* view) {
     Storage* storage = furi_record_open(RECORD_STORAGE);
     File* file = storage_file_alloc(storage);
     bool is_open = storage_file_open(
@@ -80,6 +82,7 @@ static void gen3_species_select_load_sprite(View* view) {
         view,
         Gen3SpeciesSelectModel * model,
         {
+            gen3_species_name_get(model->national, model->name);
             model->has_sprite = false;
             if(is_open && model->national >= 1 && model->national <= GEN3_SPRITE_MAX_NATIONAL) {
                 uint32_t offset =
@@ -137,7 +140,7 @@ static bool gen3_species_select_input(InputEvent* event, void* context) {
     if(consumed) {
         with_view_model(
             select->view, Gen3SpeciesSelectModel * model, { model->national = national; }, true);
-        gen3_species_select_load_sprite(select->view);
+        gen3_species_select_load(select->view);
     }
 
     return consumed;
@@ -146,7 +149,7 @@ static bool gen3_species_select_input(InputEvent* event, void* context) {
 static void gen3_species_select_enter(void* context) {
     Gen3SpeciesSelect* select = context;
 
-    gen3_species_select_load_sprite(select->view);
+    gen3_species_select_load(select->view);
 }
 
 void* gen3_species_select_alloc(ViewDispatcher* view_dispatcher, uint32_t view_id) {
@@ -167,6 +170,7 @@ void* gen3_species_select_alloc(ViewDispatcher* view_dispatcher, uint32_t view_i
         Gen3SpeciesSelectModel * model,
         {
             model->national = 1;
+            model->name[0] = '\0';
             model->has_sprite = false;
         },
         false);

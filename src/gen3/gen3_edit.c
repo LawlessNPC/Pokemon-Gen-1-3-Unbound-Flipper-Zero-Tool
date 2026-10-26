@@ -125,7 +125,9 @@ static void ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
         pid = gen3_rng_next(&ed->rng);
     } while(gen3_is_shiny(ot_id, pid));
     gen3_pkm_set(&p, Gen3FieldPid, pid);
-    gen3_pkm_set_nickname(&p, gen3_species_name(national));
+    char name[GEN3_SPECIES_NAME_LEN + 1];
+    gen3_species_name_get(national, name);
+    gen3_pkm_set_nickname(&p, name);
     gen3_pkm_set(&p, Gen3FieldLanguage, GEN3_MON_LANGUAGE_ENGLISH);
     gen3_pkm_set(&p, Gen3FieldHasSpecies, 1);
     gen3_pkm_set(&p, Gen3FieldSpecies, info->internal);
@@ -244,7 +246,11 @@ void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset) {
 }
 
 void gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii) {
-    if(!ascii || !ascii[0]) ascii = gen3_species_name(gen3_edit_national(ed));
+    char name[GEN3_SPECIES_NAME_LEN + 1];
+    if(!ascii || !ascii[0]) {
+        gen3_species_name_get(gen3_edit_national(ed), name);
+        ascii = name;
+    }
     gen3_pkm_set_nickname(&ed->pkm, ascii);
     ed_commit(ed);
 }

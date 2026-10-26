@@ -12,6 +12,7 @@
 #include <src/gen3/gen3_pins_furi.h>
 #include <src/views/gen3_species_select.h>
 #include <gblink.h>
+#include <src/gen3/gen3_bulk_furi.h>
 
 bool pokemon_custom_event_callback(void* context, uint32_t event) {
     furi_assert(context);
@@ -113,6 +114,9 @@ void free_app(PokemonFap* pokemon_fap) {
 
     // Free scenes
     scene_manager_free(pokemon_fap->scene_manager);
+
+    // Gen III bulk data file, opened by the Gen III menu
+    gen3_bulk_furi_close();
 
     // Close records
     furi_record_close(RECORD_GUI);
