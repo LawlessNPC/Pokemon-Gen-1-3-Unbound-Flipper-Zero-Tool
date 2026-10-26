@@ -87,6 +87,40 @@ unsigned gen3_trade_sync_poll(
 /* The session accepted the offer (or "none"): gen3_session_set_offer returned true. */
 void gen3_trade_sync_offer_taken(Gen3TradeSync* sync);
 
+/* ---- Ending a trade session (T13: D1, D9, D10, R6) ---- */
+
+/* The sync has every Pokemon the club received (received_count from gen3_session_get_received):
+ * it is trades_seen, and no NoData pickup waits for a retry. A trade session may stop for good
+ * only then, since its received Pokemon goes with the club (T12 review). A BadData pickup is
+ * final. Poll first from a scene that doesn't edit, so a finished trade is seen. */
+bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count);
+
+/* R6 (as refined by the T6 review): the link may stop now. Not in the save window (D10), nor
+ * while a trade is pending with the GBA linked (phase not Waiting). A pending trade whose 0x1144
+ * relink hasn't come may stop: the GBA writes nothing before sync 1 (D1). left and leaving aren't
+ * read (left is no "trade resolved"). A Link Test session sets neither flag. */
+bool gen3_trade_stop_allowed(const Gen3ClubStatus* st);
+
+/* End trade, or Back on the Gen III menu, while a trade session runs */
+typedef enum {
+    Gen3TradeEndStop, /* no GBA linked and nothing left to pick up: stop and free it now */
+    Gen3TradeEndSaving, /* the GBA is saving (D10): "The GBA is saving", OK only */
+    Gen3TradeEndAsk, /* a GBA is linked: "End trade?"; End asks it to walk out (D9) */
+    Gen3TradeEndPickup, /* no GBA linked, but a NoData pickup waits: Retry or End anyway */
+} Gen3TradeEndAction;
+/* st: the running session's status; settled: gen3_trade_sync_settled after a poll. Stop only
+ * when gen3_trade_stop_allowed and settled. */
+Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool settled);
+
+/* Back on the trade screen */
+typedef enum {
+    Gen3TradeBackLocked, /* the save window (D10): nothing happens; the guide says why */
+    Gen3TradeBackStopLink, /* a leave asked, and the link may stop (R6): "Stop link?" (D1) */
+    Gen3TradeBackLeave, /* the previous scene, with the session still running */
+} Gen3TradeBackAction;
+/* running: the trade session runs (a stopped one's last status locks nothing) */
+Gen3TradeBackAction gen3_trade_back_action(const Gen3ClubStatus* st, bool running);
+
 #define GEN3_GUIDE_LINES    3
 #define GEN3_GUIDE_LINE_LEN 22 /* 21 chars + NUL: FontSecondary across 128 px */
 

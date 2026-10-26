@@ -41,10 +41,20 @@ static uint8_t gen3_trade_bulk_wait;
 static uint8_t gen3_trade_start_wait;
 
 /* The current scene can change the editor's Pokemon: an editor scene, or Load. The sync holds the
- * offer meanwhile (D6), and the club's editing flag stays set (O1, G14). */
+ * offer meanwhile (D6), and the club's editing flag stays set (O1, G14). The trade screen, the
+ * menu and the dialogs over them that neither change nor show the Pokemon (T12 review (b)) don't
+ * edit; Save .pk3 does. */
 static bool gen3_trade_editing(PokemonFap* pokemon_fap) {
-    const uint32_t scene = scene_manager_get_current_scene(pokemon_fap->scene_manager);
-    return scene != PokemonSceneGen3Trade && scene != PokemonSceneGen3Menu;
+    switch(scene_manager_get_current_scene(pokemon_fap->scene_manager)) {
+    case PokemonSceneGen3Trade:
+    case PokemonSceneGen3Menu:
+    case PokemonSceneGen3TradeEnd:
+    case PokemonSceneGen3NatDex:
+    case PokemonSceneGen3LinkExit:
+        return false;
+    default:
+        return true;
+    }
 }
 
 /* A new club (a start) or none (a stop): the sync and the latch begin again (T10 review (d),
@@ -126,17 +136,20 @@ void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap) {
 
     /* 4. End: the GBA has walked out and closed the link (D9). left is sticky and says nothing
      * about a trade: it only ends the session, and only once the sync has every trade's Pokemon
-     * (T12 review). Save .pk3, Gen3Result and the dialogs hold the sync without the club's
-     * editing flag, so a trade can finish there; stopping now would free the club with its
+     * (T12 review). Save .pk3, Gen3Result and the editor's dialogs hold the sync without the
+     * club's editing flag, so a trade can finish there; stopping now would free the club with its
      * received Pokemon, which the GBA has saved as traded. That Pokemon is picked up on the first
-     * tick back on Gen3Trade or Gen3Menu, and the session stops then. Meanwhile the guide shows
-     * "Link ended". */
-    if(trading && st->left && received_count == sync->trades_seen &&
-       sync->pickup_fail != Gen3PickupNoData) {
+     * tick back on a scene that doesn't edit, and the session stops then. Meanwhile the guide
+     * shows "Link ended". A NoData pickup keeps it up: End trade offers Retry / End anyway. */
+    if(trading && st->left && gen3_trade_sync_settled(sync, received_count)) {
         gen3_session_stop(s); /* the last status stays readable */
         gen3_trade_reset(pokemon_fap);
         pokemon_fap->gen3_trade_ended = true;
         trading = false;
+        /* T12 review (d): End trade goes from the menu shown, and Link Test comes back */
+        if(scene_manager_get_current_scene(pokemon_fap->scene_manager) == PokemonSceneGen3Menu) {
+            gen3_menu_rebuild(pokemon_fap);
+        }
     }
 
     /* 5. Show */
@@ -173,6 +186,21 @@ bool pokemon_gen3_trade_begin_edit(PokemonFap* pokemon_fap) {
     return gen3_session_set_editing(s, true, sync->trades_seen);
 }
 
+bool pokemon_gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** st) {
+    Gen3Session* s = pokemon_fap->gen3_session;
+    Gen3TradeSync* sync = pokemon_fap->gen3_trade_sync;
+    uint32_t received_count = 0;
+
+    /* From a scene that doesn't edit, this polls: a finished trade's Pokemon is picked up */
+    if(gen3_session_trading(s) && sync) pokemon_gen3_trade_tick(pokemon_fap);
+    /* The status first, then the count (see the header) */
+    const Gen3ClubStatus* status = gen3_menu_status(pokemon_fap, NULL, NULL);
+    if(st) *st = status;
+    if(!gen3_session_trading(s) || !sync) return true; /* the tick may have ended it, all seen */
+    gen3_session_get_received(s, gen3_trade_received, &received_count);
+    return gen3_trade_sync_settled(sync, received_count);
+}
+
 void pokemon_scene_gen3_trade_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
 
@@ -183,7 +211,23 @@ void pokemon_scene_gen3_trade_on_enter(void* context) {
 bool pokemon_scene_gen3_trade_on_event(void* context, SceneManagerEvent event) {
     PokemonFap* pokemon_fap = context;
 
-    /* Back is left to the scene manager: the previous scene, with the session still running */
+    if(event.type == SceneManagerEventTypeBack && pokemon_fap->gen3_session) {
+        const Gen3ClubStatus* st = gen3_menu_status(pokemon_fap, NULL, NULL);
+        switch(gen3_trade_back_action(st, gen3_session_trading(pokemon_fap->gen3_session))) {
+        case Gen3TradeBackLocked:
+            /* D10: the GBA is saving; the guide already says Back is locked */
+            return true;
+        case Gen3TradeBackStopLink:
+            /* D1: a leave that may have stalled can still be stopped (plan 1's "Stop link?") */
+            scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3LinkExit);
+            return true;
+        case Gen3TradeBackLeave:
+            break;
+        }
+    }
+
+    /* Back otherwise is left to the scene manager: the previous scene, with the session still
+     * running */
     if(event.type != SceneManagerEventTypeCustom || event.event != GEN3_TRADE_EVENT_EDIT) {
         return false;
     }

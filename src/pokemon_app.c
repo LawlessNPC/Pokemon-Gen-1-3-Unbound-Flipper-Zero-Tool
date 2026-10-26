@@ -15,6 +15,7 @@
 #include <src/gen3/gen3_bulk_furi.h>
 #include <src/gen3/gen3_session_furi.h>
 #include <src/views/gen3_trade.h>
+#include <src/views/gen3_link_test.h>
 
 bool pokemon_custom_event_callback(void* context, uint32_t event) {
     furi_assert(context);
@@ -135,6 +136,13 @@ void free_app(PokemonFap* pokemon_fap) {
             pokemon_fap->view_dispatcher,
             AppViewGen3SpeciesSelect,
             pokemon_fap->gen3_species_select);
+    }
+
+    // Gen III Link Test screen, if the app closes while it is up
+    if(pokemon_fap->gen3_link_test) {
+        gen3_link_test_free(
+            pokemon_fap->view_dispatcher, AppViewGen3LinkTest, pokemon_fap->gen3_link_test);
+        pokemon_fap->gen3_link_test = NULL;
     }
 
     // Gen III trade screen and sync

@@ -2,6 +2,7 @@
 
 #include <src/include/pokemon_app.h>
 #include <src/gen3/gen3_club.h>
+#include <src/gen3/gen3_trade_sync.h>
 
 /* Copies the session's latest status (gen3_session_status; log_ok and cable_ok may be NULL) into
  * one static buffer and returns it. Gen3ClubStatus is never a stack local (no app stack local is
@@ -44,3 +45,22 @@ bool gen3_menu_editor_ready(PokemonFap* pokemon_fap);
 /* Custom event the trade screen's OK (Edit) sends to Gen3Trade. Clear of scene ids and the other
  * Gen III events. */
 #define GEN3_TRADE_EVENT_EDIT 0x47330201u
+
+/* Call before stopping a session for good, from Gen3Menu, Gen3TradeEnd or Gen3LinkExit (T12
+ * review (a)); pokemon_fap->gen3_session must exist. A running trade session gets one tick first:
+ * from a scene that doesn't edit, its poll picks up a finished trade's Pokemon (and the tick may
+ * end the session itself, once the GBA has left). Then st (may be NULL) gets the status
+ * (gen3_menu_status's buffer), and only after it the received count is read: a trade that ends
+ * after that status (its link lost after the sync-2 answer: Assumed, at Waiting) is in the
+ * count, so the status never shows Waiting with its Pokemon unseen. Returns
+ * gen3_trade_sync_settled, or true without a running trade session. false: a NoData pickup waits
+ * for the SD card, so don't stop silently (Gen3TradeEnd's Retry / End anyway). Defined in
+ * pokemon_gen3_trade.c. */
+bool pokemon_gen3_trade_settled(PokemonFap* pokemon_fap, const Gen3ClubStatus** st);
+
+/* Rebuilds the Gen III menu's items for the session and settings as they are now, keeping the
+ * highlighted item (or the first one, if it has gone), and frees nothing. Call while Gen3Menu is
+ * the current scene. The trade tick does when it ends the session there (T12 review (d)), so End
+ * trade goes and Link Test comes back; the stopped session and its trade view stay until the menu
+ * is entered again, or Link Test or Trade is chosen. */
+void gen3_menu_rebuild(PokemonFap* pokemon_fap);

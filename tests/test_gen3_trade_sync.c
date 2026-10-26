@@ -750,6 +750,183 @@ TEST(test_enigma_fixture) {
     ASSERT_EQ(gen3_trade_offer_check(&q), Gen3RefuseItem);
 }
 
+/* T13 review (a): a trade session may stop for good only once the sync has every Pokemon the club
+ * received. A NoData pickup waits for a retry; a BadData one is final. */
+TEST(test_sync_settled) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_trade_sync_init(&sync);
+    status_reset(&st, Gen3ClubPhaseRoom);
+    ASSERT_TRUE(gen3_trade_sync_settled(&sync, 0));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&sync);
+    ASSERT_TRUE(gen3_trade_sync_settled(&sync, 0));
+
+    /* A trade the sync hasn't polled yet (an editing scene was shown) */
+    moveless_golden_game(rx);
+    ASSERT_TRUE(!gen3_trade_sync_settled(&sync, 1));
+
+    /* Polled, but the bulk file can't be read: the Pokemon is still only in the club */
+    bulk_file_failing = true;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.trades_seen, 1);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupNoData);
+    ASSERT_TRUE(!gen3_trade_sync_settled(&sync, 1));
+
+    ASSERT_TRUE(bulk_file_open());
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickedUp | Gen3SyncOffer);
+    ASSERT_TRUE(gen3_trade_sync_settled(&sync, 1));
+
+    /* A received Pokemon that will never load: final, so the session may stop */
+    golden_game(rx);
+    rx[0x30] ^= 1;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 2), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(gen3_trade_sync_settled(&sync, 2));
+    ASSERT_TRUE(!gen3_trade_sync_settled(&sync, 3));
+}
+
+/* The sweeps below cover every phase with every combination of the flags the T13 decisions read:
+ * END_BITS bits 0-3 set these four, and bit 4 is the settled argument. */
+#define END_BITS 32u
+static void end_status(Gen3ClubStatus* st, int phase, unsigned bits) {
+    status_reset(st, (Gen3ClubPhase)phase);
+    st->save_window = bits & 1;
+    st->trade_pending = (bits >> 1) & 1;
+    st->leaving = (bits >> 2) & 1;
+    st->left = (bits >> 3) & 1;
+}
+
+/* R6, as refined by the T6 review: "Stop link?" may stop the link outside the save window, and
+ * outside a pending trade with the GBA linked. A pending trade whose 0x1144 relink hasn't come
+ * (Waiting) may stop (D1). left and leaving don't matter: left is no "trade resolved". */
+TEST(test_trade_stop_allowed) {
+    Gen3ClubStatus st;
+
+    status_reset(&st, Gen3ClubPhaseRoom);
+    ASSERT_TRUE(gen3_trade_stop_allowed(&st));
+    st.save_window = true;
+    ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+
+    status_reset(&st, Gen3ClubPhaseTrade);
+    st.trade_pending = true;
+    ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+    st.left = true; /* the 0x1144 timeout can set left with the trade still pending */
+    ASSERT_TRUE(!gen3_trade_stop_allowed(&st));
+    st.phase = Gen3ClubPhaseWaiting;
+    ASSERT_TRUE(gen3_trade_stop_allowed(&st));
+
+    for(int ph = Gen3ClubPhaseWaiting; ph <= Gen3ClubPhaseSave; ph++) {
+        for(unsigned bits = 0; bits < END_BITS; bits++) {
+            end_status(&st, ph, bits);
+            const bool want = !st.save_window &&
+                              !(st.trade_pending && st.phase != Gen3ClubPhaseWaiting);
+            ASSERT_EQ(gen3_trade_stop_allowed(&st), want);
+        }
+    }
+}
+
+/* End trade, or Back on the Gen III menu, while a trade session runs */
+TEST(test_trade_end_action) {
+    Gen3ClubStatus st;
+
+    /* D9: a linked GBA is asked to walk out first, settled or not */
+    status_reset(&st, Gen3ClubPhaseRoom);
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndAsk);
+    ASSERT_EQ(gen3_trade_end_action(&st, false), Gen3TradeEndAsk);
+    st.phase = Gen3ClubPhaseMenu;
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndAsk);
+    st.phase = Gen3ClubPhaseTrade; /* G.3: End during the trade animation */
+    st.trade_pending = true;
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndAsk);
+
+    /* D10: the save window has no End */
+    st.phase = Gen3ClubPhaseSave;
+    st.save_window = true;
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndSaving);
+    ASSERT_EQ(gen3_trade_end_action(&st, false), Gen3TradeEndSaving);
+
+    /* No GBA linked (D1): stop now, unless a received Pokemon still waits for the SD card */
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndStop);
+    ASSERT_EQ(gen3_trade_end_action(&st, false), Gen3TradeEndPickup);
+    st.left = true;
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndStop);
+    ASSERT_EQ(gen3_trade_end_action(&st, false), Gen3TradeEndPickup);
+    st.left = false;
+    st.trade_pending = true; /* the 0x1144 relink hasn't come: nothing written on the GBA yet */
+    ASSERT_EQ(gen3_trade_end_action(&st, true), Gen3TradeEndStop);
+
+    /* Never a stop R6 forbids, nor one with a Pokemon still to pick up; never asks a GBA that
+     * isn't linked to walk out */
+    for(int ph = Gen3ClubPhaseWaiting; ph <= Gen3ClubPhaseSave; ph++) {
+        for(unsigned bits = 0; bits < END_BITS; bits++) {
+            end_status(&st, ph, bits);
+            const bool settled = (bits >> 4) & 1;
+            const Gen3TradeEndAction a = gen3_trade_end_action(&st, settled);
+            ASSERT_EQ(a == Gen3TradeEndSaving, st.save_window);
+            if(a == Gen3TradeEndStop) {
+                ASSERT_TRUE(gen3_trade_stop_allowed(&st));
+                ASSERT_TRUE(settled);
+            }
+            if(a == Gen3TradeEndAsk) ASSERT_TRUE(st.phase != Gen3ClubPhaseWaiting);
+            if(a == Gen3TradeEndPickup) {
+                ASSERT_TRUE(!settled);
+                ASSERT_TRUE(gen3_trade_stop_allowed(&st));
+            }
+        }
+    }
+}
+
+/* Back on the trade screen */
+TEST(test_trade_back_action) {
+    Gen3ClubStatus st;
+
+    status_reset(&st, Gen3ClubPhaseRoom);
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLeave);
+    st.leaving = true; /* a leave that may stall: plan 1's "Stop link?" (D1) */
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackStopLink);
+
+    /* D10: locked in the save window, leaving or not */
+    st.phase = Gen3ClubPhaseSave;
+    st.trade_pending = true;
+    st.save_window = true;
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLocked);
+    st.leaving = false;
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLocked);
+
+    /* R6: End trade during the animation: back to the menu, never "Stop link?" */
+    st.save_window = false;
+    st.phase = Gen3ClubPhaseTrade;
+    st.leaving = true;
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackLeave);
+    st.phase = Gen3ClubPhaseWaiting; /* the 0x1144 relink not seen yet: may stop (D1) */
+    ASSERT_EQ(gen3_trade_back_action(&st, true), Gen3TradeBackStopLink);
+
+    /* A stopped session: a stale flag locks nothing */
+    status_reset(&st, Gen3ClubPhaseSave);
+    st.save_window = true;
+    st.leaving = true;
+    ASSERT_EQ(gen3_trade_back_action(&st, false), Gen3TradeBackLeave);
+
+    for(int ph = Gen3ClubPhaseWaiting; ph <= Gen3ClubPhaseSave; ph++) {
+        for(unsigned bits = 0; bits < END_BITS; bits++) {
+            end_status(&st, ph, bits);
+            for(int running = 0; running < 2; running++) {
+                const Gen3TradeBackAction a = gen3_trade_back_action(&st, running);
+                ASSERT_EQ(a == Gen3TradeBackLocked, running && st.save_window);
+                if(a == Gen3TradeBackStopLink) {
+                    ASSERT_TRUE(running && st.leaving);
+                    ASSERT_TRUE(gen3_trade_stop_allowed(&st));
+                }
+            }
+        }
+    }
+}
+
 /* The guide as three strings; prints what it got on a mismatch */
 static bool guide_is(
     const Gen3ClubStatus* st,
@@ -1104,6 +1281,10 @@ int main(void) {
     RUN_BULK(test_sync_holds_while_editing);
     RUN_BULK(test_sync_bad_offer_unpublished);
     RUN_BULK(test_enigma_fixture);
+    RUN_BULK(test_sync_settled);
+    RUN_BULK(test_trade_stop_allowed);
+    RUN_BULK(test_trade_end_action);
+    RUN_BULK(test_trade_back_action);
     RUN_BULK(test_guide_texts);
     RUN_BULK(test_guide_line_lengths);
     RUN_BULK(test_guide_copy_reports_cut);

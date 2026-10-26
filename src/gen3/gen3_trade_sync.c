@@ -145,6 +145,29 @@ void gen3_trade_sync_offer_taken(Gen3TradeSync* sync) {
     memcpy(sync->taken_offer, sync->offer, sizeof(sync->taken_offer));
 }
 
+bool gen3_trade_sync_settled(const Gen3TradeSync* sync, uint32_t received_count) {
+    return received_count == sync->trades_seen && sync->pickup_fail != Gen3PickupNoData;
+}
+
+bool gen3_trade_stop_allowed(const Gen3ClubStatus* st) {
+    if(st->save_window) return false;
+    return !(st->trade_pending && st->phase != Gen3ClubPhaseWaiting);
+}
+
+Gen3TradeEndAction gen3_trade_end_action(const Gen3ClubStatus* st, bool settled) {
+    if(st->save_window) return Gen3TradeEndSaving;
+    if(st->phase != Gen3ClubPhaseWaiting) return Gen3TradeEndAsk;
+    /* No GBA linked, so R6 allows the stop (a pending trade here hasn't reached sync 1) */
+    return settled ? Gen3TradeEndStop : Gen3TradeEndPickup;
+}
+
+Gen3TradeBackAction gen3_trade_back_action(const Gen3ClubStatus* st, bool running) {
+    if(!running) return Gen3TradeBackLeave;
+    if(st->save_window) return Gen3TradeBackLocked;
+    if(st->leaving && gen3_trade_stop_allowed(st)) return Gen3TradeBackStopLink;
+    return Gen3TradeBackLeave;
+}
+
 /* The reason line of a refusal (the Flipper's offer, or the GBA's pick) */
 static const char* guide_reason(Gen3Refuse r) {
     switch(r) {

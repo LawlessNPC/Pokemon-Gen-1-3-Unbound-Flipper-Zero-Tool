@@ -8,9 +8,15 @@
 
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
+#include <src/gen3/gen3_text.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 
-/* Gen III editor menu. Each row's item index is the scene it opens. The spaces after each label
- * line the values up at the same pixel column in the submenu font, as in pokemon_gen.c. */
+/* Gen III editor menu. Each row's item index is the scene it opens, except "OT: use <NAME>"
+ * (PokemonSceneNum), which applies the GBA player's OT in place. The spaces after each label line
+ * the values up at the same pixel column in the submenu font, as in pokemon_gen.c. */
+
+/* The "Shiny lost" notice from "OT: use <NAME>" is up over this menu (R4) */
+static bool gen3_edit_notice_up = false;
 
 /* name_buf holds the species name too */
 _Static_assert(GEN3_NICKNAME_LEN >= GEN3_SPECIES_NAME_LEN, "name_buf too small");
@@ -54,6 +60,7 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
 
     gen3_traits_of(p, &traits);
 
+    gen3_edit_notice_up = false;
     submenu_reset(pokemon_fap->submenu);
 
     gen3_species_name_get(national, name_buf);
@@ -128,6 +135,14 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
     snprintf(buf, sizeof(buf), "OT SID:         %05u", (unsigned)(uint16_t)(ot_id >> 16));
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Sid);
 
+    /* D7: the GBA player's OT for a Pokemon that has another one. Its index is no scene id. */
+    const Gen3Trainer* trainer = gen3_edit_trainer(ed);
+    if(trainer && !gen3_edit_ot_is_trainer(ed)) {
+        gen3_text_decode(trainer->name, GEN3_OT_NAME_LEN, name_buf, sizeof(name_buf));
+        snprintf(buf, sizeof(buf), "OT: use %s", name_buf);
+        gen3_edit_add(pokemon_fap, buf, PokemonSceneNum);
+    }
+
     submenu_set_selected_item(
         pokemon_fap->submenu,
         scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Edit));
@@ -139,6 +154,13 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
     PokemonFap* pokemon_fap = context;
     uint16_t national = gen3_edit_national(pokemon_fap->gen3_editor);
     uint32_t alias;
+
+    /* OK or Back on the "Shiny lost" notice: this menu again, with the new OT */
+    if((event.type == SceneManagerEventTypeCustom && event.event == GEN3_EVENT_NOTICE_OK) ||
+       (event.type == SceneManagerEventTypeBack && gen3_edit_notice_up)) {
+        pokemon_scene_gen3_edit_on_enter(pokemon_fap); /* clears gen3_edit_notice_up */
+        return true;
+    }
 
     /* Back is left to the scene manager, which returns to the Gen III menu */
     if(event.type != SceneManagerEventTypeCustom) return false;
@@ -179,6 +201,17 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
     case PokemonSceneGen3Unown:
         alias = PokemonSceneGen3Preset;
         break;
+    case PokemonSceneNum:
+        /* "OT: use <NAME>" (D7, R4): the row goes once applied; keep the highlight next to it */
+        scene_manager_set_scene_state(
+            pokemon_fap->scene_manager, PokemonSceneGen3Edit, PokemonSceneGen3Sid);
+        if(gen3_edit_use_trainer_ot(pokemon_fap->gen3_editor) == Gen3UseTrainerShinyLost) {
+            gen3_menu_show_notice(pokemon_fap, "Shiny lost", "No shiny PID\nfor this OT ID.");
+            gen3_edit_notice_up = true;
+        } else {
+            pokemon_scene_gen3_edit_on_enter(pokemon_fap);
+        }
+        return true;
     default:
         /* Not one of this menu's rows */
         return false;
