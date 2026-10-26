@@ -31,6 +31,14 @@ static unsigned sync_pickup(
     Gen3Editor* ed,
     const uint8_t received[GEN3_PARTY_SIZE],
     uint32_t received_count) {
+    if(received_count < sync->trades_seen) {
+        /* The club was reset (trades_done back to 0): no trade to pick up. A NoData retry's
+         * Pokemon went with the old club, so nothing is retried and the block stays (BadData):
+         * the editor still holds the Pokemon traded away. */
+        sync->trades_seen = received_count;
+        if(sync->pickup_fail == Gen3PickupNoData) sync->pickup_fail = Gen3PickupBadData;
+        return 0;
+    }
     if(received_count != sync->trades_seen) {
         /* A new trade: the editor's Pokemon is the GBA's now */
         sync->gone_pid = gen3_pkm_get(&ed->pkm, Gen3FieldPid);
@@ -63,7 +71,17 @@ static unsigned sync_trainer(Gen3TradeSync* sync, Gen3Editor* ed, const Gen3Club
     Gen3Trainer t;
     gen3_trainer_from_link_player(&st->trainer, &t);
     if(sync->trainer_known && trainer_eq(&t, &sync->trainer)) return 0;
+    const uint32_t pid = gen3_pkm_get(&ed->pkm, Gen3FieldPid);
+    const uint32_t ot_id = gen3_pkm_get(&ed->pkm, Gen3FieldOtId);
     gen3_edit_set_trainer(ed, &t);
+    /* O2: the block follows a trainer swap. Only a pristine editor changes here, and while
+     * gone_valid that is the default traded away, now under this player's OT: still blocked, to
+     * this player and to the one it went to. */
+    if(sync->gone_valid && (gen3_pkm_get(&ed->pkm, Gen3FieldPid) != pid ||
+                            gen3_pkm_get(&ed->pkm, Gen3FieldOtId) != ot_id)) {
+        sync->gone_pid = gen3_pkm_get(&ed->pkm, Gen3FieldPid);
+        sync->gone_ot_id = gen3_pkm_get(&ed->pkm, Gen3FieldOtId);
+    }
     sync->trainer = t;
     sync->trainer_known = true;
     return Gen3SyncTrainer;
@@ -214,7 +232,23 @@ static void guide_pick(
 
 #undef SAY
 
-void gen3_trade_guide(
+bool gen3_trade_guide_copy(
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN],
+    const char* l1,
+    const char* l2,
+    const char* l3) {
+    const char* const l[GEN3_GUIDE_LINES] = {l1, l2, l3};
+    bool whole = true;
+    for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
+        size_t n = 0;
+        for(; l[i][n] != '\0' && n < GEN3_GUIDE_LINE_LEN - 1; n++) out[i][n] = l[i][n];
+        out[i][n] = '\0';
+        if(l[i][n] != '\0') whole = false; /* cut, never overrun */
+    }
+    return whole;
+}
+
+bool gen3_trade_guide(
     const Gen3ClubStatus* st,
     bool started,
     bool cable_ok,
@@ -223,10 +257,5 @@ void gen3_trade_guide(
     char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN]) {
     const char* l[GEN3_GUIDE_LINES];
     guide_pick(st, started, cable_ok, offer_refuse, pickup_fail, l);
-    for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
-        /* Every text fits (test_guide_texts, test_guide_line_lengths); cut, never overrun */
-        size_t n = 0;
-        for(; l[i][n] != '\0' && n < GEN3_GUIDE_LINE_LEN - 1; n++) out[i][n] = l[i][n];
-        out[i][n] = '\0';
-    }
+    return gen3_trade_guide_copy(out, l[0], l[1], l[2]);
 }

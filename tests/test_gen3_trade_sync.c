@@ -337,6 +337,110 @@ TEST(test_sync_bad_received) {
     ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
 }
 
+/* O2, T10 review minor 2: the block follows a trainer swap. Player A trades the default away and
+ * the pickup fails; B and then A link again. The default takes each one's OT, and the Pokemon A
+ * traded away is never published, to B or back to A. */
+TEST(test_sync_block_follows_trainer) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_trade_sync_init(&sync);
+    status_ruby(&st);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncTrainer | Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&sync);
+    Gen3Pkm traded = ed.pkm; /* what A gets */
+
+    golden_game(rx);
+    rx[0x30] ^= 1;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    gen3_trade_sync_offer_taken(&sync);
+
+    /* B: the still-default Pokemon takes B's OT, and stays blocked */
+    st.trainer.trainer_id = 0x00020001;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncTrainer);
+    ASSERT_EQ(G(OtId), 0x00020001);
+    ASSERT_TRUE(ed.pristine);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_TRUE(sync.gone_valid);
+    ASSERT_EQ(sync.gone_pid, G(Pid));
+    ASSERT_EQ(sync.gone_ot_id, 0x00020001);
+
+    /* A again: the very Pokemon A traded away, still not offered */
+    status_ruby(&st);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncTrainer);
+    ASSERT_MEM_EQ(ed.pkm.raw, traded.raw, GEN3_PARTY_SIZE);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), 0);
+
+    /* The user's own new Pokemon frees it */
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
+}
+
+/* T10 review minor 4: received_count below trades_seen is a club reset (trades_done back to 0,
+ * the received Pokemon zeros): trades_seen follows it, with no pickup */
+TEST(test_sync_club_reset) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_trade_sync_init(&sync);
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&sync);
+    golden_game(rx);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickedUp | Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&sync);
+
+    memset(rx, 0, sizeof(rx));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_EQ(sync.trades_seen, 0);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_MEM_EQ(ed.pkm.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+
+    /* The new club's first trade is picked up as usual */
+    Gen3Pkm p;
+    golden_build(&p);
+    gen3_pkm_set(&p, Gen3FieldExp, gen3_exp_for_level(gen3_species(252)->growth, 10));
+    gen3_recalc_party(&p);
+    gen3_pkm_fix_checksum(&p);
+    gen3_pkm_encrypt(&p, rx);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickedUp | Gen3SyncOffer);
+    ASSERT_EQ(sync.trades_seen, 1);
+    ASSERT_EQ(G(Level), 10);
+    gen3_trade_sync_offer_taken(&sync);
+
+    /* A reset while a NoData pickup waits: that Pokemon went with the old club, so nothing is
+     * retried, and the editor's Pokemon (traded away) stays blocked until the user changes it */
+    moveless_golden_game(rx);
+    bulk_file_failing = true;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 2), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupNoData);
+    gen3_trade_sync_offer_taken(&sync);
+    ASSERT_TRUE(bulk_file_open());
+    Gen3Pkm held = ed.pkm;
+    memset(rx, 0, sizeof(rx));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_EQ(sync.trades_seen, 0);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_MEM_EQ(ed.pkm.raw, held.raw, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+}
+
 /* O2: the bulk file is unreadable at the pickup: retried on every poll, with the offer unpublished
  * meanwhile, until it works */
 TEST(test_sync_pickup_retry) {
@@ -522,7 +626,10 @@ static bool guide_is(
     const char* l3) {
     char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
     memset(out, 'X', sizeof(out));
-    gen3_trade_guide(st, started, cable_ok, offer_refuse, pickup_fail, out);
+    if(!gen3_trade_guide(st, started, cable_ok, offer_refuse, pickup_fail, out)) {
+        printf("  guide: a text was cut: \"%s\" / \"%s\" / \"%s\"\n", out[0], out[1], out[2]);
+        return false;
+    }
     for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
         if(memchr(out[i], '\0', GEN3_GUIDE_LINE_LEN) == NULL) {
             printf("  guide line %d has no NUL\n", i + 1);
@@ -727,16 +834,52 @@ TEST(test_guide_texts) {
 }
 
 /* Every line fits FontSecondary across 128 px (21 characters) for every combination */
+static unsigned long guide_calls;
+static bool guide_saw_confirm, guide_saw_next;
+
+/* One sweep call: gen3_trade_guide cut no text, and line 1 says something */
+static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFail pf) {
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+    guide_calls++;
+    if(!gen3_trade_guide(st, true, true, offer, pf, out) || out[0][0] == '\0') {
+        printf(
+            "  guide: phase %d error %d menu %d trades_done %u refused %d result %d offer %d "
+            "pickup %d: \"%s\" / \"%s\" / \"%s\"\n",
+            st->phase,
+            st->last_error,
+            st->menu,
+            (unsigned)st->trades_done,
+            st->refused,
+            st->last_result,
+            offer,
+            pf,
+            out[0],
+            out[1],
+            out[2]);
+        return false;
+    }
+    guide_saw_confirm |= strcmp(out[0], "Confirm the trade") == 0;
+    guide_saw_next |= strcmp(out[0], "Edit it (OK), or pick") == 0;
+    return true;
+}
+
+/* Every text fits FontSecondary across 128 px (21 characters): gen3_trade_guide reports any text
+ * it had to cut. Every phase x last_error x {save_window, left, leaving, trade_pending,
+ * offer_stale, resit_needed, gba_seated} x menu x trades_done (0, 1), then
+ * (a) refused x last_result with no pickup failure and no offer refusal, and
+ * (b) offer_refuse x pickup_fail with refused and last_result None.
+ * A pickup failure or an offer refusal decides the guide before any row that reads refused or
+ * last_result, so (a) and (b) together reach every row of the full cross product. */
 TEST(test_guide_line_lengths) {
     Gen3ClubStatus st;
-    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
-    unsigned long calls = 0;
+    guide_calls = 0;
+    guide_saw_confirm = false;
+    guide_saw_next = false;
     for(int phase = Gen3ClubPhaseWaiting; phase <= Gen3ClubPhaseSave; phase++) {
         for(int err = Gen3ClubErrorNone; err <= Gen3ClubErrorUnexpected; err++) {
             for(unsigned flags = 0; flags < (1u << 7); flags++) {
-                for(int refused = Gen3RefuseNone; refused <= Gen3RefuseBadData; refused++) {
-                    for(int result = Gen3TradeResultNone; result <= Gen3TradeResultAssumed;
-                        result++) {
+                for(int menu = Gen3ClubMenuIdle; menu <= Gen3ClubMenuLeaving; menu++) {
+                    for(uint32_t done = 0; done <= 1; done++) {
                         status_reset(&st, (Gen3ClubPhase)phase);
                         st.last_error = (Gen3ClubError)err;
                         st.save_window = flags & 1;
@@ -746,33 +889,22 @@ TEST(test_guide_line_lengths) {
                         st.offer_stale = flags & 16;
                         st.resit_needed = flags & 32;
                         st.gba_seated = flags & 64;
-                        st.refused = (Gen3Refuse)refused;
-                        st.last_result = (Gen3TradeResult)result;
-                        for(int offer = Gen3RefuseNone; offer <= Gen3RefuseBadData; offer++) {
-                            for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++) {
-                                memset(out, 'X', sizeof(out));
-                                gen3_trade_guide(
-                                    &st, true, true, (Gen3Refuse)offer, (Gen3PickupFail)pf, out);
-                                calls++;
-                                for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
-                                    if(memchr(out[i], '\0', GEN3_GUIDE_LINE_LEN) == NULL ||
-                                       strlen(out[i]) > GEN3_GUIDE_LINE_LEN - 1) {
-                                        printf(
-                                            "  line %d too long: phase %d error %d flags 0x%02X "
-                                            "refused %d result %d offer %d pickup %d\n",
-                                            i + 1,
-                                            phase,
-                                            err,
-                                            flags,
-                                            refused,
-                                            result,
-                                            offer,
-                                            pf);
-                                        ASSERT_TRUE(false);
-                                    }
-                                }
-                                ASSERT_TRUE(out[0][0] != '\0'); /* line 1 always says something */
+                        st.menu = (Gen3ClubMenu)menu;
+                        st.trades_done = done;
+                        for(int r = Gen3RefuseNone; r <= Gen3RefuseBadData; r++) {
+                            for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed;
+                                res++) {
+                                st.refused = (Gen3Refuse)r;
+                                st.last_result = (Gen3TradeResult)res;
+                                ASSERT_TRUE(guide_fits(&st, Gen3RefuseNone, Gen3PickupOk));
                             }
+                        }
+                        st.refused = Gen3RefuseNone;
+                        st.last_result = Gen3TradeResultNone;
+                        for(int offer = Gen3RefuseNone; offer <= Gen3RefuseBadData; offer++) {
+                            for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++)
+                                ASSERT_TRUE(
+                                    guide_fits(&st, (Gen3Refuse)offer, (Gen3PickupFail)pf));
                         }
                     }
                 }
@@ -780,7 +912,34 @@ TEST(test_guide_line_lengths) {
         }
     }
     ASSERT_EQ(GEN3_GUIDE_LINE_LEN, 22);
-    ASSERT_EQ(calls, 11ul * 5 * 128 * 7 * 5 * 7 * 3);
+    ASSERT_EQ(guide_calls, 11ul * 5 * 128 * 4 * 2 * (7 * 5 + 7 * 3));
+    ASSERT_TRUE(guide_saw_confirm);
+    ASSERT_TRUE(guide_saw_next);
+}
+
+/* The sweep's check can fail: a text over 21 characters is cut to 21, and reported */
+TEST(test_guide_copy_reports_cut) {
+    static const char fit[] = "123456789012345678901"; /* 21 */
+    static const char over[] = "1234567890123456789012"; /* 22 */
+    static const char row34[] = "Pick a Pokemon to trade on the GBA"; /* 34 */
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+    ASSERT_EQ(strlen(fit), 21);
+    ASSERT_EQ(strlen(over), 22);
+    ASSERT_EQ(strlen(row34), 34);
+
+    ASSERT_TRUE(gen3_trade_guide_copy(out, fit, fit, ""));
+    ASSERT_STR_EQ(out[0], fit);
+    ASSERT_STR_EQ(out[1], fit);
+    ASSERT_STR_EQ(out[2], "");
+    for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
+        const char* l[GEN3_GUIDE_LINES] = {"a", "b", "c"};
+        l[i] = over;
+        memset(out, 'X', sizeof(out));
+        ASSERT_TRUE(!gen3_trade_guide_copy(out, l[0], l[1], l[2]));
+        for(int j = 0; j < GEN3_GUIDE_LINES; j++) ASSERT_STR_EQ(out[j], j == i ? fit : l[j]);
+    }
+    ASSERT_TRUE(!gen3_trade_guide_copy(out, "Pick a Pokemon to", row34, ""));
+    ASSERT_STR_EQ(out[1], "Pick a Pokemon to tra");
 }
 
 /* Each test starts with the bulk file readable, whatever a test that failed with
@@ -800,11 +959,14 @@ int main(void) {
     RUN_BULK(test_sync_pickup_stats_lag_evs);
     RUN_BULK(test_sync_pickup_before_offer);
     RUN_BULK(test_sync_bad_received);
+    RUN_BULK(test_sync_block_follows_trainer);
+    RUN_BULK(test_sync_club_reset);
     RUN_BULK(test_sync_pickup_retry);
     RUN_BULK(test_sync_holds_while_editing);
     RUN_BULK(test_sync_bad_offer_unpublished);
     RUN_BULK(test_enigma_fixture);
     RUN_BULK(test_guide_texts);
     RUN_BULK(test_guide_line_lengths);
+    RUN_BULK(test_guide_copy_reports_cut);
     TEST_EXIT();
 }

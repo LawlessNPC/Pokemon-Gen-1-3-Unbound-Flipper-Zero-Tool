@@ -56,12 +56,15 @@ enum {
 /* App thread, between UI events. received/received_count come from one
  * gen3_session_get_received. editing (the current scene is neither Gen3Trade nor Gen3Menu):
  * return 0 and do nothing (D6). Else, in order:
- * 1. Pickup, on a new trade (received_count != trades_seen) or to retry a NoData pickup.
+ * 1. Pickup, on a new trade (received_count > trades_seen) or to retry a NoData pickup.
  *    A new trade first notes the editor's PID and OT ID (gone_*) and sets trades_seen =
  *    received_count, whatever follows. Then gen3_pkm_decrypt and gen3_edit_load: PickedUp, with
  *    pickup_fail Ok; or PickupBad with the editor unchanged, pickup_fail NoData if the decrypt
  *    worked and the bulk file isn't readable after the load, else BadData.
- * 2. st->trainer_valid and not the known trainer: gen3_edit_set_trainer, Trainer.
+ *    received_count < trades_seen is a club reset: trades_seen = received_count, no pickup, and a
+ *    waiting NoData retry becomes BadData (its Pokemon went with the old club).
+ * 2. st->trainer_valid and not the known trainer: gen3_edit_set_trainer, Trainer. While gone_valid,
+ *    a set_trainer that changes the editor's PID or OT ID moves gone_* with it.
  * 3. A BadData pickup is cleared once the editor's PID or OT ID differs from gone_*. Then
  *    offer_refuse = gen3_trade_offer_check(&ed->pkm), offer_valid = offer_refuse None and no
  *    failed pickup, offer = the game form when valid (G6: only a Pokemon that passes the check is
@@ -83,11 +86,19 @@ void gen3_trade_sync_offer_taken(Gen3TradeSync* sync);
 /* What is happening and what to do on the GBA. started: the session runs (or ran and ended);
  * cable_ok: the cable reads right; offer_refuse and pickup_fail: the sync's. Unused lines are "".
  * The guide never reads left as "trade resolved", nor refused alone as "no offer" (an R8 DDEE
- * leaves it None). */
-void gen3_trade_guide(
+ * leaves it None). Written through gen3_trade_guide_copy: false if a text, row or reason, had to
+ * be cut to fit (test_guide_line_lengths: never). */
+bool gen3_trade_guide(
     const Gen3ClubStatus* st,
     bool started,
     bool cable_ok,
     Gen3Refuse offer_refuse,
     Gen3PickupFail pickup_fail,
     char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN]);
+/* The three lines into out, each cut at GEN3_GUIDE_LINE_LEN - 1 characters and NUL-terminated.
+ * false if any was cut. */
+bool gen3_trade_guide_copy(
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN],
+    const char* l1,
+    const char* l2,
+    const char* l3);
