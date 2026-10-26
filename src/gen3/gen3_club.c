@@ -56,6 +56,10 @@ static void reset_session(Gen3Club* club) {
     club->flipper_seated = false;
     club->round = 0;
     club->round_gba_done = false;
+    club->menu = Gen3ClubMenuIdle;
+    club->reply_due = false;
+    club->gba_slot = 0;
+    club->refused = Gen3RefuseNone;
 }
 
 void gen3_club_claim_game(
@@ -265,6 +269,86 @@ static void exchange_step(Gen3Club* club) {
     start_round(club, (uint8_t)(club->round + 1));
 }
 
+/* §B3.2: the GBA's codes the arbiter answers. The R-button debug block (word 0 = 0) and any
+ * other code get no reply (§B3.4). */
+static bool gets_reply(uint16_t code) {
+    return code == GEN3_TRADE_READY || code == GEN3_TRADE_CANCEL || code == GEN3_TRADE_CONFIRM ||
+           code == GEN3_TRADE_CONFIRM_NO;
+}
+
+/* §B3.3: the GBA's 20-byte blocks in the trade menu. menu_step answers each once. In Starting
+ * and Leaving the GBA is on its way out: no reply. */
+static void on_menu_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
+    if(gen3_block_rx_feed(&club->block_rx, cmd) != Gen3BlockRxDone) return;
+    if(club->block_rx.size != GEN3_TRADE_BLOCK_SIZE) return;
+    if(club->menu == Gen3ClubMenuStarting || club->menu == Gen3ClubMenuLeaving) return;
+    uint16_t arg;
+    const uint16_t code = gen3_trade_block_code(club->block_rx.data, &arg);
+    if(!gets_reply(code)) return;
+    club->gba_code = code;
+    club->gba_arg = arg;
+    club->reply_due = true;
+    club->idle_bursts = 0;
+}
+
+/* R8: Ruby counts the Flipper's party up to the first species 0. party_mon is the offer at round
+ * 1, which has a species (G6), or zeros without one: then the GBA's partner column is empty. */
+static bool party_mon_shown(const Gen3Club* club) {
+    for(size_t i = 0; i < GEN3_PARTY_SIZE; i++) {
+        if(club->party_mon[i] != 0) return true;
+    }
+    return false;
+}
+
+/* §B3.4 and D4, decided as the reply goes out: the code to send for the GBA's block, and the
+ * arbiter's new state. Every reply's arg is 0 (the Flipper offers its slot 0). AABB is the one
+ * decrypt of the frame (G4); an AABB while Offered is the GBA's new pick and is decided afresh. */
+static uint16_t menu_reply(Gen3Club* club) {
+    const uint16_t slot = club->gba_arg;
+    switch(club->gba_code) {
+    case GEN3_TRADE_READY:
+        club->refused = slot < GEN3_CLUB_GBA_PARTY ?
+                            gen3_trade_check_incoming(club->gba_party[slot], &club->scratch) :
+                            Gen3RefuseEmpty;
+        /* R8: never a DDDD to an empty partner column */
+        if(club->refused != Gen3RefuseNone || !party_mon_shown(club)) {
+            club->menu = Gen3ClubMenuIdle;
+            return GEN3_TRADE_PLAYER_CANCEL;
+        }
+        club->gba_slot = (uint8_t)slot;
+        club->menu = Gen3ClubMenuOffered;
+        return GEN3_TRADE_SET_MONS;
+    case GEN3_TRADE_CONFIRM:
+        /* Save safety: Offered means the GBA's AABB got our DDDD, and no block of ours since */
+        if(club->menu != Gen3ClubMenuOffered) return GEN3_TRADE_PLAYER_CANCEL;
+        memcpy(club->pending_mon, club->gba_party[club->gba_slot], sizeof(club->pending_mon));
+        club->trade_pending = true;
+        club->menu = Gen3ClubMenuStarting;
+        return GEN3_TRADE_START;
+    case GEN3_TRADE_CANCEL:
+        club->menu = Gen3ClubMenuLeaving;
+        return GEN3_TRADE_BOTH_CANCEL;
+    default: /* GEN3_TRADE_CONFIRM_NO */
+        club->menu = Gen3ClubMenuIdle;
+        return GEN3_TRADE_PLAYER_CANCEL;
+    }
+}
+
+/* §B3.4: the reply goes out once, after GEN3_CLUB_REPLY_DELAY_BURSTS idle bursts from the one
+ * that carried the last chunk of the GBA's block. 3 commands into an empty queue. */
+static void menu_step(Gen3Club* club) {
+    if(club->phase != Gen3ClubPhaseMenu || !club->reply_due) return;
+    if(gen3_link_queued(&club->link) != 0) return;
+    if(club->idle_bursts < GEN3_CLUB_REPLY_DELAY_BURSTS) {
+        club->idle_bursts++; /* the burst built below is idle */
+        return;
+    }
+    uint8_t block[GEN3_TRADE_BLOCK_SIZE];
+    gen3_trade_block_build(menu_reply(club), 0, block);
+    gen3_block_send(&club->link, block, sizeof(block), FLIPPER_MULTIPLAYER_ID);
+    club->reply_due = false;
+}
+
 static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     if(cmd[0] == CMD_READY_CLOSE_LINK) {
         /* §A7: always answer with exactly one 5FFF, whatever the phase. */
@@ -308,8 +392,10 @@ static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     case Gen3ClubPhaseExchange:
         on_exchange_command(club, cmd);
         break;
-    default: /* Menu: nothing yet (Task 5). Closing: keep bursting until the GBA closes
-                (Disconnected). */
+    case Gen3ClubPhaseMenu:
+        on_menu_command(club, cmd);
+        break;
+    default: /* Closing: keep bursting until the GBA closes (Disconnected). */
         break;
     }
 }
@@ -360,6 +446,7 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     request_cards(club);
     try_sit(club);
     exchange_step(club);
+    menu_step(club);
     gen3_link_tx(&club->link, tx);
 }
 
@@ -380,6 +467,10 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->flipper_seated = club->flipper_seated;
     out->trades_done = club->trades_done;
     out->round = club->round;
+    out->menu = club->menu;
+    out->gba_slot = club->gba_slot;
+    out->refused = club->refused;
+    out->trade_pending = club->trade_pending;
 }
 
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {

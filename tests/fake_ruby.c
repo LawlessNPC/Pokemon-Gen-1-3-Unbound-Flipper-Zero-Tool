@@ -79,6 +79,38 @@
 #define ITEM_MAIL_LAST      132 /* RETRO MAIL */
 #define MAIL_NONE           0xFF
 
+/* The trade menu (§B3): trade.c unk_007b states */
+#define TRADE_BROWSING      0 /* sub_8049680, and the submenus of states 1, 2 and 4 */
+#define TRADE_PROMPT        3 /* sub_8049AC0: "Is this trade okay?" YES/NO */
+#define TRADE_STANDBY_READY 5 /* "Link standby..." after this GBA's AABB, no input */
+#define TRADE_SLIDE_IN      7 /* sub_8049CC4: both Pokemon slide in */
+#define TRADE_MESSAGE       8 /* sub_8049D44: a message until A */
+#define TRADE_FADE_TRADE    10 /* sub_8048A50 */
+#define TRADE_FADE_ROOM     11 /* sub_8049D9C */
+#define TRADE_CLOSE_ROOM    12 /* sub_8049DC4 */
+#define TRADE_CLOSE_TRADE   13 /* sub_8048A90 */
+#define TRADE_CONFIRM_WAIT  14 /* DisplayMessageAndContinueTask */
+#define TRADE_STANDBY       100 /* "Link standby..." after EEAA, BBBB or BBCC, no input */
+#define SLIDE_IN_FRAMES        20 /* sub_8049ED4 until both slots' unk_0080 reach 5 */
+#define CONFIRM_MESSAGE_FRAMES 121 /* DisplayMessageAndContinueTask: ++unk_00b4 > 120 */
+#define MENU_FADE_FRAMES       17 /* BeginNormalPaletteFade(0xFFFFFFFF, 0, 0, 16, 0) */
+#define CANCEL_SEND_DELAY      5 /* sub_8049BC0: QueueAction(5, 0) */
+#define CURSOR_CANCEL          12 /* tradeMenuCursorPosition on CANCEL */
+#define PARTNER_POS_FIRST      6 /* unk_008a: the partner's slots are cursor positions 6..11 */
+#define LINK_DATA_WORDS        10
+#define LINK_DATA_LEFTOVER     0x5A5A /* the trade struct lives in ewram_2010000, never cleared */
+/* Trade-menu codes, word 0 of a 20-byte block (§B3.2, §B3.3; Emerald LINKCMD_ names) */
+#define TRADE_BLOCK_SIZE    20
+#define CODE_READY          0xAABB /* READY_TO_TRADE */
+#define CODE_CANCEL         0xEEAA /* REQUEST_CANCEL */
+#define CODE_CONFIRM        0xBBBB /* INIT_BLOCK */
+#define CODE_CONFIRM_NO     0xBBCC /* READY_CANCEL_TRADE */
+#define CODE_SET_MONS       0xDDDD /* SET_MONS_TO_TRADE */
+#define CODE_PARTNER_CANCEL 0xEECC /* PARTNER_CANCEL_TRADE */
+#define CODE_PLAYER_CANCEL  0xDDEE /* PLAYER_CANCEL_TRADE */
+#define CODE_BOTH_CANCEL    0xEEBB /* BOTH_CANCEL_TRADE */
+#define CODE_START          0xCCDD /* START_TRADE */
+
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
 #define BLOCK_REQ_CARD 2
@@ -917,11 +949,269 @@ static void calculate_enemy_party_count(FakeRuby* g) {
     }
 }
 
+/* ---- The trade menu (trade.c, §B3) ---- */
+
+/* unk_007b, and the state the tests see */
+static void set_trade_state(FakeRuby* g, uint8_t state) {
+    g->trade_state = state;
+    g->trade_state_frame = g->frame;
+    switch(state) {
+    case TRADE_BROWSING:
+        g->menu = FakeRubyMenuBrowsing;
+        break;
+    case TRADE_STANDBY_READY:
+    case TRADE_STANDBY:
+        g->menu = FakeRubyMenuStandby;
+        break;
+    case TRADE_SLIDE_IN:
+    case TRADE_CONFIRM_WAIT:
+        g->menu = FakeRubyMenuConfirming;
+        break;
+    case TRADE_PROMPT:
+        g->menu = FakeRubyMenuPrompt;
+        break;
+    case TRADE_MESSAGE:
+        g->menu = FakeRubyMenuMessage;
+        break;
+    default: /* 10-13 */
+        g->menu = FakeRubyMenuClosing;
+        break;
+    }
+    /* fake_ruby_answer waits for a prompt of this confirm sequence only */
+    if(g->menu != FakeRubyMenuStandby && g->menu != FakeRubyMenuConfirming &&
+       g->menu != FakeRubyMenuPrompt) {
+        g->answer_pending = false;
+    }
+}
+
+/* SetCloseLinkCallback: ignored while gLinkCallback is busy */
+static bool set_close_link_callback(FakeRuby* g) {
+    if(g->callback != FakeRubyCbNone) return false;
+    g->callback = FakeRubyCbReadyCloseLink;
+    return true;
+}
+
+/* Trade_SendData: SendBlock(linkData, 20), refused while a block is active. linkData keeps its
+ * words between sends (§B3.1). */
+static void trade_send_data(FakeRuby* g) {
+    uint8_t block[TRADE_BLOCK_SIZE];
+    for(int i = 0; i < LINK_DATA_WORDS; i++) {
+        block[2 * i] = (uint8_t)(g->link_data[i] & 0xFF);
+        block[2 * i + 1] = (uint8_t)(g->link_data[i] >> 8);
+    }
+    if(!init_block_send(g, block, sizeof(block))) return;
+    switch(g->link_data[0]) {
+    case CODE_READY:
+        g->seq = FakeRubySeqReady;
+        break;
+    case CODE_CONFIRM:
+        g->seq = g->seq == FakeRubySeqSet ? FakeRubySeqConfirmed : FakeRubySeqNone;
+        break;
+    default:
+        g->seq = FakeRubySeqNone;
+        break;
+    }
+}
+
+/* Own party slots up to the first empty one (gPlayerPartyCount) */
+static uint8_t own_party_count(const FakeRuby* g) {
+    uint8_t count = 0;
+    while(count < FAKE_RUBY_PARTY && !all_zero(g->party[count], GEN3_PARTY_SIZE)) count++;
+    return count;
+}
+
+/* sub_804ACF4 [ComputePartyTradeableFlags], own side: neither an egg (a Bad Egg reads as one) nor
+ * fainted. */
+static bool can_battle(const uint8_t* mon) {
+    Gen3Pkm p;
+    if(!gen3_pkm_decrypt(mon, GEN3_PARTY_SIZE, &p)) return false;
+    return gen3_pkm_get(&p, Gen3FieldIsEgg) == 0 && gen3_pkm_get(&p, Gen3FieldHp) != 0;
+}
+
+/* sub_8049860 [CB_ProcessSelectedMonInput] TRADE on own slot: sub_80499F0
+ * [CheckValidityOfTradeMons] wants another battler, then sub_8049620 [SetReadyToTrade]. */
+static void trade_select(FakeRuby* g, uint8_t slot) {
+    const uint8_t count = own_party_count(g);
+    if(slot >= count) return; /* sub_8048C70: the cursor can't reach an empty slot */
+    g->cursor = slot;
+    bool other = false;
+    for(uint8_t i = 0; i < count; i++) {
+        if(i != slot && can_battle(g->party[i])) other = true;
+    }
+    if(!other) { /* "That's your only POKéMON for battle." */
+        set_trade_state(g, TRADE_MESSAGE);
+        return;
+    }
+    set_trade_state(g, TRADE_STANDBY_READY);
+    g->link_data[0] = CODE_READY;
+    g->link_data[1] = slot;
+    trade_send_data(g); /* no IsLinkTaskFinished guard: dropped while a block is active */
+}
+
+/* CANCEL, then sub_8049BC0 [CB_ProcessCancelTradeInput] "Cancel trade?" YES */
+static void trade_request_cancel(FakeRuby* g) {
+    g->cursor = CURSOR_CANCEL;
+    g->link_data[0] = CODE_CANCEL;
+    g->link_data[1] = 0;
+    g->send_queued = true; /* sub_804AADC [QueueAction] */
+    g->send_delay = CANCEL_SEND_DELAY;
+    set_trade_state(g, TRADE_STANDBY);
+}
+
+/* sub_8049AC0 [CB_ProcessConfirmTradeInput]: YES (sub_8049A20) or NO, each sent only while
+ * IsLinkTaskFinished, else this GBA waits in Link standby forever (§B3.4). sub_8049A20's own BBCC
+ * (no battler left) can't happen: trade_select already checked this GBA's other slots. */
+static void trade_answer(FakeRuby* g, bool yes) {
+    const bool link_idle = g->callback == FakeRubyCbNone;
+    if(yes) {
+        g->link_data[0] = CODE_CONFIRM;
+        if(link_idle) trade_send_data(g);
+    } else if(link_idle) {
+        g->link_data[0] = CODE_CONFIRM_NO;
+        trade_send_data(g);
+    }
+    set_trade_state(g, TRADE_STANDBY);
+}
+
+/* sub_80491E4 [Follower_ReadLinkBuffer]: the Flipper's block, in any state and with no check
+ * that it was expected (§B3.3). Ruby checks nothing; the fake adds the DDDD and CCDD rules of
+ * §B3.4. */
+static void trade_flipper_block(FakeRuby* g) {
+    const uint8_t* buf = g->block_recv_buffer[0];
+    const uint16_t code = (uint16_t)(buf[0] | (buf[1] << 8));
+    const uint16_t arg = (uint16_t)(buf[2] | (buf[3] << 8));
+    const FakeRubySeq seq = g->seq;
+    g->seq = FakeRubySeqNone; /* every Flipper block ends the sequence, but a DDDD it awaits */
+    switch(code) {
+    case CODE_BOTH_CANCEL: /* fade out, back to the room (§B6.3) */
+        set_trade_state(g, TRADE_FADE_ROOM);
+        break;
+    case CODE_PARTNER_CANCEL: /* "Your friend wants to trade POKéMON." */
+    case CODE_PLAYER_CANCEL: /* "The trade has been canceled." */
+        set_trade_state(g, TRADE_MESSAGE);
+        break;
+    case CODE_SET_MONS:
+        /* sub_8049ED4 would animate partyIcons[1][arg], made only for the partner's count */
+        if(arg >= g->enemy_count) {
+            set_error(g, "empty party");
+            return;
+        }
+        if(seq != FakeRubySeqReady || g->trade_state != TRADE_STANDBY_READY) {
+            set_error(g, "unexpected dddd"); /* a second one restarts the confirm sequence */
+            return;
+        }
+        g->partner_pos = (uint8_t)(arg + PARTNER_POS_FIRST);
+        g->seq = FakeRubySeqSet;
+        set_trade_state(g, TRADE_SLIDE_IN);
+        break;
+    case CODE_START:
+        if(seq != FakeRubySeqConfirmed) {
+            set_error(g, "bad ccdd"); /* Ruby trades its cursor and unk_008a, whatever they hold */
+            return;
+        }
+        set_trade_state(g, TRADE_FADE_TRADE);
+        break;
+    default: /* ignored */
+        break;
+    }
+}
+
+/* sub_804AB30: a queued action counts its delay down once per update, then runs. Action 0 is
+ * Trade_SendData. */
+static void run_queued_send(FakeRuby* g) {
+    if(!g->send_queued) return;
+    if(g->send_delay != 0) {
+        g->send_delay--;
+        return;
+    }
+    g->send_queued = false;
+    trade_send_data(g);
+}
+
+/* callback2 sub_8048AB4: sub_8049DE0 runs the state's handler with this update's input, then
+ * sub_804AB30 the queued action. */
+static void trade_menu_update(FakeRuby* g) {
+    const bool offer = g->offer_pending;
+    const bool cancel = g->cancel_pending;
+    const bool press_a = g->press_a_pending;
+    const uint32_t elapsed = g->frame - g->trade_state_frame;
+    g->offer_pending = false;
+    g->cancel_pending = false;
+    g->press_a_pending = false;
+    switch(g->trade_state) {
+    case TRADE_BROWSING:
+        if(offer) {
+            trade_select(g, g->offer_slot);
+        } else if(cancel) {
+            trade_request_cancel(g);
+        }
+        break;
+    case TRADE_PROMPT:
+        if(g->answer_pending) {
+            g->answer_pending = false;
+            trade_answer(g, g->answer_yes);
+        }
+        break;
+    case TRADE_SLIDE_IN:
+        if(elapsed >= SLIDE_IN_FRAMES) set_trade_state(g, TRADE_CONFIRM_WAIT);
+        break;
+    case TRADE_MESSAGE:
+        if(press_a) set_trade_state(g, TRADE_BROWSING);
+        break;
+    case TRADE_FADE_TRADE: /* once the fade is done: (own cursor, partner) for TradeMons */
+        if(elapsed < MENU_FADE_FRAMES) break;
+        g->selected[0] = g->cursor;
+        g->selected[1] = g->partner_pos;
+        if(!set_close_link_callback(g)) {
+            set_error(g, "ccdd hang"); /* the link stays open: state 13 never ends */
+            return;
+        }
+        set_trade_state(g, TRADE_CLOSE_TRADE);
+        break;
+    case TRADE_FADE_ROOM: /* ignored while busy, as on Ruby: then state 12 never ends */
+        if(elapsed < MENU_FADE_FRAMES) break;
+        set_close_link_callback(g);
+        set_trade_state(g, TRADE_CLOSE_ROOM);
+        break;
+    case TRADE_CLOSE_ROOM: /* SetMainCallback2(sub_805465C): back to the room (Task 7) */
+        if(g->received_link_players) break;
+        g->phase = FakeRubyReturn;
+        next_task(g, FakeRubyTaskNone);
+        return;
+    case TRADE_CLOSE_TRADE: /* callback1 = NULL, SetMainCallback2(sub_804B41C) (Task 6) */
+        if(g->received_link_players) break;
+        g->phase = FakeRubyTrade;
+        next_task(g, FakeRubyTaskNone);
+        return;
+    case TRADE_CONFIRM_WAIT:
+        if(elapsed >= CONFIRM_MESSAGE_FRAMES) set_trade_state(g, TRADE_PROMPT);
+        break;
+    default: /* Link standby: no input */
+        break;
+    }
+    run_queued_send(g);
+}
+
+/* The running trade menu, once a frame: callback1 sub_80494D8 [CB1_UpdateLink] reads and resets
+ * the block flags (the Flipper's block is handled, this GBA's own echo only reset; a flag set
+ * before callback1 started waits for it), then callback2. */
+static void run_trade_menu(FakeRuby* g) {
+    if(g->block_received != 0) {
+        if(g->block_received & 1) trade_flipper_block(g);
+        g->block_received = 0; /* ResetBlockReceivedFlags */
+        if(g->error) return;
+    }
+    trade_menu_update(g);
+}
+
 /* sub_8047EC0 [CB2_CreateTradeMenu] (§B1.6, §B2). */
 static void run_create_menu(FakeRuby* g) {
     switch(g->menu_state) {
     case MENU_SETUP:
         g->xchg_case = 0; /* unk_0075 */
+        g->send_queued = false; /* sub_804AA88 */
+        g->seq = FakeRubySeqNone;
+        g->cursor = 0;
         g->menu_state = MENU_OPEN;
         break;
     case MENU_OPEN:
@@ -963,10 +1253,11 @@ static void run_create_menu(FakeRuby* g) {
         break;
     case MENU_BUILD:
         if(++g->menu_count < MENU_BUILD_FRAMES) break;
-        g->menu = FakeRubyMenuBrowsing; /* callback1 sub_80494D8, callback2 sub_8048AB4 */
+        set_trade_state(g, TRADE_BROWSING); /* callback1 sub_80494D8, callback2 sub_8048AB4 */
         g->menu_state = MENU_RUNNING;
         break;
-    default: /* MENU_RUNNING: the trade menu (Task 5) */
+    default: /* MENU_RUNNING */
+        run_trade_menu(g);
         break;
     }
 }
@@ -1094,6 +1385,7 @@ void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me) {
     g->phase = FakeRubyOff;
     g->state = FakeRubyLinkStart1; /* link closed: serial off */
     g->relink_frames = UINT32_MAX;
+    for(int i = 0; i < LINK_DATA_WORDS; i++) g->link_data[i] = LINK_DATA_LEFTOVER;
 }
 
 void fake_ruby_open_link(FakeRuby* g) {
@@ -1221,4 +1513,29 @@ FakeRubyMenuState fake_ruby_menu_state(const FakeRuby* g) {
 
 void fake_ruby_stall(FakeRuby* g, uint8_t frames) {
     g->stall = frames;
+}
+
+/* Player input reaches the trade menu only while it runs. */
+static bool trade_menu_running(const FakeRuby* g) {
+    return g->phase == FakeRubyMenu && g->menu_state == MENU_RUNNING && !g->error;
+}
+
+void fake_ruby_offer(FakeRuby* g, uint8_t slot) {
+    if(!trade_menu_running(g)) return;
+    g->offer_pending = true;
+    g->offer_slot = slot;
+}
+
+void fake_ruby_cancel_trade(FakeRuby* g) {
+    if(trade_menu_running(g)) g->cancel_pending = true;
+}
+
+void fake_ruby_answer(FakeRuby* g, bool yes) {
+    if(!trade_menu_running(g)) return;
+    g->answer_pending = true;
+    g->answer_yes = yes;
+}
+
+void fake_ruby_press_a(FakeRuby* g) {
+    if(trade_menu_running(g)) g->press_a_pending = true;
 }

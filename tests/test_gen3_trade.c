@@ -543,6 +543,301 @@ TEST(test_trade_extra_request_trips_fake) {
     ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "stale block");
 }
 
+/* ---- Trade menu (§B3) ---- */
+
+/* The k-th 20-byte (§B3.1) block among blocks[0..n), or NULL. */
+static const BenchBlock* trade_block(const BenchBlock* blocks, uint8_t n, size_t k) {
+    for(uint8_t i = 0; i < n; i++) {
+        if(blocks[i].size != GEN3_TRADE_BLOCK_SIZE) continue;
+        if(k-- == 0) return &blocks[i];
+    }
+    return NULL;
+}
+
+static size_t n_trade_blocks(const BenchBlock* blocks, uint8_t n) {
+    uint16_t codes[BENCH_BLOCKS];
+    return bench_codes(blocks, n, codes, BENCH_BLOCKS);
+}
+
+/* blk is a 20-byte block {code, arg}; else prints what it is. */
+static bool trade_block_is(const BenchBlock* blk, uint16_t code, uint16_t arg) {
+    if(!blk) {
+        printf("  no such block\n");
+        return false;
+    }
+    if(blk->code != code || blk->arg != arg) {
+        printf("  block {%04X %u}, want {%04X %u}\n", blk->code, blk->arg, code, arg);
+        return false;
+    }
+    return true;
+}
+
+/* The Flipper's reply went out after GEN3_CLUB_REPLY_DELAY_BURSTS idle bursts or more, counted
+ * from the burst of the last chunk of the GBA's block (§B3.4). */
+static bool replied_after(const BenchBlock* gba, const BenchBlock* flipper) {
+    return gba && flipper &&
+           flipper->first_burst >= gba->last_burst + GEN3_CLUB_REPLY_DELAY_BURSTS + 1;
+}
+
+static bool run_until_menu_state(Bench* b, FakeRubyMenuState state, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_menu_state(&b->ruby) == state) return true;
+    }
+    return false;
+}
+
+TEST(test_trade_offer_confirm_ccdd) {
+    /* §B3.5: AABB 2 -> DDDD 0 -> BBBB -> CCDD, each reply 6 idle bursts after the GBA's block */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuConfirming, 60));
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 1);
+    const BenchBlock* aabb = trade_block(b.g_blocks, b.n_g_blocks, 0);
+    ASSERT_TRUE(trade_block_is(aabb, GEN3_TRADE_READY, 2));
+    ASSERT_EQ(aabb->id, 0x81);
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+    const BenchBlock* dddd = trade_block(b.f_blocks, b.n_f_blocks, 0);
+    ASSERT_TRUE(trade_block_is(dddd, GEN3_TRADE_SET_MONS, 0));
+    ASSERT_EQ(dddd->id, 0x80);
+    ASSERT_TRUE(replied_after(aabb, dddd));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.menu, Gen3ClubMenuOffered);
+    ASSERT_EQ(st.gba_slot, 2);
+    ASSERT_EQ(st.refused, Gen3RefuseNone);
+    ASSERT_TRUE(!st.trade_pending);
+
+    /* 20 frames of slide-in, then "Is this trade okay?" after 120 more */
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 200));
+    fake_ruby_answer(&b.ruby, true);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuClosing, 60));
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 2);
+    const BenchBlock* bbbb = trade_block(b.g_blocks, b.n_g_blocks, 1);
+    ASSERT_TRUE(trade_block_is(bbbb, GEN3_TRADE_CONFIRM, 2)); /* §B3.1: arg is stale (AABB's) */
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    const BenchBlock* ccdd = trade_block(b.f_blocks, b.n_f_blocks, 1);
+    ASSERT_TRUE(trade_block_is(ccdd, GEN3_TRADE_START, 0));
+    ASSERT_TRUE(replied_after(bbbb, ccdd));
+    st = club_status(&b);
+    ASSERT_EQ(st.menu, Gen3ClubMenuStarting);
+    ASSERT_TRUE(st.trade_pending);
+    ASSERT_EQ(st.gba_slot, 2);
+
+    /* The GBA fades out and closes the link for the trade (Task 6 goes on from there) */
+    const uint32_t answers = b.sent_5fff;
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyTrade, 120));
+    ASSERT_EQ(b.sent_5fff, answers + 1);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 60));
+    ASSERT_TRUE(club_status(&b).trade_pending); /* trade context (D3) */
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_gba_says_no) {
+    /* §B3.4: BBCC gets DDEE; the GBA shows "The trade has been canceled." until A */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+    fake_ruby_answer(&b.ruby, false);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuMessage, 60));
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 2);
+    const BenchBlock* bbcc = trade_block(b.g_blocks, b.n_g_blocks, 1);
+    ASSERT_TRUE(trade_block_is(bbcc, GEN3_TRADE_CONFIRM_NO, 2));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    ASSERT_TRUE(trade_block_is(trade_block(b.f_blocks, b.n_f_blocks, 0), GEN3_TRADE_SET_MONS, 0));
+    const BenchBlock* ddee = trade_block(b.f_blocks, b.n_f_blocks, 1);
+    ASSERT_TRUE(trade_block_is(ddee, GEN3_TRADE_PLAYER_CANCEL, 0));
+    ASSERT_TRUE(replied_after(bbcc, ddee));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.menu, Gen3ClubMenuIdle);
+    ASSERT_TRUE(!st.trade_pending);
+
+    fake_ruby_press_a(&b.ruby);
+    ASSERT_TRUE(run_until_browsing(&b, 5));
+    run(&b, 300);
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuBrowsing);
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_gba_cancels) {
+    /* §B3.4, §B6.3: EEAA gets EEBB; the GBA fades out, closes the link and heads for the room */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_cancel_trade(&b.ruby);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuClosing, 60));
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 1);
+    const BenchBlock* eeaa = trade_block(b.g_blocks, b.n_g_blocks, 0);
+    ASSERT_TRUE(trade_block_is(eeaa, GEN3_TRADE_CANCEL, 0));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+    const BenchBlock* eebb = trade_block(b.f_blocks, b.n_f_blocks, 0);
+    ASSERT_TRUE(trade_block_is(eebb, GEN3_TRADE_BOTH_CANCEL, 0));
+    ASSERT_TRUE(replied_after(eeaa, eebb));
+    ASSERT_EQ(club_status(&b).menu, Gen3ClubMenuLeaving);
+
+    const uint32_t answers = b.sent_5fff;
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 120));
+    ASSERT_EQ(b.sent_5fff, answers + 1); /* the Flipper answered the GBA's 5FFF */
+    ASSERT_EQ(club_status(&b).phase, Gen3ClubPhaseClosing);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 60));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1); /* no CCDD */
+    ASSERT_TRUE(!club_status(&b).trade_pending);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+/* bench_init_trade with the GBA party {tm_make(1, 5, 11), slot1, tm_make(7, 10, 13)}, then
+ * bench_reach_menu. */
+static bool reach_menu_with_slot1(Bench* b, const uint8_t slot1[GEN3_PARTY_SIZE]) {
+    uint8_t party[3][GEN3_PARTY_SIZE];
+    tm_make(1, 5, 11, party[0]);
+    memcpy(party[1], slot1, GEN3_PARTY_SIZE);
+    tm_make(7, 10, 13, party[2]);
+    bench_init_trade(b);
+    bench_set_party(b, party, 3);
+    return bench_reach_menu(b);
+}
+
+/* The GBA offers its slot 1, which the Flipper refuses: DDEE, never DDDD; the GBA shows the
+ * message. The reason, or -1 on another outcome. */
+static int refused_slot1(Bench* b, const uint8_t slot1[GEN3_PARTY_SIZE]) {
+    if(!reach_menu_with_slot1(b, slot1)) return -1;
+    fake_ruby_offer(&b->ruby, 1);
+    if(!run_until_menu_state(b, FakeRubyMenuMessage, 60)) return -1;
+    const BenchBlock* aabb = trade_block(b->g_blocks, b->n_g_blocks, 0);
+    const BenchBlock* ddee = trade_block(b->f_blocks, b->n_f_blocks, 0);
+    if(n_trade_blocks(b->g_blocks, b->n_g_blocks) != 1 ||
+       n_trade_blocks(b->f_blocks, b->n_f_blocks) != 1 ||
+       !trade_block_is(aabb, GEN3_TRADE_READY, 1) ||
+       !trade_block_is(ddee, GEN3_TRADE_PLAYER_CANCEL, 0) || !replied_after(aabb, ddee)) {
+        return -1;
+    }
+    Gen3ClubStatus st = club_status(b);
+    if(st.menu != Gen3ClubMenuIdle || st.trade_pending) return -1;
+    return (int)st.refused;
+}
+
+TEST(test_trade_refuses_egg) {
+    /* D8: the Flipper takes no Egg; the GBA may then pick another Pokemon */
+    Bench b;
+    uint8_t egg[GEN3_PARTY_SIZE];
+    tm_make_egg(egg);
+    ASSERT_EQ(refused_slot1(&b, egg), Gen3RefuseEgg);
+    fake_ruby_press_a(&b.ruby);
+    ASSERT_TRUE(run_until_browsing(&b, 5));
+    fake_ruby_offer(&b.ruby, 0);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuConfirming, 60));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    ASSERT_TRUE(trade_block_is(trade_block(b.f_blocks, b.n_f_blocks, 1), GEN3_TRADE_SET_MONS, 0));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.refused, Gen3RefuseNone);
+    ASSERT_EQ(st.gba_slot, 0);
+    ASSERT_EQ(st.menu, Gen3ClubMenuOffered);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_refuses_mail) {
+    /* D8: nor a Mail holder (the Flipper would have to keep its mail) */
+    Bench b;
+    uint8_t mail[GEN3_PARTY_SIZE];
+    tm_make_mail(mail);
+    ASSERT_EQ(refused_slot1(&b, mail), Gen3RefuseMail);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_refuses_bad_egg) {
+    /* A checksum mismatch: Ruby shows it as a Bad Egg */
+    Bench b;
+    uint8_t bad[GEN3_PARTY_SIZE];
+    tm_make_bad_egg(bad);
+    ASSERT_EQ(refused_slot1(&b, bad), Gen3RefuseBadEgg);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_only_pokemon_stays) {
+    /* §B3.2: TRADE on the GBA's last battle-able Pokemon sends nothing ("That's your only
+     * POKéMON for battle."); its party here is that one Pokemon */
+    Bench b;
+    uint8_t party[1][GEN3_PARTY_SIZE];
+    tm_make(1, 5, 11, party[0]);
+    bench_init_trade(&b);
+    bench_set_party(&b, party, 1);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 0);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuMessage, 5));
+    run(&b, 60);
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 0);
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 0);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+/* bench_init_trade with the offer withdrawn before round 1 (R8): the GBA's menu shows no
+ * Flipper Pokemon. Until Browsing. */
+static bool reach_menu_empty_offer(Bench* b) {
+    bench_init_trade(b);
+    if(!bench_to_room(b)) return false;
+    fake_ruby_sit(&b->ruby, 1);
+    if(!run_until_fake_phase(b, FakeRubyMenu, 400) || club_status(b).round != 0) return false;
+    if(!gen3_club_set_offer(&b->club, NULL, 0)) return false;
+    return run_until_browsing(b, 600) && fake_ruby_enemy_count(&b->ruby) == 0;
+}
+
+TEST(test_trade_no_dddd_to_empty_party) {
+    /* R8: the GBA shows no Flipper Pokemon, so a DDDD would point at a partner icon Ruby never
+     * made. Its AABB gets DDEE. */
+    Bench b;
+    ASSERT_TRUE(reach_menu_empty_offer(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuMessage, 60));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+    ASSERT_TRUE(
+        trade_block_is(trade_block(b.f_blocks, b.n_f_blocks, 0), GEN3_TRADE_PLAYER_CANCEL, 0));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.menu, Gen3ClubMenuIdle);
+    ASSERT_EQ(st.refused, Gen3RefuseNone); /* the GBA's Pokemon is fine; the Flipper has none */
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_dddd_to_empty_party_trips_fake) {
+    /* R8: a DDDD to an empty partner column, as soon as the GBA's AABB is complete */
+    Bench b;
+    ASSERT_TRUE(reach_menu_empty_offer(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    for(int i = 0; i < 60 && n_trade_blocks(b.g_blocks, b.n_g_blocks) == 0; i++) step(&b);
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 1);
+    ASSERT_TRUE(bench_inject_code(&b, GEN3_TRADE_SET_MONS, 0));
+    for(int i = 0; i < 20 && fake_ruby_error(&b.ruby) == NULL; i++) step(&b);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "empty party");
+}
+
+TEST(test_trade_ccdd_rule_trips_fake) {
+    /* §B3.4: Ruby starts the trade on any CCDD, with whatever its cursor holds */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(bench_inject_code(&b, GEN3_TRADE_START, 0));
+    for(int i = 0; i < 20 && fake_ruby_error(&b.ruby) == NULL; i++) step(&b);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "bad ccdd");
+}
+
+TEST(test_trade_unasked_dddd_trips_fake) {
+    /* §B3.4: DDDD only in reply to AABB */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(bench_inject_code(&b, GEN3_TRADE_SET_MONS, 0));
+    for(int i = 0; i < 20 && fake_ruby_error(&b.ruby) == NULL; i++) step(&b);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) != NULL);
+    ASSERT_STR_EQ(fake_ruby_error(&b.ruby), "unexpected dddd");
+}
+
 TEST(test_club_size) {
     ASSERT_TRUE(sizeof(Gen3Club) <= 2600);
 }
@@ -573,6 +868,17 @@ int main(void) {
     RUN(test_trade_bad_request_trips_fake);
     RUN(test_trade_seat_step_while_busy);
     RUN(test_trade_extra_request_trips_fake);
+    RUN(test_trade_offer_confirm_ccdd);
+    RUN(test_trade_gba_says_no);
+    RUN(test_trade_gba_cancels);
+    RUN(test_trade_refuses_egg);
+    RUN(test_trade_refuses_mail);
+    RUN(test_trade_refuses_bad_egg);
+    RUN(test_trade_only_pokemon_stays);
+    RUN(test_trade_no_dddd_to_empty_party);
+    RUN(test_trade_dddd_to_empty_party_trips_fake);
+    RUN(test_trade_ccdd_rule_trips_fake);
+    RUN(test_trade_unasked_dddd_trips_fake);
     RUN(test_club_size);
     TEST_EXIT();
 }

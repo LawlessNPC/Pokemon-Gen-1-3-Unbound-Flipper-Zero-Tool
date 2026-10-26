@@ -155,6 +155,10 @@ TEST(test_offer_check) {
     ASSERT_EQ(offer_with(Gen3FieldHeldItem, 348), Gen3RefuseNone);
     ASSERT_EQ(offer_with(Gen3FieldHeldItem, 120), Gen3RefuseNone);
     ASSERT_EQ(offer_with(Gen3FieldHeldItem, 133), Gen3RefuseNone);
+    /* O3: D8's ranges stand as written. Ruby holds any item below ITEMS_COUNT, a key item or an
+     * HM included; only the editor keeps to holdable ones. */
+    ASSERT_EQ(offer_with(Gen3FieldHeldItem, 265), Gen3RefuseNone); /* a key item */
+    ASSERT_EQ(offer_with(Gen3FieldHeldItem, 339), Gen3RefuseNone); /* HM01 */
     ASSERT_EQ(offer_with(Gen3FieldHeldItem, GEN3_ITEM_MAIL_FIRST), Gen3RefuseMail);
     ASSERT_EQ(offer_with(Gen3FieldHeldItem, GEN3_ITEM_MAIL_LAST), Gen3RefuseMail);
     ASSERT_EQ(offer_with(Gen3FieldMail, 0), Gen3RefuseMail);
@@ -194,9 +198,13 @@ TEST(test_check_incoming) {
     memset(game, 0, sizeof(game));
     ASSERT_EQ(gen3_trade_check_incoming(game, &scratch), Gen3RefuseEmpty);
 
+    /* A failed decrypt leaves scratch as the previous decrypt left it (the club's scratch relies
+     * on it) */
     golden_game(game);
+    ASSERT_EQ(gen3_trade_check_incoming(game, &scratch), Gen3RefuseNone);
     game[0x30] ^= 1;
     ASSERT_EQ(gen3_trade_check_incoming(game, &scratch), Gen3RefuseBadEgg);
+    ASSERT_MEM_EQ(scratch.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
 
     golden_game(game);
     game[0x55] = 0; /* party mail index, outside the checksum */

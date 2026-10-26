@@ -45,7 +45,7 @@ void gen3_trade_round_block(uint8_t round, const uint8_t* mon, uint8_t* out);
 
 typedef enum {
     Gen3RefuseNone,
-    Gen3RefuseEmpty, /* species 0 */
+    Gen3RefuseEmpty, /* species 0 (check_incoming only) */
     Gen3RefuseBadEgg, /* checksum mismatch or Bad Egg flag */
     Gen3RefuseEgg,
     Gen3RefuseMail, /* held item 121..132, or mail byte != 0xFF */

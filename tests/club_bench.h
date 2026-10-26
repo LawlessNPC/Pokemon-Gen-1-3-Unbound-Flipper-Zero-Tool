@@ -317,6 +317,14 @@ static inline void bench_raw_relink(Bench* b, const Gen3LinkPlayer* lp, uint32_t
     }
 }
 
+/* Queues a 20-byte (§B3.1) block {code, arg, 0...} on b->club.link (sender 0) as if the club
+ * sent it. False if the queue lacks room. */
+static inline bool bench_inject_code(Bench* b, uint16_t code, uint16_t arg) {
+    uint8_t block[GEN3_TRADE_BLOCK_SIZE];
+    gen3_trade_block_build(code, arg, block);
+    return gen3_block_send(&b->club.link, block, sizeof(block), 0);
+}
+
 /* The GBA player walks out of the room (§B7); the club must go through Closing to Waiting. */
 static inline bool leave_room(Bench* b) {
     fake_ruby_leave_room(&b->ruby);

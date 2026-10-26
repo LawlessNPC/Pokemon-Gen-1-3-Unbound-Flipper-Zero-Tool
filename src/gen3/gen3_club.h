@@ -11,8 +11,9 @@
 
 /* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
  * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down, the
- * relink for the trade menu and its party exchange (docs/gen3/link-protocol-trade.md §B1, §B2).
- * Pure C, no heap; gen3_club_frame runs in the link frame ISR. */
+ * relink for the trade menu, its party exchange and the trade menu with the Flipper as the
+ * arbiter (docs/gen3/link-protocol-trade.md §B1-B3). Pure C, no heap; gen3_club_frame runs in
+ * the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
 /* Idle bursts before a party-exchange CCCC (§B2.2). Round 1's follows both LinkPlayerBlocks: the
@@ -25,6 +26,8 @@
 #define GEN3_CLUB_ROUND1_DELAY_BURSTS 10
 #define GEN3_CLUB_ROUND_DELAY_BURSTS  6
 #define GEN3_CLUB_GBA_PARTY           6 /* the GBA's party slots */
+/* Idle bursts between the last chunk of the GBA's block and the reply (§B3.4: >= 5) */
+#define GEN3_CLUB_REPLY_DELAY_BURSTS  6
 
 /* The values are the phase numbers in the link log: append only. */
 typedef enum {
@@ -48,6 +51,14 @@ typedef enum {
     Gen3ClubErrorOtherRoom = 3,
     Gen3ClubErrorUnexpected = 4, /* a link type the club didn't expect at this point */
 } Gen3ClubError;
+
+/* The arbiter's side of the trade menu (§B3.3, D4), per link session. */
+typedef enum {
+    Gen3ClubMenuIdle, /* no GBA request pending */
+    Gen3ClubMenuOffered, /* DDDD sent: the GBA is confirming */
+    Gen3ClubMenuStarting, /* CCDD sent */
+    Gen3ClubMenuLeaving, /* EEBB sent */
+} Gen3ClubMenu;
 
 /* name must outlive the club (a string literal): the club keeps a copy of the config. */
 typedef struct {
@@ -74,6 +85,12 @@ typedef struct {
     bool flipper_seated; /* this room session: the Flipper sent CAFE 0016 */
     uint32_t trades_done; /* finalized trades since init; stays 0 until Task 6 */
     uint8_t round; /* Exchange/Menu: the round in progress or done, 1..5; 0 before round 1 */
+    Gen3ClubMenu menu; /* per link session: Idle until the trade menu */
+    uint8_t gba_slot; /* arg of the GBA's latest AABB that got DDDD: the GBA mon offered */
+    /* Reason the latest AABB got DDEE; None after a DDDD, or for a DDEE because the GBA was shown
+     * no Flipper Pokemon (R8) */
+    Gen3Refuse refused;
+    bool trade_pending; /* CCDD sent; until done or lost (Task 6) */
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -110,12 +127,21 @@ struct Gen3Club {
     uint8_t round1_delay; /* idle bursts before round 1's CCCC */
     uint8_t round_delay; /* before the CCCC of rounds 2..5 */
     uint8_t round_block[GEN3_TRADE_ROUND_MAX]; /* the Flipper's block of this round (R2) */
+    /* Trade menu, per session (§B3) */
+    Gen3ClubMenu menu;
+    bool reply_due; /* the GBA's block below awaits its one reply */
+    uint16_t gba_code, gba_arg; /* that block's words 0 and 1 */
+    uint8_t gba_slot;
+    Gen3Refuse refused;
+    Gen3Pkm scratch; /* the GBA mon of the latest AABB, decrypted (R2) */
     /* Trade context: survives relinks (D3) */
     uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
     bool has_offer;
     uint32_t trades_done;
     uint8_t party_mon[GEN3_PARTY_SIZE]; /* the Flipper mon the GBA was shown: offer at round 1 */
     uint8_t gba_party[GEN3_CLUB_GBA_PARTY][GEN3_PARTY_SIZE]; /* game form, rounds 1-3 */
+    bool trade_pending;
+    uint8_t pending_mon[GEN3_PARTY_SIZE]; /* the GBA mon the pending trade takes, game form */
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
