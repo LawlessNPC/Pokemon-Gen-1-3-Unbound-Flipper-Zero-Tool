@@ -533,7 +533,7 @@ One command per burst: `CAFE <code> 0 0 0 0 0 0` (`link.c: BuildSendCmd`
 | 0x11 | `EMPTY` | no input | none |
 | 0x12 / 0x13 / 0x14 / 0x15 | `DPAD_DOWN/UP/LEFT/RIGHT` | held direction | if state `IDLE`: turn/step (16-frame step, collision checked); 0x12 on the south exit facing south starts "end link?" prompt for the local player (`sub_8055660`) |
 | 0x16 | `READY` | sat down | state → `READY` (0x82), regardless of position |
-| 0x17 | `EXIT_ROOM` | leaving | state → `EXITING_ROOM` (0x83); every other idle player is forced to leave too |
+| 0x17 | `EXIT_ROOM` | leaving | state → `EXITING_ROOM` (0x83). While any player is `EXITING_ROOM`, every remote `IDLE` player is forced `BUSY` (0x81) and its key code that update is dropped (`sub_8054FF8` first block); the second `switch` applies 0x17 only on a later update, so a remote 0x17 is honoured one command after the first update that sees an `EXITING_ROOM` player |
 | 0x18 | `START_BUTTON` | start menu | busy |
 | 0x19 | `A_BUTTON` | interact | busy; talking to another avatar shows its trainer card |
 | 0x1A | `IDLE` | back to idle | state → `IDLE` (0x80) |
@@ -546,8 +546,10 @@ Player states (`em: overworld.c`): 0x80 `IDLE`, 0x81 `BUSY`, 0x82 `READY`,
 `sub_8054F70`). Movement and the 0x12 (exit prompt), 0x18, 0x19, 0x1B, 0x1C
 cases only apply in `IDLE` (`sub_8054FF8` first block); a remote player that
 went `BUSY` that way (or by stepping onto a coord event) stays `BUSY` until
-**that player** sends 0x1A. 0x16, 0x17 and 0x1A apply in any state; 0x1D only
-in `READY` (`sub_8054FF8` second `switch`). If the Flipper ever sends 0x18 or
+**that player** sends 0x1A. 0x16, 0x17 and 0x1A apply in any state, except for an
+`IDLE` slot while anyone is `EXITING_ROOM`: that slot is forced `BUSY` and its
+code dropped for that update (`overworld.c: sub_8054FF8`, pokeruby 5784633c,
+lines 1961-1970); 0x1D only in `READY` (second `switch`). If the Flipper ever sends 0x18 or
 0x19, it must follow with 0x1A.
 
 **Idle player standing still:** a real GBA sends `CAFE 0011` every frame
@@ -583,7 +585,7 @@ For G, a Flipper slot of all zeros is equivalent (`word_3002910[0] = 0`,
 |---|---|---|
 | `2FFE` (any time) | one `2FFE` | G waits forever (`sub_80084F4`) |
 | `5FFF` (any time) | one `5FFF`, then keep normal bursts until slot 1 reads 0xFFFF for a whole burst, then return to handshake mode (A3) | G waits forever in `sub_800837C` [`LinkCB_WaitCloseLink`] |
-| `CAFE 0017` | one `CAFE 0017` (Part B: leaving) | G frozen waiting for all 0x83 (`sub_80554BC`) |
+| `CAFE 0017` | one `CAFE 0017` (Part B: leaving), sent **after the GBA's next command**, not in the very next burst (`sub_8054FF8` drops the key of an `IDLE` slot while G is `EXITING_ROOM`) | G frozen waiting for all 0x83 (`sub_80554BC`) |
 | `CAFE 0016` | nothing for Part A (G shows "Please wait... B: Cancel" with no timeout); `CAFE 0016` starts the trade menu (Part B) | — |
 | other codes | nothing | — |
 
@@ -619,7 +621,8 @@ G would take the next stray transfer as a checksum slot and raise 0x2000. The
 6. ≥ 5 idle bursts, then `CCCC 0002`, then own trainer card (100 B).
 7. Zero bursts through G's walk-in; answer `2FFE` once.
 8. Idle in the room with zero bursts (or `CAFE 0011`); answer `2FFE`,
-   `5FFF`, `CAFE 0017` as in A7.
+   `5FFF`, `CAFE 0017` as in A7 (`CAFE 0017` only after the GBA's next
+   command; the first burst after it is dropped by `sub_8054FF8`).
 
 ---
 
@@ -706,7 +709,10 @@ sends `CCCC <type>`; both send blocks; both wait for 0b11.
   300-frame timeout, exchange, `sub_800826C` name/TID check, then `CAFE`.
 - Leaving the room: G walks onto (5,8)/(6,8) facing south → 0x12 →
   `TradeRoom_PromptToCancelLink` → YES → `sub_80839D0` [`ExitLinkRoom`] →
-  `CAFE 0017`. Flipper answers `CAFE 0017`. Then `gUnknown_081A4508`:
+  `CAFE 0017`. Flipper answers `CAFE 0017` after the GBA's next command, not
+  in the very next burst: while G is `EXITING_ROOM`, `sub_8054FF8` forces an
+  `IDLE` remote slot `BUSY` and drops its key that update (`overworld.c:
+  sub_8054FF8`, pokeruby 5784633c), else G waits forever. Then `gUnknown_081A4508`:
   `sub_80839A4` [`CleanupLinkRoomState`] and `sub_80810DC` → `sub_8081050`:
   stop `CAFE`, fade, `5FFF` exchange, `CloseLink`, warp to PC 2F. The PC map
   script for `VAR_CABLE_CLUB_STATE == 3` runs `special CloseLink`, resets the

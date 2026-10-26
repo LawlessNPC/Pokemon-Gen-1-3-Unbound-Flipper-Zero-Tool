@@ -16,6 +16,7 @@ The video below trades a Bulbasaur from the Flipper to a Game Boy Color with Pok
   - [Trade](#trade-pkmn)
     - [Modifying Traded Pokemon](#modifying-traded-pokemon)
     - [Reset Trade Connection State](#reset-trade-connection-state)
+- [Gen III (experimental): link test](#gen-iii-experimental-link-test)
 - [How it Works / Build your own Interface](#how-does-it-work)
 
 
@@ -389,6 +390,13 @@ Once a connection has been established between the Flipper and a Pokemon game, t
 #### Special Note on MALVEKE PCB Rev. <= 2.5
 Version 2.0 of the Pokemon Trade tool fixes a bug on MALVEKE boards that are Rev. 2.5 or lower where after a trade is completed the `OK` button no longer functions. However, while on the trade screen the `OK` button will continue to not function. For example, if you try to press the `OK` button to turn the backlight on, the Flipper will not respond. The `OK` button functionality will be restored once the Flipper leaves the Trade screen.
 
+
+## Gen III (experimental): link test
+The main menu has a `Gen III  (GBA non-JPN)` entry with a `Link Test`. The Flipper acts as the other player in Pokemon Ruby's Cable Club Trade Center (Pokemon Center 2F, right counter); no Pokemon is traded yet. The SD pin is shown on the Pinout screen.
+
+Plug one end of the GBA link cable into the Flipper's module. The test screen shows `Cable: plug in/swap ends` until the cable is correctly oriented, because a missing and a reversed cable look the same. If it does not change to `Cable: OK` with the cable plugged in, swap the two plugs. Note which plug works for you.
+
+A log is written to `apps_data/pokemon/gen3_link.log` on the SD card (overwritten each time the Link Test is opened). See the [hardware test checklist](docs/gen3/hardware-test-1.md).
 
 ## How Does it Work?
 

@@ -1,5 +1,10 @@
 # Changelog - Patch Notes
 
+## Unreleased
+**Gen III link test (experimental)**
+- Add `Gen III  (GBA non-JPN)` menu with a Link Test: the Flipper joins Pokemon Ruby's Cable Club Trade Center as a second player and logs the link to `apps_data/pokemon/gen3_link.log`
+- See `docs/gen3/hardware-test-1.md`
+
 ## Version 2.3
 - Fix potential bug in copying incoming trade data to the live working struct
 
