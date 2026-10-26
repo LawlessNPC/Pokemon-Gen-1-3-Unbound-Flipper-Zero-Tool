@@ -37,6 +37,13 @@ struct pokemon_fap {
 
     /* gblink interface */
     void *gblink_handle;
+
+    /* Gen III Link Test: its view, and its session (struct Gen3Session from
+     * src/gen3/gen3_session_furi.h). Both live from entering the Link Test until
+     * the Gen III menu is shown again, so they survive the "Stop link?" dialog.
+     */
+    void* gen3_link_test;
+    struct Gen3Session* gen3_session;
 };
 
 typedef struct pokemon_fap PokemonFap;
@@ -48,6 +55,7 @@ typedef enum {
     AppViewDialogEx,
     AppViewSelectPokemon,
     AppViewTrade,
+    AppViewGen3LinkTest,
 } AppView;
 
 #endif /* POKEMON_APP_H */
