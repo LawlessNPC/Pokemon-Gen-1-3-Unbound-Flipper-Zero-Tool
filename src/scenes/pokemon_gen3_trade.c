@@ -14,12 +14,17 @@
 #include <src/views/gen3_trade.h>
 
 /* The Gen III trade screen (Gen3Trade) and the app tick that runs a trade session behind every
- * Gen III scene (D1, D6). The session, the trade view and the sync are allocated together by
- * Gen III -> Trade, and freed together by the Gen III menu once no trade session runs. */
+ * Gen III scene (D1, D6). The session and the trade view are allocated together by Gen III ->
+ * Trade, and freed together by the Gen III menu once no trade session runs. The sync is allocated
+ * by the first Trade and kept until the app exits, so the block on a traded-away Pokemon (G15)
+ * outlives the session. */
 
 /* Ticks between two tries to reopen the bulk file for a NoData pickup retry (O2): 1 s. A corrupt
  * file costs a full CRC pass per try. */
 #define GEN3_TRADE_BULK_RETRY_TICKS 10
+/* Ticks between two tries to start the session while the cable reads OK but the start fails
+ * (TIM2 busy): 1 s */
+#define GEN3_TRADE_START_RETRY_TICKS 10
 
 /* R9: no app stack local over 128 bytes. These are the tick's buffers. */
 static uint8_t gen3_trade_received[GEN3_PARTY_SIZE];
@@ -29,9 +34,11 @@ static Gen3ClubStatus gen3_trade_guide_status;
 
 /* T10 review (b): a "Link lost ..." row is about the trade that just ended. Once the GBA has
  * linked again after it, the row is stale: the guide gets last_result None from then on, until
- * the next trade is pending or the session starts again. */
+ * the next trade is pending, the club's last_result changes, or the session starts again. */
 static bool gen3_trade_result_latched;
+static Gen3TradeResult gen3_trade_result_latched_value; /* the last_result latched */
 static uint8_t gen3_trade_bulk_wait;
+static uint8_t gen3_trade_start_wait;
 
 /* The current scene can change the editor's Pokemon: an editor scene, or Load. The sync holds the
  * offer meanwhile (D6), and the club's editing flag stays set (O1, G14). */
@@ -42,18 +49,23 @@ static bool gen3_trade_editing(PokemonFap* pokemon_fap) {
 
 /* A new club (a start) or none (a stop): the sync and the latch begin again (T10 review (d),
  * T11 review (g)). A restarted club has no offer and trades_done 0, which the sync's reset rule
- * alone doesn't make it publish again. */
+ * alone doesn't make it publish again. The block on a traded-away Pokemon stays (G15). */
 static void gen3_trade_reset(PokemonFap* pokemon_fap) {
-    gen3_trade_sync_init(pokemon_fap->gen3_trade_sync);
+    gen3_trade_sync_restart(pokemon_fap->gen3_trade_sync);
     gen3_trade_result_latched = false;
     gen3_trade_bulk_wait = 0;
+    gen3_trade_start_wait = 0;
 }
 
 static const Gen3ClubStatus* gen3_trade_latch_result(const Gen3ClubStatus* st) {
-    if(st->trade_pending) {
+    /* A new result is never hidden by an older one latched */
+    if(st->trade_pending || st->last_result != gen3_trade_result_latched_value) {
         gen3_trade_result_latched = false;
-    } else if(st->last_result != Gen3TradeResultNone && st->phase != Gen3ClubPhaseWaiting) {
+    }
+    if(!gen3_trade_result_latched && !st->trade_pending &&
+       st->last_result != Gen3TradeResultNone && st->phase != Gen3ClubPhaseWaiting) {
         gen3_trade_result_latched = true;
+        gen3_trade_result_latched_value = st->last_result;
     }
     gen3_trade_guide_status = *st;
     if(gen3_trade_result_latched) gen3_trade_guide_status.last_result = Gen3TradeResultNone;
@@ -67,15 +79,20 @@ void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap) {
 
     if(!pokemon_fap->gen3_trade_view || !sync || !ed || !s) return;
 
-    /* 1. Start, once the cable reads OK */
+    /* 1. Start, once the cable reads OK; after a failed start, at most once a second */
     bool trading = gen3_session_trading(s);
     bool cable_ok = true;
     if(!trading && !pokemon_fap->gen3_trade_ended) {
         cable_ok = gen3_session_check_cable(s) == MlinkCableOk;
-        if(cable_ok && gen3_session_start_trade(s, pokemon_fap->gen3_national_dex)) {
-            gen3_trade_reset(pokemon_fap);
-            trading = true;
+        if(cable_ok && gen3_trade_start_wait == 0) {
+            if(gen3_session_start_trade(s, pokemon_fap->gen3_national_dex)) {
+                gen3_trade_reset(pokemon_fap);
+                trading = true;
+            } else {
+                gen3_trade_start_wait = GEN3_TRADE_START_RETRY_TICKS;
+            }
         }
+        if(gen3_trade_start_wait > 0) gen3_trade_start_wait--;
     }
 
     /* 2. Read: cable_ok is the driver's live guard while the link runs */
@@ -108,8 +125,14 @@ void pokemon_gen3_trade_tick(PokemonFap* pokemon_fap) {
     }
 
     /* 4. End: the GBA has walked out and closed the link (D9). left is sticky and says nothing
-     * about a trade: it only ends the session. */
-    if(trading && st->left) {
+     * about a trade: it only ends the session, and only once the sync has every trade's Pokemon
+     * (T12 review). Save .pk3, Gen3Result and the dialogs hold the sync without the club's
+     * editing flag, so a trade can finish there; stopping now would free the club with its
+     * received Pokemon, which the GBA has saved as traded. That Pokemon is picked up on the first
+     * tick back on Gen3Trade or Gen3Menu, and the session stops then. Meanwhile the guide shows
+     * "Link ended". */
+    if(trading && st->left && received_count == sync->trades_seen &&
+       sync->pickup_fail != Gen3PickupNoData) {
         gen3_session_stop(s); /* the last status stays readable */
         gen3_trade_reset(pokemon_fap);
         pokemon_fap->gen3_trade_ended = true;

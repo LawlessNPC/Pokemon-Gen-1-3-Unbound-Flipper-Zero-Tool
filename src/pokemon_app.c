@@ -55,7 +55,9 @@ PokemonFap* pokemon_alloc() {
     view_dispatcher_set_custom_event_callback(view_dispatcher, pokemon_custom_event_callback);
     view_dispatcher_set_navigation_event_callback(view_dispatcher, pokemon_back_event_callback);
 
-    // Gen III trade, allocated by the Gen III menu; its tick
+    // Gen III link sessions and trade, allocated by the Gen III menu; the trade tick
+    pokemon_fap->gen3_session = NULL;
+    pokemon_fap->gen3_link_test = NULL;
     pokemon_fap->gen3_trade_view = NULL;
     pokemon_fap->gen3_trade_sync = NULL;
     pokemon_fap->gen3_national_dex = false;

@@ -60,11 +60,14 @@ struct pokemon_fap {
     /* Gen III .pk3 file name being saved, without the extension */
     char gen3_file_name[GEN3_PK3_NAME_MAX + 1];
 
-    /* Gen III trade: the trade screen's view and the sync between the editor and the link
-     * (struct Gen3TradeSync from src/gen3/gen3_trade_sync.h). Allocated with a trade session by
-     * Gen III -> Trade, which then lives behind every Gen III scene; freed with it.
+    /* Gen III trade screen's view: allocated with a trade session by Gen III -> Trade, which
+     * then lives behind every Gen III scene; freed with it.
      */
     void* gen3_trade_view;
+    /* The sync between the editor and the link (struct Gen3TradeSync from
+     * src/gen3/gen3_trade_sync.h): allocated by the first Gen III -> Trade, then kept until the
+     * app exits, so the block on a traded-away Pokemon outlives the session (G15).
+     */
     struct Gen3TradeSync* gen3_trade_sync;
     /* The next trade session unlocks the GBA's National Dex (per run, never saved) */
     bool gen3_national_dex;

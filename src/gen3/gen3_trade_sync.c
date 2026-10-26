@@ -23,6 +23,21 @@ void gen3_trade_sync_init(Gen3TradeSync* sync) {
     sync->pickup_fail = Gen3PickupOk;
 }
 
+void gen3_trade_sync_restart(Gen3TradeSync* sync) {
+    /* The block: a failed pickup, which always comes with gone_valid (only a successful pickup
+     * or the user's change clears either) */
+    const bool blocked = sync->pickup_fail != Gen3PickupOk && sync->gone_valid;
+    const uint32_t gone_pid = sync->gone_pid;
+    const uint32_t gone_ot_id = sync->gone_ot_id;
+    gen3_trade_sync_init(sync);
+    if(blocked) {
+        sync->pickup_fail = Gen3PickupBadData; /* a NoData retry's Pokemon went with the club */
+        sync->gone_valid = true;
+        sync->gone_pid = gone_pid;
+        sync->gone_ot_id = gone_ot_id;
+    }
+}
+
 /* Step 1 (F17, O2): take the latest trade's Pokemon into the editor, or retry a NoData pickup.
  * The club keeps the received bytes, and no new trade can happen while the offer is unpublished,
  * so a retry reads the same Pokemon. */

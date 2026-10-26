@@ -482,6 +482,142 @@ TEST(test_sync_pickup_retry) {
     ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), 0);
 }
 
+/* G15 across sessions (T12 review): a restart (the session stopped, or started a new club) keeps
+ * the block on the traded-away Pokemon. Everything else begins again: no trade seen, no offer
+ * taken, no trainer known. */
+TEST(test_sync_restart_keeps_block) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    const uint8_t zeros[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_trade_sync_init(&sync);
+    status_ruby(&st);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncTrainer | Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&sync);
+    const Gen3Pkm traded = ed.pkm;
+
+    golden_game(rx);
+    rx[0x30] ^= 1;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    gen3_trade_sync_offer_taken(&sync);
+
+    gen3_trade_sync_restart(&sync);
+    ASSERT_EQ(sync.trades_seen, 0);
+    ASSERT_TRUE(!sync.trainer_known);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_MEM_EQ(sync.offer, zeros, GEN3_PARTY_SIZE);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+    ASSERT_TRUE(!sync.taken);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(sync.gone_valid);
+    ASSERT_EQ(sync.gone_pid, gen3_pkm_get(&traded, Gen3FieldPid));
+    ASSERT_EQ(sync.gone_ot_id, gen3_pkm_get(&traded, Gen3FieldOtId));
+
+    /* The new club: nothing received, the same player. "No offer" is published, once. */
+    memset(rx, 0, sizeof(rx));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncTrainer | Gen3SyncOffer);
+    ASSERT_MEM_EQ(ed.pkm.raw, traded.raw, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_MEM_EQ(sync.offer, zeros, GEN3_PARTY_SIZE);
+    gen3_trade_sync_offer_taken(&sync);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+
+    /* The same Pokemon edited: still not offered */
+    gen3_edit_set_level(&ed, 30);
+    ASSERT_EQ(G(Pid), gen3_pkm_get(&traded, Gen3FieldPid));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_TRUE(!sync.offer_valid);
+
+    /* Two restarts in a row change nothing more */
+    gen3_trade_sync_restart(&sync);
+    gen3_trade_sync_restart(&sync);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(sync.gone_valid);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncTrainer | Gen3SyncOffer);
+    ASSERT_TRUE(!sync.offer_valid);
+}
+
+/* After a restart the user's own change still frees the editor; a NoData retry pending at the
+ * restart becomes BadData (its Pokemon went with the old club), with the block kept */
+TEST(test_sync_restart_edit_clears_block) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_trade_sync_init(&sync);
+    status_reset(&st, Gen3ClubPhaseSave);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&sync);
+    const Gen3Pkm traded = ed.pkm;
+
+    moveless_golden_game(rx);
+    bulk_file_failing = true;
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupNoData);
+    gen3_trade_sync_offer_taken(&sync);
+    ASSERT_TRUE(bulk_file_open());
+
+    gen3_trade_sync_restart(&sync);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(sync.gone_valid);
+    ASSERT_EQ(sync.trades_seen, 0);
+
+    /* The new club: no retry, the traded-away Pokemon stays unpublished */
+    memset(rx, 0, sizeof(rx));
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_MEM_EQ(ed.pkm.raw, traded.raw, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(!sync.offer_valid);
+    gen3_trade_sync_offer_taken(&sync);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+
+    /* Another OT ID: offered, and the block is gone for good */
+    ASSERT_EQ(gen3_edit_set_ot_id(&ed, 1, 2), Gen3OtIdOk);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
+    ASSERT_TRUE(!sync.gone_valid);
+    gen3_trade_sync_restart(&sync);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupOk);
+    ASSERT_TRUE(!sync.gone_valid);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+}
+
+/* Without a block, a restart is exactly an init: the same bytes, and the same polls after it */
+TEST(test_sync_restart_like_init) {
+    Gen3Editor ed;
+    Gen3TradeSync used, fresh;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_trade_sync_init(&used);
+    status_ruby(&st);
+    ASSERT_EQ(poll(&used, &ed, &st, rx, 0), Gen3SyncTrainer | Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&used);
+    golden_game(rx);
+    ASSERT_EQ(poll(&used, &ed, &st, rx, 1), Gen3SyncPickedUp | Gen3SyncOffer);
+    gen3_trade_sync_offer_taken(&used);
+    ASSERT_EQ(used.trades_seen, 1);
+    ASSERT_TRUE(used.trainer_known && used.taken && used.offer_valid);
+
+    memset(&fresh, 0xA5, sizeof(fresh));
+    gen3_trade_sync_init(&fresh);
+    gen3_trade_sync_restart(&used);
+    ASSERT_MEM_EQ(&used, &fresh, sizeof(fresh));
+
+    memset(rx, 0, sizeof(rx));
+    const unsigned r = poll(&fresh, &ed, &st, rx, 0);
+    ASSERT_EQ(r, Gen3SyncTrainer | Gen3SyncOffer);
+    ASSERT_EQ(poll(&used, &ed, &st, rx, 0), r);
+    ASSERT_MEM_EQ(&used, &fresh, sizeof(fresh));
+    ASSERT_TRUE(offer_is_editor(&used, &ed));
+}
+
 /* D6: while editing, nothing moves either way; afterwards all of it, in order */
 TEST(test_sync_holds_while_editing) {
     Gen3Editor ed;
@@ -962,6 +1098,9 @@ int main(void) {
     RUN_BULK(test_sync_block_follows_trainer);
     RUN_BULK(test_sync_club_reset);
     RUN_BULK(test_sync_pickup_retry);
+    RUN_BULK(test_sync_restart_keeps_block);
+    RUN_BULK(test_sync_restart_edit_clears_block);
+    RUN_BULK(test_sync_restart_like_init);
     RUN_BULK(test_sync_holds_while_editing);
     RUN_BULK(test_sync_bad_offer_unpublished);
     RUN_BULK(test_enigma_fixture);

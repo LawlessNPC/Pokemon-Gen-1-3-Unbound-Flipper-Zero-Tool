@@ -45,6 +45,13 @@ typedef struct Gen3TradeSync {
 
 void gen3_trade_sync_init(Gen3TradeSync* sync);
 
+/* Every session stop or start (T12 review, G15 across sessions): as gen3_trade_sync_init, for a
+ * fresh club (trades_seen 0, no offer taken, no trainer known), but the block on the traded-away
+ * Pokemon stays: gone_valid, gone_pid, gone_ot_id and a BadData pickup_fail. A NoData retry still
+ * waiting becomes BadData: its Pokemon went with the old club. Without a block, the same bytes as
+ * gen3_trade_sync_init. */
+void gen3_trade_sync_restart(Gen3TradeSync* sync);
+
 /* gen3_trade_sync_poll's result bits */
 enum {
     Gen3SyncPickedUp = 1u << 0, /* the received Pokemon is now the editor's */

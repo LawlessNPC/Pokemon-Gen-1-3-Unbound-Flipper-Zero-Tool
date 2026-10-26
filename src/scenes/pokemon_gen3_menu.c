@@ -42,9 +42,10 @@ static void gen3_menu_item_callback(void* context, uint32_t index) {
 /* The Link Test session and its view outlive the Link Test scene while the "Stop link?" dialog
  * is up, so that "Stay" returns to the running link. Every way out of the Link Test for good
  * (Back while not in the Cable Club, or "Stop") comes back to this menu, so it ends here. A trade
- * session, its trade screen and its sync live on behind every Gen III scene while it runs (D1),
- * and end here too once it doesn't: not started yet, or stopped after the GBA left. Call with
- * neither view shown. */
+ * session and its trade screen live on behind every Gen III scene while it runs (D1), and end
+ * here too once it doesn't: not started yet, or stopped after the GBA left. The sync stays until
+ * the app exits, restarted (it keeps the block on a traded-away Pokemon, G15). Call with neither
+ * view shown. */
 static void gen3_menu_end_session(PokemonFap* pokemon_fap) {
     if(pokemon_fap->gen3_session) {
         gen3_session_free(pokemon_fap->gen3_session); /* stops the link, closes the log */
@@ -60,8 +61,7 @@ static void gen3_menu_end_session(PokemonFap* pokemon_fap) {
             pokemon_fap->view_dispatcher, AppViewGen3Trade, pokemon_fap->gen3_trade_view);
         pokemon_fap->gen3_trade_view = NULL;
     }
-    free(pokemon_fap->gen3_trade_sync);
-    pokemon_fap->gen3_trade_sync = NULL;
+    if(pokemon_fap->gen3_trade_sync) gen3_trade_sync_restart(pokemon_fap->gen3_trade_sync);
 }
 
 /* The trade screen's OK (Edit). App thread (view input): Gen3Trade handles the event. */
@@ -71,18 +71,21 @@ static void gen3_menu_trade_edit_callback(void* context) {
     view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_TRADE_EVENT_EDIT);
 }
 
-/* A new trade session with its trade screen and sync. The tick starts it once the cable reads
- * OK. A session left from before (one that stopped while this menu was shown) goes first. */
+/* A new trade session with its trade screen, and the sync the first time. The tick starts it
+ * once the cable reads OK. A session left from before (one that stopped while this menu was
+ * shown) goes first. */
 static void gen3_menu_trade_alloc(PokemonFap* pokemon_fap) {
-    gen3_menu_end_session(pokemon_fap);
+    gen3_menu_end_session(pokemon_fap); /* restarts a sync kept from an earlier session */
 
     pokemon_fap->gen3_session = gen3_session_alloc(pokemon_fap->gblink_handle);
     pokemon_fap->gen3_trade_view =
         gen3_trade_view_alloc(pokemon_fap->view_dispatcher, AppViewGen3Trade);
     gen3_trade_view_set_edit_callback(
         pokemon_fap->gen3_trade_view, gen3_menu_trade_edit_callback, pokemon_fap);
-    pokemon_fap->gen3_trade_sync = malloc(sizeof(Gen3TradeSync));
-    gen3_trade_sync_init(pokemon_fap->gen3_trade_sync);
+    if(!pokemon_fap->gen3_trade_sync) {
+        pokemon_fap->gen3_trade_sync = malloc(sizeof(Gen3TradeSync));
+        gen3_trade_sync_init(pokemon_fap->gen3_trade_sync);
+    }
     pokemon_fap->gen3_trade_ended = false;
 }
 
