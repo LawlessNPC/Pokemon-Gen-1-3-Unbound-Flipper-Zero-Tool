@@ -51,6 +51,34 @@ TEST(test_decode_no_eos_truncates) {
     ASSERT_STR_EQ(out, "AB");
 }
 
+TEST(test_encode_gender_symbols) {
+    uint8_t b[10];
+    ASSERT_EQ(gen3_text_encode("NIDORAN\200", b, 10, 10), 8);
+    const uint8_t e[10] = {0xC8, 0xC3, 0xBE, 0xC9, 0xCC, 0xBB, 0xC8, 0xB6, 0xFF, 0xFF};
+    ASSERT_MEM_EQ(b, e, 10);
+
+    uint8_t m[2];
+    ASSERT_EQ(gen3_text_encode("\201", m, 2, 1), 1);
+    const uint8_t em[2] = {0xB5, 0xFF};
+    ASSERT_MEM_EQ(m, em, 2);
+
+    uint8_t both[3];
+    ASSERT_EQ(gen3_text_encode("\200\201", both, 3, 2), 2);
+    const uint8_t eb[3] = {0xB6, 0xB5, 0xFF};
+    ASSERT_MEM_EQ(both, eb, 3);
+}
+
+TEST(test_decode_gender_symbols) {
+    const uint8_t in[3] = {0xB5, 0xB6, 0xFF};
+    char out[8];
+    ASSERT_EQ(gen3_text_decode(in, 3, out, sizeof(out)), 2);
+    ASSERT_STR_EQ(out, "\201\200");
+
+    const uint8_t in2[3] = {0xB6, 0xB5, 0xFF};
+    ASSERT_EQ(gen3_text_decode(in2, 3, out, sizeof(out)), 2);
+    ASSERT_STR_EQ(out, "\200\201");
+}
+
 int main(void) {
     RUN(test_encode_name);
     RUN(test_encode_truncates);
@@ -59,5 +87,7 @@ int main(void) {
     RUN(test_decode_stops_at_eos);
     RUN(test_decode_unknown);
     RUN(test_decode_no_eos_truncates);
+    RUN(test_encode_gender_symbols);
+    RUN(test_decode_gender_symbols);
     TEST_EXIT();
 }

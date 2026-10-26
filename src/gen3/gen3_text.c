@@ -6,6 +6,9 @@
 
 static uint8_t gen3_char_encode(char c) {
     if(c == ' ') return 0x00;
+    /* char is signed on the host and unsigned on ARM; compare against the literals. */
+    if(c == '\200') return 0xB6; /* female symbol */
+    if(c == '\201') return 0xB5; /* male symbol */
     if(c >= '0' && c <= '9') return 0xA1 + (c - '0');
     if(c >= 'A' && c <= 'Z') return 0xBB + (c - 'A');
     if(c >= 'a' && c <= 'z') return 0xD5 + (c - 'a');
@@ -35,6 +38,8 @@ static uint8_t gen3_char_encode(char c) {
 
 static char gen3_char_decode(uint8_t b) {
     if(b == 0x00) return ' ';
+    if(b == 0xB6) return '\200';
+    if(b == 0xB5) return '\201';
     if(b >= 0xA1 && b <= 0xAA) return (char)('0' + (b - 0xA1));
     if(b >= 0xBB && b <= 0xD4) return (char)('A' + (b - 0xBB));
     if(b >= 0xD5 && b <= 0xEE) return (char)('a' + (b - 0xD5));
