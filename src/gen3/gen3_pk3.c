@@ -25,6 +25,8 @@ const char* gen3_check_text(Gen3Check c) {
         return "Unknown item";
     case Gen3CheckFileError:
         return "Can't read file";
+    case Gen3CheckNoData:
+        return "Gen III data unreadable";
     }
     return "?";
 }
@@ -66,7 +68,9 @@ Gen3Check gen3_pk3_import(const uint8_t* data, size_t len, Gen3Pkm* out, Gen3Imp
     gen3_pkm_set(&p, Gen3FieldHasSpecies, 1);
 
     Gen3NormaliseInfo ni;
-    if(!gen3_normalise(&p, &ni)) return Gen3CheckBadSpecies;
+    /* gen3_pkm_check has accepted the species, so the only failure left is a moveless Pokemon
+     * whose default moveset can't be read */
+    if(!gen3_normalise(&p, &ni)) return Gen3CheckNoData;
     /* A box Pokemon has no stored HP: start full. */
     if(len == GEN3_BOX_SIZE) gen3_pkm_set(&p, Gen3FieldHp, gen3_pkm_get(&p, Gen3FieldMaxHp));
 

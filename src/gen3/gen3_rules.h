@@ -1,6 +1,7 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include "gen3_pkm.h"
 
@@ -71,5 +72,7 @@ bool gen3_pid_find(
 
 /* GiveBoxMonInitialMoveset: walk the learnset entries with level <= `level` in order; skip a
  * move already in moves[]; else put it in the first empty slot; when all 4 are full, shift
- * slots 1..3 down and put it in slot 3. */
-void gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]);
+ * slots 1..3 down and put it in slot 3. Returns the number of moves filled (packed from slot 0;
+ * the rest are 0). 0 (all 0) for an unknown species or if the learnset can't be read from the
+ * bulk file. */
+size_t gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]);

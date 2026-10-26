@@ -203,10 +203,11 @@ bool gen3_pid_find(
     return false;
 }
 
-void gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]) {
+size_t gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]) {
     for(int i = 0; i < 4; i++) moves[i] = 0;
     uint16_t entries[GEN3_LEARNSET_MAX];
     size_t n = gen3_learnset_get(national, entries, GEN3_LEARNSET_MAX);
+    size_t filled = 0;
     for(size_t i = 0; i < n; i++) {
         if((entries[i] >> 9) > level) break;
         uint16_t mv = entries[i] & 0x1FF;
@@ -220,7 +221,10 @@ void gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]) {
         if(slot < 0) {
             for(int s = 0; s < 3; s++) moves[s] = moves[s + 1];
             slot = 3;
+        } else {
+            filled++;
         }
         moves[slot] = mv;
     }
+    return filled;
 }

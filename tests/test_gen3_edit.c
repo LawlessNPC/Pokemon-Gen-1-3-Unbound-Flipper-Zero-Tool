@@ -580,10 +580,12 @@ TEST(test_edit_traits_same_keeps_pid) {
     ASSERT_EQ(G(AbilityBit), G(Pid) & 1);
     ASSERT_TRUE(edit_consistent(&ed));
 
-    /* An unknown species (copied raw by gen3_edit_load) is still refused, untouched */
+    /* An unknown species is still refused, untouched. gen3_edit_load refuses it, so it is put in
+     * the editor directly. */
     in = ed.pkm;
     gen3_pkm_set(&in, Gen3FieldSpecies, 260); /* a "?" placeholder */
-    gen3_edit_load(&ed, &in);
+    ASSERT_TRUE(!gen3_edit_load(&ed, &in));
+    ed.pkm = in;
     before = ed.pkm;
     gen3_traits_of(&ed.pkm, &want);
     ASSERT_TRUE(!gen3_edit_set_traits(&ed, &want));
@@ -939,6 +941,93 @@ TEST(test_edit_load_no_moves) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
+/* No bulk data: mode 0, every read fails after a good open (an SD error); mode 1, no source. */
+static void no_data(int mode) {
+    if(mode == 0)
+        bulk_file_failing = true;
+    else
+        gen3_bulk_close();
+}
+
+/* Each edit that needs the bulk file refuses, and the Pokemon stays as it was, game-valid. */
+TEST(test_edit_no_data_keeps_pokemon) {
+    for(int mode = 0; mode < 2; mode++) {
+        Gen3Editor ed;
+        ASSERT_TRUE(bulk_file_open());
+        ASSERT_TRUE(gen3_edit_init(&ed, 7));
+        ASSERT_TRUE(gen3_edit_set_move(&ed, 0, 85)); /* not a default move */
+        ASSERT_TRUE(gen3_edit_set_nickname(&ed, "LEAFY"));
+        Gen3Pkm before = ed.pkm;
+        no_data(mode);
+
+        ASSERT_TRUE(!gen3_edit_set_species(&ed, 252));
+        ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+        ASSERT_TRUE(edit_consistent(&ed));
+        ASSERT_TRUE(gen3_edit_set_species(&ed, 1)); /* already Bulbasaur: nothing to read */
+        ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+
+        ASSERT_TRUE(!gen3_edit_default_moves(&ed));
+        ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+        ASSERT_TRUE(edit_consistent(&ed));
+
+        ASSERT_TRUE(!gen3_edit_set_nickname(&ed, ""));
+        ASSERT_TRUE(!gen3_edit_set_nickname(&ed, NULL));
+        ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+        ASSERT_TRUE(edit_consistent(&ed));
+
+        /* An edit that needs no bulk data still works */
+        ASSERT_TRUE(gen3_edit_set_nickname(&ed, "BOB"));
+        ASSERT_TRUE(edit_consistent(&ed));
+
+        Gen3Editor fresh;
+        ASSERT_TRUE(!gen3_edit_init(&fresh, 7));
+    }
+    ASSERT_TRUE(bulk_file_open());
+}
+
+/* A moveless Pokemon needs the default moveset: without the bulk data, normalise and load refuse
+ * it and change nothing. */
+TEST(test_edit_no_data_load) {
+    Gen3Pkm moveless;
+    golden_pkm(&moveless);
+    for(int s = 0; s < 4; s++) {
+        gen3_pkm_set(&moveless, Gen3FieldMove1 + s, 0);
+        gen3_pkm_set(&moveless, Gen3FieldPp1 + s, 0);
+    }
+    gen3_pkm_fix_checksum(&moveless);
+    for(int mode = 0; mode < 2; mode++) {
+        Gen3Editor ed;
+        Gen3NormaliseInfo ni;
+        ASSERT_TRUE(bulk_file_open());
+        ASSERT_TRUE(gen3_edit_init(&ed, 7));
+        Gen3Pkm before = ed.pkm;
+        no_data(mode);
+
+        Gen3Pkm p = moveless;
+        memset(&ni, 0xFF, sizeof(ni));
+        ASSERT_TRUE(!gen3_normalise(&p, &ni));
+        ASSERT_MEM_EQ(p.raw, moveless.raw, GEN3_PARTY_SIZE);
+        ASSERT_TRUE(info_is(&ni, false, false, false, false, false));
+
+        ASSERT_TRUE(!gen3_edit_load(&ed, &moveless));
+        ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+        ASSERT_TRUE(edit_consistent(&ed));
+
+        /* An unknown species is refused the same way */
+        p = moveless;
+        set_moves(&p, 1, 43, 0, 0);
+        gen3_pkm_set(&p, Gen3FieldSpecies, 260);
+        ASSERT_TRUE(!gen3_edit_load(&ed, &p));
+        ASSERT_MEM_EQ(ed.pkm.raw, before.raw, GEN3_PARTY_SIZE);
+
+        /* A Pokemon with a move needs no bulk data */
+        golden_pkm(&p);
+        ASSERT_TRUE(gen3_edit_load(&ed, &p));
+        ASSERT_MEM_EQ(ed.pkm.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    }
+    ASSERT_TRUE(bulk_file_open());
+}
+
 int main(void) {
     if(!bulk_file_open()) return 1;
     RUN(test_edit_init_defaults);
@@ -973,5 +1062,7 @@ int main(void) {
     RUN(test_edit_load_no_moves);
     RUN(test_edit_two_ability_bit_kept);
     RUN(test_normalise_flags);
+    RUN(test_edit_no_data_keeps_pokemon);
+    RUN(test_edit_no_data_load);
     TEST_EXIT();
 }

@@ -8,11 +8,14 @@
 
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_text.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* Nickname and OT name. The scene it is entered as is the scene state of Gen3Nickname. */
 
 static char gen3_nickname_buf[GEN3_NICKNAME_LEN + 1];
 static char gen3_ot_name_buf[GEN3_OT_NAME_LEN + 1];
+/* The empty nickname's species name couldn't be read from the bulk file: nothing was changed */
+static bool gen3_text_no_data = false;
 
 static bool gen3_text_validator(const char* text, FuriString* error, void* context) {
     PokemonFap* pokemon_fap = (PokemonFap*)context;
@@ -31,8 +34,9 @@ static bool gen3_text_validator(const char* text, FuriString* error, void* conte
         return false;
     }
 
+    gen3_text_no_data = false;
     if(nickname)
-        gen3_edit_set_nickname(pokemon_fap->gen3_editor, text);
+        gen3_text_no_data = !gen3_edit_set_nickname(pokemon_fap->gen3_editor, text);
     else
         gen3_edit_set_ot_name(pokemon_fap->gen3_editor, text);
 
@@ -81,7 +85,10 @@ bool pokemon_scene_gen3_text_on_event(void* context, SceneManagerEvent event) {
     bool consumed = false;
 
     if(event.type == SceneManagerEventTypeCustom && event.event == (uint32_t)PokemonSceneBack) {
-        scene_manager_previous_scene(pokemon_fap->scene_manager);
+        if(gen3_text_no_data)
+            gen3_menu_show_data_missing(pokemon_fap);
+        else
+            scene_manager_previous_scene(pokemon_fap->scene_manager);
         consumed = true;
     }
 

@@ -18,10 +18,12 @@ typedef enum {
     Gen3CheckBadMove,
     Gen3CheckBadItem,
     Gen3CheckFileError,
+    Gen3CheckNoData, /* the Pokemon needs the bulk data file (gen3_data.h), which can't be read */
 } Gen3Check;
 
 /* "OK", "Not a .pk3 (size)", "Checksum mismatch", "Bad Egg", "Eggs not supported",
- * "Unknown species", "Unknown move", "Unknown item", "Can't read file" */
+ * "Unknown species", "Unknown move", "Unknown item", "Can't read file",
+ * "Gen III data unreadable" */
 const char* gen3_check_text(Gen3Check c);
 
 /* In order: BadEgg flag; IsEgg or EggFlag; species maps to no national; any move >= 355;
@@ -38,6 +40,7 @@ typedef struct {
  * is not refused) and gen3_normalise runs. len 80: party fields derived (Status 0, Mail 0xFF,
  * Hp = MaxHp, stats from gen3_recalc_party). len 100: the party bytes the editor doesn't model are
  * kept, stats are recomputed. On Ok, HasSpecies is set to 1. *out is unchanged unless Ok.
+ * NoData: the Pokemon has no move and the default moveset can't be read from the bulk file.
  * info may be NULL; it is always reset. */
 Gen3Check gen3_pk3_import(const uint8_t* data, size_t len, Gen3Pkm* out, Gen3ImportInfo* info);
 

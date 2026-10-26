@@ -1,4 +1,5 @@
 #include "test.h"
+#include "bulk_file.h"
 #include "gen3_golden.h"
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_pk3.h>
@@ -210,14 +211,53 @@ TEST(test_pk3_name_valid) {
 }
 
 TEST(test_check_text) {
-    for(int c = Gen3CheckOk; c <= Gen3CheckFileError; c++) {
+    for(int c = Gen3CheckOk; c <= Gen3CheckNoData; c++) {
         ASSERT_TRUE(gen3_check_text((Gen3Check)c)[0] != 0);
     }
     ASSERT_STR_EQ(gen3_check_text(Gen3CheckEgg), "Eggs not supported");
     ASSERT_STR_EQ(gen3_check_text(Gen3CheckOk), "OK");
+    ASSERT_STR_EQ(gen3_check_text(Gen3CheckNoData), "Gen III data unreadable");
+}
+
+/* A moveless Pokemon needs the default moveset from the bulk file. Without it (mode 0: reads fail
+ * after a good open; mode 1: no source) the file is refused and *out is untouched. */
+TEST(test_import_no_data) {
+    Gen3Pkm in, out;
+    Gen3ImportInfo info;
+    for(int mode = 0; mode < 2; mode++) {
+        ASSERT_TRUE(bulk_file_open());
+        if(mode == 0)
+            bulk_file_failing = true;
+        else
+            gen3_bulk_close();
+        for(size_t len = GEN3_BOX_SIZE; len <= GEN3_PARTY_SIZE; len += 20) {
+            golden(&in);
+            for(int s = 0; s < 4; s++) {
+                gen3_pkm_set(&in, Gen3FieldMove1 + s, 0);
+                gen3_pkm_set(&in, Gen3FieldPp1 + s, 0);
+            }
+            memset(&out, 0x5A, sizeof(out));
+            memset(&info, 0xFF, sizeof(info));
+            ASSERT_EQ(import_pkm(&in, len, &out, &info), Gen3CheckNoData);
+            for(size_t i = 0; i < sizeof(out.raw); i++) ASSERT_EQ(out.raw[i], 0x5A);
+            ASSERT_TRUE(!info.mail_removed && !info.normalise.moves_defaulted);
+        }
+        /* With a move, no bulk data is needed */
+        golden(&in);
+        ASSERT_EQ(import_pkm(&in, GEN3_BOX_SIZE, &out, &info), Gen3CheckOk);
+        ASSERT_MEM_EQ(out.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
+    }
+    /* With the data, the moveless Pokemon gets Treecko L5's default moveset */
+    ASSERT_TRUE(bulk_file_open());
+    golden(&in);
+    for(int s = 0; s < 4; s++) gen3_pkm_set(&in, Gen3FieldMove1 + s, 0);
+    ASSERT_EQ(import_pkm(&in, GEN3_BOX_SIZE, &out, &info), Gen3CheckOk);
+    ASSERT_TRUE(info.normalise.moves_defaulted);
+    ASSERT_MEM_EQ(out.raw, GOLDEN_PK3, GEN3_PARTY_SIZE);
 }
 
 int main(void) {
+    if(!bulk_file_open()) return 1;
     RUN(test_import_80_golden);
     RUN(test_import_100_keeps_bytes);
     RUN(test_export_roundtrip_every_byte);
@@ -232,5 +272,6 @@ int main(void) {
     RUN(test_pk3_default_name);
     RUN(test_pk3_name_valid);
     RUN(test_check_text);
+    RUN(test_import_no_data);
     TEST_EXIT();
 }

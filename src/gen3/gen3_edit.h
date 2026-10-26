@@ -8,7 +8,10 @@
 /* Editor model. Every mutator leaves the Pokemon game-valid: the ability bit is 0 for a
  * one-ability species (a two-ability species keeps its stored slot; a new PID sets it to the
  * slot it was found for, pid & 1), the party stats match exp, IVs, EVs and nature
- * (gen3_recalc_party, so Hp = MaxHp), and the checksum is fixed. */
+ * (gen3_recalc_party, so Hp = MaxHp), and the checksum is fixed.
+ *
+ * Species names and default movesets come from the bulk file (gen3_data.h). A mutator that needs
+ * one and can't read it fails closed: it returns false and the Pokemon is unchanged. */
 
 #define GEN3_EDIT_DEFAULT_NATIONAL 1
 #define GEN3_EDIT_DEFAULT_LEVEL    5
@@ -51,24 +54,29 @@ typedef struct {
  * and imports: moves packed with duplicates dropped, exp clamped to the level 1..100 range, the
  * default moveset if no move is left, ability bit 0 on a one-ability species, party stats
  * recalculated with the current HP kept but clamped to MaxHp, checksum fixed. Every other byte
- * is kept. info (may be NULL) is always reset, then filled. false, with *pkm untouched, if the
- * species maps to no national. */
+ * is kept. info (may be NULL) is always reset, then filled. false, with *pkm untouched and info
+ * reset, if the species maps to no national, or if no move is left and the default moveset
+ * can't be read from the bulk file. */
 bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info);
 
-/* Bulbasaur L5, default OT, preset RandIvZeroEv. */
-void gen3_edit_init(Gen3Editor* ed, uint32_t seed);
-/* Takes pkm and runs gen3_normalise on it; preset_applied = false. */
-void gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm);
+/* Bulbasaur L5, default OT, preset RandIvZeroEv. false if the bulk file can't be read; *ed is
+ * then not a usable editor. */
+bool gen3_edit_init(Gen3Editor* ed, uint32_t seed);
+/* Takes pkm and runs gen3_normalise on it; preset_applied = false. false, with the editor
+ * unchanged, if gen3_normalise fails. */
+bool gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm);
 uint16_t gen3_edit_national(const Gen3Editor* ed);
 /* D5: a fresh Pokemon of that species, keeping OT name, TID, SID, OT gender, level and preset.
- * No-op if invalid or unchanged. */
-void gen3_edit_set_species(Gen3Editor* ed, uint16_t national);
+ * true and no change if it is the current species. false (unchanged) for an invalid species or
+ * if its name or default moveset can't be read from the bulk file. */
+bool gen3_edit_set_species(Gen3Editor* ed, uint16_t national);
 /* Clamped 1..100; exp = exp_for_level. */
 void gen3_edit_set_level(Gen3Editor* ed, uint8_t level);
 /* Applies IVs (re-rolls random ones) and EVs. No-op for a value >= GEN3_PRESET_COUNT. */
 void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset);
-/* "" -> species name (game encoding). */
-void gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii);
+/* "" or NULL -> species name (game encoding). false (unchanged) if that name can't be read from
+ * the bulk file. */
+bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii);
 void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii);
 /* Keeps shininess (D6) by finding a new PID when needed, and the stored ability slot. */
 void gen3_edit_set_ot_id(Gen3Editor* ed, uint16_t tid, uint16_t sid);
@@ -78,8 +86,9 @@ void gen3_edit_set_item(Gen3Editor* ed, uint16_t item);
  * toward slot 0, carrying their PP and PP Ups. false (unchanged): slot >= 4, move >= 355, a
  * duplicate, or removing the last move. */
 bool gen3_edit_set_move(Gen3Editor* ed, uint8_t slot, uint16_t move);
-/* gen3_default_moves for the species and level, each with full base PP; PP Ups 0. */
-void gen3_edit_default_moves(Gen3Editor* ed);
+/* gen3_default_moves for the species and level, each with full base PP; PP Ups 0. false (the
+ * current moves kept) if the moveset can't be read from the bulk file. */
+bool gen3_edit_default_moves(Gen3Editor* ed);
 /* 1..GEN3_EDIT_BALL_MAX; anything else is a no-op. */
 void gen3_edit_set_ball(Gen3Editor* ed, uint8_t ball);
 /* raw byte: strain << 4 | days */

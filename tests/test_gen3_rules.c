@@ -247,7 +247,7 @@ TEST(test_pid_find_deterministic) {
 
 static void check_moves(uint16_t nat, uint8_t lv, uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
     uint16_t m[4];
-    gen3_default_moves(nat, lv, m);
+    ASSERT_EQ(gen3_default_moves(nat, lv, m), (a != 0) + (b != 0) + (c != 0) + (d != 0));
     ASSERT_EQ(m[0], a);
     ASSERT_EQ(m[1], b);
     ASSERT_EQ(m[2], c);
@@ -263,6 +263,22 @@ TEST(test_default_moves) {
     check_moves(201, 50, 237, 0, 0, 0);
     check_moves(1, 1, 33, 0, 0, 0);
     check_moves(0, 50, 0, 0, 0, 0);
+}
+
+/* A failed read after a good open (an SD error), or no bulk source: no moves, count 0. */
+TEST(test_default_moves_no_data) {
+    uint16_t m[4] = {1, 2, 3, 4};
+    ASSERT_TRUE(bulk_file_open());
+    bulk_file_failing = true;
+    ASSERT_EQ(gen3_default_moves(252, 30, m), 0);
+    for(int s = 0; s < 4; s++) ASSERT_EQ(m[s], 0);
+    ASSERT_TRUE(bulk_file_open());
+    gen3_bulk_close();
+    m[0] = 1;
+    ASSERT_EQ(gen3_default_moves(252, 30, m), 0);
+    ASSERT_EQ(m[0], 0);
+    ASSERT_TRUE(bulk_file_open());
+    check_moves(252, 30, 98, 228, 103, 72);
 }
 
 int main(void) {
@@ -286,5 +302,6 @@ int main(void) {
     RUN(test_pid_find_rejects_bad_want);
     RUN(test_pid_find_deterministic);
     RUN(test_default_moves);
+    RUN(test_default_moves_no_data);
     TEST_EXIT();
 }

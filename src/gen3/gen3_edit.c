@@ -65,9 +65,8 @@ static void ed_apply_preset(Gen3Editor* ed) {
     ed->preset_applied = true;
 }
 
-static void ed_set_default_moves(Gen3Pkm* p, uint16_t national, uint8_t level) {
-    uint16_t moves[4];
-    gen3_default_moves(national, level, moves);
+/* A moveset from gen3_default_moves, each move with full base PP; PP Ups 0. */
+static void ed_put_moves(Gen3Pkm* p, const uint16_t moves[4]) {
     for(int s = 0; s < 4; s++) {
         gen3_pkm_set(p, Gen3FieldMove1 + s, moves[s]);
         gen3_pkm_set(p, Gen3FieldPp1 + s, moves[s] ? gen3_move_pp(moves[s]) : 0);
@@ -106,12 +105,17 @@ static void ed_clear_move(Gen3Pkm* p, int slot) {
 }
 
 /* D5: a fresh Pokemon (as CreateBoxMon) keeping OT name, OT ID, OT gender; the preset is
- * applied. */
-static void ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
+ * applied. The name and moves are read from the bulk file first: false, with the editor
+ * unchanged, if either read fails. */
+static bool ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
     const Gen3SpeciesInfo* info = gen3_species(national);
-    if(!info) return;
+    if(!info) return false;
     if(level < 1) level = 1;
     if(level > 100) level = 100;
+    char name[GEN3_SPECIES_NAME_LEN + 1];
+    uint16_t moves[4];
+    if(!gen3_species_name_get(national, name) || !gen3_default_moves(national, level, moves))
+        return false;
     const Gen3Pkm* old = &ed->pkm;
     uint32_t ot_id = gen3_pkm_get(old, Gen3FieldOtId);
     Gen3Pkm p;
@@ -125,15 +129,13 @@ static void ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
         pid = gen3_rng_next(&ed->rng);
     } while(gen3_is_shiny(ot_id, pid));
     gen3_pkm_set(&p, Gen3FieldPid, pid);
-    char name[GEN3_SPECIES_NAME_LEN + 1];
-    gen3_species_name_get(national, name);
     gen3_pkm_set_nickname(&p, name);
     gen3_pkm_set(&p, Gen3FieldLanguage, GEN3_MON_LANGUAGE_ENGLISH);
     gen3_pkm_set(&p, Gen3FieldHasSpecies, 1);
     gen3_pkm_set(&p, Gen3FieldSpecies, info->internal);
     gen3_pkm_set(&p, Gen3FieldExp, gen3_exp_for_level(info->growth, level));
     gen3_pkm_set(&p, Gen3FieldFriendship, info->friendship);
-    ed_set_default_moves(&p, national, level);
+    ed_put_moves(&p, moves);
     gen3_pkm_set(&p, Gen3FieldMetLocation, GEN3_METLOC_FATEFUL);
     gen3_pkm_set(&p, Gen3FieldMetLevel, level);
     gen3_pkm_set(&p, Gen3FieldMetGame, GEN3_EDIT_MET_GAME);
@@ -146,9 +148,10 @@ static void ed_new_mon(Gen3Editor* ed, uint16_t national, uint8_t level) {
     ed->pkm = p;
     ed_apply_preset(ed);
     ed_commit(ed);
+    return true;
 }
 
-void gen3_edit_init(Gen3Editor* ed, uint32_t seed) {
+bool gen3_edit_init(Gen3Editor* ed, uint32_t seed) {
     memset(ed, 0, sizeof(*ed));
     gen3_rng_seed(&ed->rng, seed);
     ed->preset = Gen3PresetRandIvZeroEv;
@@ -157,7 +160,7 @@ void gen3_edit_init(Gen3Editor* ed, uint32_t seed) {
         &ed->pkm,
         Gen3FieldOtId,
         ((uint32_t)GEN3_EDIT_DEFAULT_SID << 16) | GEN3_EDIT_DEFAULT_TID);
-    ed_new_mon(ed, GEN3_EDIT_DEFAULT_NATIONAL, GEN3_EDIT_DEFAULT_LEVEL);
+    return ed_new_mon(ed, GEN3_EDIT_DEFAULT_NATIONAL, GEN3_EDIT_DEFAULT_LEVEL);
 }
 
 bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
@@ -168,15 +171,32 @@ bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
     const Gen3SpeciesInfo* sp = gen3_species(national);
     if(!sp) return false;
 
-    /* Moves: note gaps in the input, drop duplicates with their PP and PP Ups, then pack. */
+    uint32_t exp = gen3_pkm_get(pkm, Gen3FieldExp);
+    uint32_t lo = gen3_exp_for_level(sp->growth, 1);
+    uint32_t hi = gen3_exp_for_level(sp->growth, 100);
+    uint32_t clamped = exp < lo ? lo : (exp > hi ? hi : exp);
+
+    /* Moves: note gaps in the input. With no move at all, the default moveset for the clamped
+     * level replaces them. It comes from the bulk file, so read it before changing anything. (A
+     * dropped duplicate always leaves its first copy, so any move in the input survives.) */
     bool empty_seen = false;
+    bool gaps = false;
+    bool no_moves = true;
     for(int s = 0; s < 4; s++) {
         uint16_t m = gen3_pkm_get(pkm, Gen3FieldMove1 + s);
         if(!m)
             empty_seen = true;
         else if(empty_seen)
-            info->gaps_packed = true;
+            gaps = true;
+        if(m) no_moves = false;
     }
+    uint16_t defaults[4] = {0};
+    if(no_moves &&
+       !gen3_default_moves(national, gen3_level_for_exp(sp->growth, clamped), defaults))
+        return false;
+    info->gaps_packed = gaps;
+
+    /* Drop duplicates with their PP and PP Ups, then pack. */
     for(int s = 1; s < 4; s++) {
         uint16_t m = gen3_pkm_get(pkm, Gen3FieldMove1 + s);
         for(int t = 0; m && t < s; t++) {
@@ -189,16 +209,12 @@ bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
     }
     ed_pack_moves(pkm);
 
-    uint32_t exp = gen3_pkm_get(pkm, Gen3FieldExp);
-    uint32_t lo = gen3_exp_for_level(sp->growth, 1);
-    uint32_t hi = gen3_exp_for_level(sp->growth, 100);
-    uint32_t clamped = exp < lo ? lo : (exp > hi ? hi : exp);
     if(clamped != exp) {
         gen3_pkm_set(pkm, Gen3FieldExp, clamped);
         info->exp_clamped = true;
     }
-    if(gen3_pkm_get(pkm, Gen3FieldMove1) == 0) {
-        ed_set_default_moves(pkm, national, ed_level(pkm));
+    if(no_moves) {
+        ed_put_moves(pkm, defaults);
         info->moves_defaulted = true;
     }
     if(!gen3_species_two_abilities(national) && gen3_pkm_get(pkm, Gen3FieldAbilityBit)) {
@@ -213,19 +229,22 @@ bool gen3_normalise(Gen3Pkm* pkm, Gen3NormaliseInfo* info) {
     return true;
 }
 
-void gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm) {
-    ed->pkm = *pkm;
+bool gen3_edit_load(Gen3Editor* ed, const Gen3Pkm* pkm) {
+    Gen3Pkm p = *pkm;
+    if(!gen3_normalise(&p, NULL)) return false;
+    ed->pkm = p;
     ed->preset_applied = false;
-    gen3_normalise(&ed->pkm, NULL);
+    return true;
 }
 
 uint16_t gen3_edit_national(const Gen3Editor* ed) {
     return gen3_national_from_internal(gen3_pkm_get(&ed->pkm, Gen3FieldSpecies));
 }
 
-void gen3_edit_set_species(Gen3Editor* ed, uint16_t national) {
-    if(!gen3_species(national) || national == gen3_edit_national(ed)) return;
-    ed_new_mon(ed, national, ed_level(&ed->pkm));
+bool gen3_edit_set_species(Gen3Editor* ed, uint16_t national) {
+    if(!gen3_species(national)) return false;
+    if(national == gen3_edit_national(ed)) return true;
+    return ed_new_mon(ed, national, ed_level(&ed->pkm));
 }
 
 void gen3_edit_set_level(Gen3Editor* ed, uint8_t level) {
@@ -245,14 +264,15 @@ void gen3_edit_set_preset(Gen3Editor* ed, Gen3Preset preset) {
     ed_commit(ed);
 }
 
-void gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii) {
+bool gen3_edit_set_nickname(Gen3Editor* ed, const char* ascii) {
     char name[GEN3_SPECIES_NAME_LEN + 1];
     if(!ascii || !ascii[0]) {
-        gen3_species_name_get(gen3_edit_national(ed), name);
+        if(!gen3_species_name_get(gen3_edit_national(ed), name)) return false;
         ascii = name;
     }
     gen3_pkm_set_nickname(&ed->pkm, ascii);
     ed_commit(ed);
+    return true;
 }
 
 void gen3_edit_set_ot_name(Gen3Editor* ed, const char* ascii) {
@@ -304,9 +324,12 @@ bool gen3_edit_set_move(Gen3Editor* ed, uint8_t slot, uint16_t move) {
     return true;
 }
 
-void gen3_edit_default_moves(Gen3Editor* ed) {
-    ed_set_default_moves(&ed->pkm, gen3_edit_national(ed), ed_level(&ed->pkm));
+bool gen3_edit_default_moves(Gen3Editor* ed) {
+    uint16_t moves[4];
+    if(!gen3_default_moves(gen3_edit_national(ed), ed_level(&ed->pkm), moves)) return false;
+    ed_put_moves(&ed->pkm, moves);
     ed_commit(ed);
+    return true;
 }
 
 void gen3_edit_set_ball(Gen3Editor* ed, uint8_t ball) {

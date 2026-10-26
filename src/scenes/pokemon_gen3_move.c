@@ -8,6 +8,7 @@
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_letters.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* Gen III move slots. Gen3Moves: the scene state is the slot (0-3) and the highlight (row 4 is
  * "Default moves"). Gen3MoveLetter: the scene state is the chosen letter. */
@@ -89,10 +90,13 @@ void pokemon_scene_gen3_moves_on_enter(void* context) {
 bool pokemon_scene_gen3_moves_on_event(void* context, SceneManagerEvent event) {
     PokemonFap* pokemon_fap = context;
 
-    /* The "Default moves" row sends this scene's own id: apply it and redraw the list */
+    /* The "Default moves" row sends this scene's own id: apply it and redraw the list. The
+     * moveset comes from the bulk file; if it can't be read, the moves are kept. */
     if(event.type == SceneManagerEventTypeCustom && event.event == PokemonSceneGen3Moves) {
-        gen3_edit_default_moves(pokemon_fap->gen3_editor);
-        pokemon_scene_gen3_moves_on_enter(context);
+        if(gen3_edit_default_moves(pokemon_fap->gen3_editor))
+            pokemon_scene_gen3_moves_on_enter(context);
+        else
+            gen3_menu_show_data_missing(pokemon_fap);
         return true;
     }
     return gen3_move_on_event(context, event);
