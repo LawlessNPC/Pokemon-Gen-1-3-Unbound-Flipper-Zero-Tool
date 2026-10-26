@@ -19,8 +19,6 @@
 #define BLOCK_REQ_TRAINER_CARD 2
 #define FLIPPER_MULTIPLAYER_ID 0 /* slot 0: block headers carry 0x80 */
 #define NAME_MAX_CHARS         7
-/* LinkPlayer versions are this + the game's VERSION_* (fr: link.c: InitLocalLinkPlayer) */
-#define LP_VERSION_BASE        0x4000
 
 /* Byte 0x13 of a Pokemon, game form or not (the header is never encrypted): bit 1 is hasSpecies
  * (pokeruby BoxPokemon, PKHeX PK3; Gen3FieldHasSpecies in gen3_pkm.c) */
@@ -101,7 +99,7 @@ void gen3_club_claim_game(
     case Gen3LinkGameFRLG:
         /* §C1: the GBA's own game, and what FRLG's InitLocalLinkPlayer sends. A Ruby claim
          * would fail FRLG's linkup gate (fr: trade.c: GetGameProgressForLinkTrade) */
-        lp->version = (uint16_t)(LP_VERSION_BASE | (partner->version & 0xFF));
+        lp->version = (uint16_t)(GEN3_LP_VERSION_BASE | (partner->version & 0xFF));
         lp->lp_field_2 = GEN3_LP_NATIONAL_DEX; /* in every block, as FRLG; it never reads it */
         gen3_link_player_set_progress(lp, GEN3_FRLG_PROGRESS_NATIONAL_DEX);
         gen3_trainer_card_build_frlg(lp, card); /* §C2: the Kanto card */

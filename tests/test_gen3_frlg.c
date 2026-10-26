@@ -91,6 +91,8 @@ static bool ruby_claim_ok(const Gen3LinkPlayer* partner, uint32_t link_type, boo
 
 TEST(test_frlg_claim_game) {
     static const uint16_t ruby_versions[] = {0x4001, 0x4002, 0x4003, 0x4000};
+    ASSERT_EQ(GEN3_LP_VERSION_BASE, 0x4000);
+    ASSERT_EQ(GEN3_VERSION_RUBY, 0x4002);
     for(size_t t = 0; t < sizeof(link_types) / sizeof(link_types[0]); t++) {
         for(int natdex = 0; natdex <= 1; natdex++) {
             ASSERT_TRUE(frlg_claim_ok(0x4004, link_types[t], link_types[t], natdex));
@@ -180,6 +182,44 @@ TEST(test_frlg_leafgreen) {
     ASSERT_TRUE(st.partner_rules.national_dex);
 }
 
+/* Bursts from the raw master's Connected to its card request: both LinkPlayerBlocks are in by
+ * about 15, and a GBA past its linkup checks has its card ready 3 bursts later */
+#define RAW_CARD_REQUEST_BURSTS 40
+
+/* bench_raw_relink with a card request: for `frames` frames a fresh Gen3Link is the master
+ * instead of the club. On Connected it queues {2222, 1133} and lp's LinkPlayerBlock, then
+ * {CCCC, 2} RAW_CARD_REQUEST_BURSTS later, and never its own card, so the GBA then waits for it.
+ * True if the GBA sent its 100-byte card: it got past its linkup checks (a GBA still before them
+ * would trip "stale card"). */
+static bool raw_linkup(Bench* b, const Gen3LinkPlayer* lp, uint32_t frames) {
+    static const uint16_t req[GEN3_CMD_LEN] = {0x2222, GEN3_LINKTYPE_TRADE_SETUP};
+    static const uint16_t card_req[GEN3_CMD_LEN] = {0xCCCC, 2};
+    uint8_t block[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    Gen3Link link;
+    uint32_t since = 0;
+    bool sent = false;
+    gen3_link_player_block_build(lp, block);
+    gen3_link_init(&link);
+    for(uint32_t i = 0; i < frames; i++) {
+        MlinkTx tx;
+        uint16_t cmd[GEN3_CMD_LEN];
+        /* b->rx answers the club's last tx: a fresh link starts without it */
+        if(i > 0 && gen3_link_rx(&link, &b->rx, cmd) == Gen3LinkEventConnected && !sent) {
+            gen3_link_send(&link, req);
+            gen3_block_send(&link, block, sizeof(block), 0);
+            sent = true;
+        }
+        if(sent && ++since == RAW_CARD_REQUEST_BURSTS) gen3_link_send(&link, card_req);
+        gen3_link_tx(&link, &tx);
+        fake_ruby_frame(&b->ruby, &tx, &b->rx);
+        bench_record(b, &tx);
+    }
+    for(uint8_t i = 0; i < b->n_g_blocks; i++) {
+        if(b->g_blocks[i].size == GEN3_TRAINER_CARD_BLOCK_SIZE) return true;
+    }
+    return false;
+}
+
 TEST(test_frlg_ruby_claim_refused) {
     /* §C1: FRLG refuses a Ruby partner at the counter unless the save may link with R/S */
     Bench b;
@@ -199,10 +239,10 @@ TEST(test_frlg_ruby_claim_refused) {
     bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
     fake_ruby_set_frlg_progress(&b.ruby, false, true);
     fake_ruby_open_link(&b.ruby);
-    bench_raw_relink(&b, &ruby, 200);
+    ASSERT_TRUE(raw_linkup(&b, &ruby, 200)); /* past the gate: its card went out */
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
     ASSERT_EQ(b.n_g_close, 0);
-    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyLinkup); /* past the gate, awaiting the cards */
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyLinkup); /* awaiting the Flipper's card */
     /* An R/S sender's progress bytes are zeroed on receipt (fr: link.c: ProcessRecvCmds) */
     const Gen3LinkPlayer* p = fake_ruby_partner(&b.ruby);
     ASSERT_EQ(p->version, GEN3_VERSION_RUBY);
@@ -213,7 +253,8 @@ TEST(test_frlg_ruby_claim_refused) {
 
 /* The fake's linkup gate against a raw Flipper LinkPlayer: the Ruby claim with `version` and raw
  * name[8], name[10], against a FireRed save with or without FLAG_SYS_CAN_LINK_WITH_RS. "passed"
- * once both LinkPlayers are in with no error, else the fake's error, or "waiting". */
+ * once the fake is past the gate (raw_linkup: its card went out, and it waits in the linkup for
+ * the Flipper's), else the fake's error, or "waiting". */
 static const char* gate(uint16_t version, uint8_t name8, uint8_t name10, bool can_link_rs) {
     Bench b;
     Gen3LinkPlayer lp;
@@ -226,9 +267,9 @@ static const char* gate(uint16_t version, uint8_t name8, uint8_t name10, bool ca
     bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
     fake_ruby_set_frlg_progress(&b.ruby, false, can_link_rs);
     fake_ruby_open_link(&b.ruby);
-    bench_raw_relink(&b, &lp, 200);
+    const bool card_sent = raw_linkup(&b, &lp, 200);
     if(fake_ruby_error(&b.ruby)) return fake_ruby_error(&b.ruby);
-    return fake_ruby_partner(&b.ruby)->version == version ? "passed" : "waiting";
+    return card_sent && fake_ruby_phase(&b.ruby) == FakeRubyLinkup ? "passed" : "waiting";
 }
 
 TEST(test_frlg_fake_gate) {
@@ -236,6 +277,7 @@ TEST(test_frlg_fake_gate) {
     ASSERT_STR_EQ(gate(0x4004, 0x00, 0x00, false), "passed");
     ASSERT_STR_EQ(gate(0x4005, 0x00, 0x00, false), "passed");
     /* R/S: only this save's own 0xF0 bits count; the partner's bytes are zeroed */
+    ASSERT_STR_EQ(gate(0x4002, 0xFF, 0xFF, true), "passed"); /* the Ruby claim as sent */
     ASSERT_STR_EQ(gate(0x4001, 0x10, 0x10, true), "passed");
     ASSERT_STR_EQ(gate(0x4002, 0x10, 0x10, false), "not ready");
     /* Emerald or other: both saves. The partner's copy is the receiver's: name[10] = name[8]
@@ -248,10 +290,15 @@ TEST(test_frlg_fake_gate) {
 }
 
 /* The club's card for this session, poked before it goes out (white box: the club builds it with
- * its LinkPlayerBlock and sends it card_delay idle bursts later), then the run to the room. */
-static const char* card_poked(uint8_t offset, uint8_t value) {
+ * its LinkPlayerBlock and sends it card_delay idle bursts later), then the run to the room. The
+ * GBA is FireRed (frlg) or Ruby (bench_init_trade). */
+static const char* card_poked(bool frlg, uint8_t offset, uint8_t value) {
     Bench b;
-    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    if(frlg) {
+        bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    } else {
+        bench_init_trade(&b);
+    }
     fake_ruby_open_link(&b.ruby);
     if(!run_until_phase(&b, Gen3ClubPhasePlayers, 200)) return "no players";
     b.club.own_card[offset] = value;
@@ -261,11 +308,83 @@ static const char* card_poked(uint8_t offset, uint8_t value) {
 
 TEST(test_frlg_fake_bad_card) {
     /* fr: cable_club.c: Task_LinkupAwaitTrainerCardData copies an FRLG partner's card whole */
-    ASSERT_STR_EQ(card_poked(0x38, 0x04), "room");
-    ASSERT_STR_EQ(card_poked(0x38, 0x00), "bad card"); /* the Ruby card for a FireRed claim */
-    ASSERT_STR_EQ(card_poked(0x38, 0x05), "bad card"); /* LeafGreen's card for a FireRed claim */
-    ASSERT_STR_EQ(card_poked(0x01, 0x04), "room"); /* 4 stars: the last palette */
-    ASSERT_STR_EQ(card_poked(0x01, 0x05), "bad card");
+    ASSERT_STR_EQ(card_poked(true, 0x38, 0x04), "room");
+    ASSERT_STR_EQ(card_poked(true, 0x38, 0x00), "bad card"); /* Ruby's card, FireRed claim */
+    ASSERT_STR_EQ(card_poked(true, 0x38, 0x05), "bad card"); /* LeafGreen's card, FireRed claim */
+    ASSERT_STR_EQ(card_poked(true, 0x01, 0x04), "room"); /* 4 stars: the last palette */
+    ASSERT_STR_EQ(card_poked(true, 0x01, 0x05), "bad card");
+}
+
+TEST(test_ruby_fake_bad_card) {
+    /* Ruby mode: sub_8083314 keeps the Flipper's card, and its stars index the 5
+     * gTrainerCardPalettes and, less one, the 4 gTrainerCardColorNames (§A5) */
+    ASSERT_STR_EQ(card_poked(false, 0x01, 0x04), "room");
+    ASSERT_STR_EQ(card_poked(false, 0x01, 0x05), "bad card");
+    ASSERT_STR_EQ(card_poked(false, 0x01, 0xFF), "bad card");
+    /* Ruby's card ends at 0x37: it reads no version byte */
+    ASSERT_STR_EQ(card_poked(false, 0x38, 0x05), "room");
+}
+
+TEST(test_frlg_rules_from_init) {
+    /* {Unknown, true} until the first GBA block: a memset alone would read national_dex false */
+    Bench b;
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.partner_rules.game, Gen3LinkGameUnknown);
+    ASSERT_TRUE(st.partner_rules.national_dex);
+    ASSERT_TRUE(bench_to_room(&b));
+    ASSERT_EQ(club_status(&b).partner_rules.game, Gen3LinkGameFRLG);
+    gen3_club_init(&b.club, &club_cfg_trade); /* init forgets the GBA */
+    st = club_status(&b);
+    ASSERT_EQ(st.partner_rules.game, Gen3LinkGameUnknown);
+    ASSERT_TRUE(st.partner_rules.national_dex);
+}
+
+TEST(test_frlg_rules_kept_on_bad_block) {
+    /* A LinkPlayerBlock that doesn't parse keeps the rules of the latest one that did */
+    Bench b;
+    BenchRawGba raw;
+    Gen3LinkPlayer flipper;
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_to_room(&b));
+    ASSERT_TRUE(leave_room(&b));
+    ruby_relink(&b);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseLinked, 100));
+    /* A raw GBA takes over before the fake's LinkPlayerBlock, and sends a 20-byte block instead */
+    raw_gba_init(&raw, &b, 0xAABB, 0);
+    raw_gba_run(&raw, &b, 30);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseError);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorBadPlayerBlock);
+    ASSERT_TRUE(!st.partner_valid);
+    ASSERT_EQ(st.partner_rules.game, Gen3LinkGameFRLG);
+    ASSERT_TRUE(!st.partner_rules.national_dex);
+    /* The partner is zeroed, an Unknown game: the Flipper's own block is the Ruby claim */
+    ASSERT_TRUE(gen3_link_player_block_parse(b.f_rx.data, &flipper));
+    ASSERT_EQ(flipper.version, GEN3_VERSION_RUBY);
+}
+
+TEST(test_frlg_rules_other_room) {
+    /* A block of any link type sets the rules: an FRLG GBA that chose the Colosseum */
+    Bench b;
+    Gen3LinkPlayer me = bench_frlg_player(GEN3_VERSION_FIRERED);
+    me.link_type = 0x2233;
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    bench_swap_gba(&b, &me, false);
+    fake_ruby_open_link(&b.ruby);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 400));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorOtherRoom);
+    ASSERT_TRUE(!st.partner_valid);
+    ASSERT_EQ(st.link_type, 0x2233);
+    ASSERT_EQ(st.partner_rules.game, Gen3LinkGameFRLG);
+    ASSERT_TRUE(!st.partner_rules.national_dex);
+    run(&b, 400);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    /* The FRLG claim in a 0x1133 block; the link types differ, so nothing follows from it */
+    ASSERT_EQ(fake_ruby_partner(&b.ruby)->version, 0x4004);
+    ASSERT_EQ(fake_ruby_partner(&b.ruby)->link_type, GEN3_LINKTYPE_TRADE_SETUP);
 }
 
 TEST(test_frlg_room_and_leave) {
@@ -361,6 +480,10 @@ int main(void) {
     RUN(test_frlg_ruby_claim_refused);
     RUN(test_frlg_fake_gate);
     RUN(test_frlg_fake_bad_card);
+    RUN(test_ruby_fake_bad_card);
+    RUN(test_frlg_rules_from_init);
+    RUN(test_frlg_rules_kept_on_bad_block);
+    RUN(test_frlg_rules_other_room);
     RUN(test_frlg_room_and_leave);
     RUN(test_frlg_link_test);
     RUN(test_frlg_swap_cartridge);

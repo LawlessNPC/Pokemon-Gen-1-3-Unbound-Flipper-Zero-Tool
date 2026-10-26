@@ -240,12 +240,13 @@ struct Gen3Club {
  * LinkPlayer of this session, whatever its link type. NULL, or zeros after a bad block or a reset,
  * read as an Unknown game. Every claim has name cfg->name (7 chars, EOS-filled to 11), trainer_id
  * sid<<16|tid, gender 0/1, id 0 and language GEN3_LANGUAGE_ENGLISH.
- * - FireRed/LeafGreen: the GBA's own game, version 0x4000 | (partner->version & 0xFF), so FR
- *   meets FR and LG meets LG. lp_field_2 GEN3_LP_NATIONAL_DEX in every block (what FRLG itself
- *   sends; it never reads it), so national_dex is ignored. name[8..10] 01 00 01: progress
- *   GEN3_FRLG_PROGRESS_NATIONAL_DEX, which lets the FRLG player offer a Pokemon above #151
- *   (fr: trade.c: CanTradeSelectedMon). Card gen3_trainer_card_build_frlg. An FRLG claim passes
- *   FRLG's linkup gate, and the GBA shows an FRLG avatar and the Kanto card (§C1, §C2).
+ * - FireRed/LeafGreen: the GBA's own game, version GEN3_LP_VERSION_BASE |
+ *   (partner->version & 0xFF), so FR meets FR and LG meets LG. lp_field_2 GEN3_LP_NATIONAL_DEX
+ *   in every block (what FRLG itself sends; it never reads it), so national_dex is ignored.
+ *   name[8..10] 01 00 01: progress GEN3_FRLG_PROGRESS_NATIONAL_DEX, which lets the FRLG player
+ *   offer a Pokemon above #151 (fr: trade.c: CanTradeSelectedMon). Card
+ *   gen3_trainer_card_build_frlg. An FRLG claim passes FRLG's linkup gate, and the GBA shows an
+ *   FRLG avatar and the Kanto card (§C1, §C2).
  * - Ruby/Sapphire, Emerald and Unknown: Ruby, version GEN3_VERSION_RUBY, name[8..10] EOS, card
  *   gen3_trainer_card_build (§A5); lp_field_2 GEN3_LP_NATIONAL_DEX only for
  *   GEN3_LINKTYPE_TRADE_DISCONNECTED with national_dex set, else 0. An FRLG GBA would refuse

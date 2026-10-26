@@ -29,8 +29,9 @@
  *   (fr: link.c: ProcessRecvCmds, ConvertLinkPlayerName);
  * - the 0x1133 linkup gate (fr: trade.c: GetGameProgressForLinkTrade): "not ready" below;
  * - its own trainer card with the version byte at 0x38
- *   (fr: trainer_card.c: TrainerCard_GenerateCardForLinkPlayer), and the check of the Flipper's
- *   (fr: cable_club.c: Task_LinkupAwaitTrainerCardData): "bad card" below.
+ *   (fr: trainer_card.c: TrainerCard_GenerateCardForLinkPlayer), and the check of the version
+ *   byte of the Flipper's (fr: cable_club.c: Task_LinkupAwaitTrainerCardData): "bad card" below,
+ *   whose stars check holds in both modes.
  * The room, the seats, the walk-in, the 0x1111 re-establish and the 300-frame tasks are Ruby's,
  * as FRLG's are the same (§C5; fr: cable_club.c: Task_EnterCableClubSeat,
  * Task_WaitForLinkPlayerConnection, cartridge build). */
@@ -382,15 +383,18 @@ FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
  * sub_804DC88 state 9). Like the hangs, these two need a stray Flipper command that makes this
  * GBA send a block (a 2222, or a CCCC). "relink mismatch" (the 0x1111 relink after an EEBB: the
  * Flipper's trainer id, or its name up to the first EOS, differs from the Part A linkup's:
- * sub_800826C closes the link, CB2_LinkError). FRLG mode adds "not ready" (the 0x1133 linkup
- * gate: an R/S Flipper without this save's FLAG_SYS_CAN_LINK_WITH_RS, or an Emerald or other
- * Flipper unless both progressFlagsCopy have a 0xF0 bit, fr: trade.c:
+ * sub_800826C closes the link, CB2_LinkError), "bad card" (the Flipper's card has stars above
+ * 4: sub_8083314 [Task_LinkupAwaitTrainerCardData] keeps it in gTrainerCards, and its stars index
+ * the 5 gTrainerCardPalettes (trainer_card.c TrainerCard_LoadPalettes) and, less one, the 4
+ * gTrainerCardColorNames (cable_club.c sub_8083BF4), §A5; FRLG indexes its own 5-entry
+ * sKantoTrainerCardPals or sHoennTrainerCardPals, fr: trainer_card.c). FRLG mode adds "not
+ * ready" (the 0x1133 linkup gate: an R/S Flipper without this save's FLAG_SYS_CAN_LINK_WITH_RS,
+ * or an Emerald or other Flipper unless both progressFlagsCopy have a 0xF0 bit, fr: trade.c:
  * GetGameProgressForLinkTrade. FRLG closes the link with no 5FFF, fr: cable_club.c:
- * Task_LinkupExchangeDataWithLeader; phase Closed) and "bad card" (the Flipper's card has stars
- * above 4, past sHoennTrainerCardPals/sKantoTrainerCardPals, or an FRLG Flipper's card has a
- * version byte at 0x38 other than its LinkPlayer's: fr: cable_club.c:
+ * Task_LinkupExchangeDataWithLeader; phase Closed), and "bad card" also for an FRLG Flipper's
+ * card whose version byte at 0x38 isn't its LinkPlayer's (fr: cable_club.c:
  * Task_LinkupAwaitTrainerCardData copies it whole, and fr: trainer_card.c: GetCardType picks
- * the card from that byte) */
+ * the Kanto or the Hoenn card from that byte) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as this GBA parsed it (in FRLG mode, converted as every received
  * LinkPlayer is: fr: link.c: ConvertLinkPlayerName) */

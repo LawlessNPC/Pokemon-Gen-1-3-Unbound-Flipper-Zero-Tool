@@ -493,7 +493,7 @@ TEST(test_club_claim_game) {
         .name = "FLIPPER", .tid = 22222, .sid = 0, .gender = 0, .trading = false};
     static const uint8_t flipper[11] = {
         0xC0, 0xC6, 0xC3, 0xCA, 0xCA, 0xBF, 0xCC, 0xFF, 0xFF, 0xFF, 0xFF};
-    Gen3LinkPlayer partner; /* the GBA's: unused while the Flipper always claims Ruby */
+    Gen3LinkPlayer partner; /* a Ruby GBA's: it gets the Ruby claim */
     Gen3LinkPlayer lp;
     uint8_t card[GEN3_TRAINER_CARD_BLOCK_SIZE];
     uint8_t want_card[GEN3_TRAINER_CARD_BLOCK_SIZE];

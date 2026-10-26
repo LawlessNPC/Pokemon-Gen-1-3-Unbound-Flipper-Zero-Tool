@@ -182,14 +182,17 @@
 #define PROGRESS_NATIONAL_DEX  0x01 /* IsNationalPokedexEnabled() */
 #define PROGRESS_CAN_LINK_RS   0x10 /* FLAG_SYS_CAN_LINK_WITH_RS */
 #define PROGRESS_CLEARED_GAME  0xF0 /* the bits fr: trade.c: GetGameProgressForLinkTrade tests */
-/* fr: include/trainer_card.h: struct TrainerCard (its first 0x38 bytes are TrainerCardRSE) */
-#define CARD_STARS     0x01 /* rse.stars: indexes 5-entry palette tables (sKantoTrainerCardPals) */
-#define CARD_STARS_MAX 4
-#define CARD_VERSION   0x38 /* version */
+/* fr: include/trainer_card.h: struct TrainerCard.version, after its TrainerCardRSE (0x00..0x37) */
+#define CARD_VERSION 0x38
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
 #define BLOCK_REQ_CARD 2
+/* The card's stars (§A5) index 5-entry tables: gTrainerCardPalettes (trainer_card.c
+ * TrainerCard_LoadPalettes) and, less one, the 4 gTrainerCardColorNames (cable_club.c
+ * sub_8083BF4); in FRLG sKantoTrainerCardPals or sHoennTrainerCardPals (fr: trainer_card.c) */
+#define CARD_STARS     0x01
+#define CARD_STARS_MAX 4
 
 /* sMagic: an ASCII C string, compared with strcmp (15 bytes including the NUL) */
 static const char link_magic[] = "GameFreak inc.";
@@ -1747,13 +1750,16 @@ static bool frlg_partner_ready(const FakeRuby* g) {
     return (partner->name[LP_PROGRESS_FLAGS_COPY] & PROGRESS_CLEARED_GAME) != 0;
 }
 
-/* FRLG mode: fr: cable_club.c: Task_LinkupAwaitTrainerCardData copies the Flipper's card whole
- * when its LinkPlayer's version & 0xFF is 4 or 5 (else the first 0x38 bytes, with the
- * LinkPlayer's version), and fr: trainer_card.c draws it: GetCardType picks the Kanto or the
- * Hoenn card from that version, and rse.stars indexes a 5-entry palette table. */
-static bool frlg_card_ok(const FakeRuby* g) {
-    const uint16_t version = g->link_players[0].version;
+/* The Flipper's card as this GBA keeps and draws it. sub_8083314 [Task_LinkupAwaitTrainerCardData]
+ * copies it into gTrainerCards, whose stars index gTrainerCardPalettes and gTrainerCardColorNames
+ * (CARD_STARS_MAX). FRLG mode: fr: cable_club.c: Task_LinkupAwaitTrainerCardData copies it whole
+ * when the Flipper's LinkPlayer version & 0xFF is 4 or 5 (else the first 0x38 bytes, with that
+ * version), and fr: trainer_card.c draws it: rse.stars index its palette tables, and GetCardType
+ * picks the Kanto or the Hoenn card from the version byte. */
+static bool card_ok(const FakeRuby* g) {
     if(g->partner_card[CARD_STARS] > CARD_STARS_MAX) return false;
+    if(!g->frlg) return true;
+    const uint16_t version = g->link_players[0].version;
     return !is_frlg_version(version) || g->partner_card[CARD_VERSION] == (version & 0xFF);
 }
 
@@ -1806,7 +1812,7 @@ static void run_linkup_task(FakeRuby* g) {
         if(g->block_received != 0x3) break; /* Flipper's card and our own echo */
         g->block_received = 0; /* ResetBlockReceivedFlags */
         memcpy(g->partner_card, g->block_recv_buffer[0], sizeof(g->partner_card));
-        if(g->frlg && !frlg_card_ok(g)) { /* fr: cable_club.c: Task_LinkupAwaitTrainerCardData */
+        if(!card_ok(g)) {
             set_error(g, "bad card");
             break;
         }

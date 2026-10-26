@@ -6,7 +6,10 @@
 #define GEN3_LINK_PLAYER_BLOCK_SIZE  60
 #define GEN3_TRAINER_CARD_BLOCK_SIZE 100
 #define GEN3_LINKTYPE_TRADE_SETUP    0x1133
-#define GEN3_VERSION_RUBY            0x4002
+/* LinkPlayer versions are this + the game's VERSION_* (fr: link.c: InitLocalLinkPlayer;
+ * fr: include/constants/global.h). Every receiver reads only the low byte. */
+#define GEN3_LP_VERSION_BASE         0x4000
+#define GEN3_VERSION_RUBY            (GEN3_LP_VERSION_BASE + 2)
 #define GEN3_LANGUAGE_ENGLISH        2
 
 typedef struct {
@@ -35,12 +38,11 @@ void gen3_trainer_card_build(const Gen3LinkPlayer* lp, uint8_t out[GEN3_TRAINER_
 /* lp_field_2 that makes Ruby unlock its National Dex (§B4.5) */
 #define GEN3_LP_NATIONAL_DEX 0x8000
 
-/* LinkPlayer versions: 0x4000 + the game's VERSION_* (fr: link.c: InitLocalLinkPlayer). Every
- * receiver reads only the low byte. GEN3_VERSION_RUBY is above. */
-#define GEN3_VERSION_SAPPHIRE  0x4001
-#define GEN3_VERSION_EMERALD   0x4003
-#define GEN3_VERSION_FIRERED   0x4004
-#define GEN3_VERSION_LEAFGREEN 0x4005
+/* The other games' LinkPlayer versions, as GEN3_VERSION_RUBY above */
+#define GEN3_VERSION_SAPPHIRE  (GEN3_LP_VERSION_BASE + 1)
+#define GEN3_VERSION_EMERALD   (GEN3_LP_VERSION_BASE + 3)
+#define GEN3_VERSION_FIRERED   (GEN3_LP_VERSION_BASE + 4)
+#define GEN3_VERSION_LEAFGREEN (GEN3_LP_VERSION_BASE + 5)
 
 /* FRLG and Emerald give name[8..10] (block 0x20..0x22) to progressFlags, neverRead and
  * progressFlagsCopy (fr: include/link.h: struct LinkPlayer; Part C §C1). */
