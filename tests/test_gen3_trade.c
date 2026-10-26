@@ -2724,6 +2724,75 @@ TEST(test_leave_waits_for_save) {
     ASSERT_TRUE(stays_left(&b));
 }
 
+TEST(test_leave_left_menu_stale) {
+    /* End trade in the gap before a pending trade's 0x1144 relink, which comes only after
+     * GEN3_CLUB_RELINK_WAIT_FRAMES: the GBA is taken as gone (left) with the trade still pending.
+     * The late relink then finishes the trade and its link save, and the post-save trade menu is
+     * stale (left): EEBB, never a second trade, and no seat in the room the GBA goes back to */
+    Bench b;
+    bool offered = false;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+    fake_ruby_answer(&b.ruby, true);
+    /* Until the GBA has closed the CCDD's 0x1122 link: its main loop then stalls, so its 0x1144
+     * OpenLink waits past the club's relink wait */
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyTrade, 400));
+    fake_ruby_stall(&b.ruby, 255);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 10));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(st.relinking);
+    ASSERT_TRUE(st.trade_pending);
+    gen3_club_request_leave(&b.club);
+    ASSERT_TRUE(club_status(&b).leaving);
+    for(int i = 0; i <= GEN3_CLUB_RELINK_WAIT_FRAMES && !club_status(&b).left; i++) {
+        if(i % 200 == 0) fake_ruby_stall(&b.ruby, 255);
+        step(&b);
+    }
+    st = club_status(&b);
+    ASSERT_TRUE(st.left);
+    ASSERT_TRUE(!st.leaving);
+    ASSERT_TRUE(st.trade_pending);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+
+    /* The late relink: the trade and the link save */
+    for(int i = 0; i < 4000 && club_status(&b).trades_done == 0; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+    st = club_status(&b);
+    ASSERT_EQ(st.trades_done, 1);
+    ASSERT_EQ(st.last_result, Gen3TradeResultDone);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
+
+    /* The post-save menu */
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseMenu, 1500));
+    ASSERT_TRUE(club_status(&b).offer_stale);
+    for(int i = 0; i < 400 && fake_ruby_phase(&b.ruby) != FakeRubyReturn; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        if(!offered && fake_ruby_menu_state(&b.ruby) == FakeRubyMenuBrowsing) {
+            fake_ruby_offer(&b.ruby, 0);
+            offered = true;
+        }
+    }
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyReturn);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_SET_MONS), 1); /* the first trade's only */
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_START), 1);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 1);
+    const uint32_t sat = b.sent_cafe16;
+    fake_ruby_resit(&b.ruby);
+    run(&b, 300);
+    ASSERT_EQ(b.sent_cafe16, sat);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_SET_MONS), 1);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_START), 1);
+    ASSERT_EQ(club_status(&b).trades_done, 1);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
 TEST(test_leave_when_waiting) {
     /* D9: no GBA linked: left at once */
     Bench b;
@@ -3215,6 +3284,7 @@ int main(void) {
     RUN(test_leave_gba_walks_back_in);
     RUN(test_leave_save_outcome_shown);
     RUN(test_leave_waits_for_save);
+    RUN(test_leave_left_menu_stale);
     RUN(test_leave_when_waiting);
     RUN(test_leave_in_relink_gap);
     RUN(test_leave_gba_gone);

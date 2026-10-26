@@ -27,6 +27,15 @@
  * (3 frames after the request). */
 #define GEN3_CLUB_ROUND1_DELAY_BURSTS 10
 #define GEN3_CLUB_ROUND_DELAY_BURSTS  6
+/* The same for an FRLG GBA, which runs an 11-frame delay state before every CCCC, on master and
+ * child alike (fr: trade.c: BufferTradeParties cases 2/6/10/14/18): an FRLG master's round 1
+ * comes about 14 frames after both LinkPlayerBlocks, and §C4 asks for at least 15 there. The
+ * club mirrors that master: one burst over §C4's 15 before round 1, and the 11 frames plus one
+ * before each later round. FRLG's trade menu runs one frame more than Ruby's before its case 0
+ * (fr: trade.c: CB2_CreateTradeMenu case 5), so it must take round 1's CCCC 4 frames after both
+ * LinkPlayerBlocks or later; 16 absorbs a GBA main-loop stall of up to 13 frames there. */
+#define GEN3_CLUB_ROUND1_DELAY_BURSTS_FRLG 16
+#define GEN3_CLUB_ROUND_DELAY_BURSTS_FRLG  12
 #define GEN3_CLUB_GBA_PARTY           6 /* the GBA's party slots */
 /* Idle bursts between the last chunk of the GBA's block and the reply (§B3.4: >= 5; DCBA §B4.3:
  * >= 2) */
@@ -130,9 +139,10 @@ typedef struct {
     uint8_t save_syncs; /* GBA 2FFEs answered in this link save, 0..3; zeroed at CCDD */
     bool save_window; /* sync 1 answered, sync 3 not yet seen: don't stop the link (D10) */
     Gen3TradeResult last_result; /* how the latest pending trade ended; None before any */
-    /* Menu: the GBA's view of the Flipper's party is out of date (no offer, offer changed, or a
-     * checksum error in this 0x1122 session), the app is editing, or a leave is asked (leaving):
-     * it gets EEBB */
+    /* Menu: the GBA's view of the Flipper's party is out of date (no usable offer, offer
+     * changed, or a checksum error in this 0x1122 session), the app is editing, or a leave is
+     * asked or done (leaving, left): it gets EEBB. After left, a menu reached by a trade's late
+     * relink never starts another trade */
     bool offer_stale;
     /* Room via 0x1111: the GBA's avatar is on its seat; it must step off and back on. Until the
      * GBA's next CAFE 0016 or a 0x1133 linkup */
@@ -150,6 +160,13 @@ typedef struct {
      * blocks, so after a cartridge swap they are the old GBA's until the new one's block parses;
      * {Unknown, true} from init until the first block. */
     Gen3PartnerRules partner_rules;
+    /* The offer's gen3_offer_traits, as given with it (GEN3_OFFER_TRAITS_UNKNOWN through
+     * gen3_club_set_offer), or from the AABB decrypt for a traded Pokemon; 0 without an offer */
+    uint8_t offer_traits;
+    /* has_offer, and partner_rules don't refuse it (gen3_partner_refuse None). The club sits, and
+     * shows the offer at round 1, only while it is; an R/S, Emerald or unknown partner never
+     * refuses, so there it is has_offer */
+    bool offer_usable;
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -188,6 +205,8 @@ struct Gen3Club {
     bool round_gba_done; /* the GBA's block of this round is in */
     uint8_t round1_delay; /* idle bursts before round 1's CCCC */
     uint8_t round_delay; /* before the CCCC of rounds 2..5 */
+    /* gen3_club_set_round_delays was called: the GBA's game no longer picks the delays */
+    bool delays_fixed;
     uint8_t round_block[GEN3_TRADE_ROUND_MAX]; /* the Flipper's block of this round (R2) */
     /* Trade menu, per session (§B3) */
     Gen3ClubMenu menu;
@@ -208,6 +227,9 @@ struct Gen3Club {
     Gen3PartnerRules partner_rules;
     uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
     bool has_offer;
+    uint8_t offer_traits; /* the offer's gen3_offer_traits; 0 without one */
+    /* gen3_offer_traits of the GBA's Pokemon its AABB got DDDD for: the offer's once traded */
+    uint8_t pending_traits;
     uint32_t trades_done;
     uint8_t party_mon[GEN3_PARTY_SIZE]; /* the Flipper mon the GBA was shown: offer at round 1 */
     uint8_t gba_party[GEN3_CLUB_GBA_PARTY][GEN3_PARTY_SIZE]; /* game form, rounds 1-3 */
@@ -266,11 +288,20 @@ void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg);
 /* One call per frame from the driver callback. rx is NULL on the first call. */
 void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx);
 void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out);
-/* Sets (game != NULL) or clears the offer: the Flipper's one party Pokemon, game form. false and
- * nothing changed if trades_seen != the club's trades_done (D6): an app that hasn't picked up the
- * latest trade can't overwrite the received Pokemon. Unchecked, since the app sets it in a
- * PRIMASK section, where nothing may decrypt: the app offers only a Pokemon that passes
- * gen3_trade_offer_check. */
+/* Sets (game != NULL) or clears the offer: the Flipper's one party Pokemon, game form, with its
+ * gen3_offer_traits (ignored, and 0, when game is NULL). false and nothing changed if trades_seen
+ * != the club's trades_done (D6): an app that hasn't picked up the latest trade can't overwrite
+ * the received Pokemon. Unchecked: the app sets it in a PRIMASK section, where nothing may
+ * decrypt, so it computes the traits beforehand and offers only a Pokemon that passes
+ * gen3_trade_offer_check. Copies the 100 bytes and two scalars. The club sits, and shows the
+ * offer at round 1, only while partner_rules don't refuse those traits (status.offer_usable). */
+bool gen3_club_set_offer_traits(
+    Gen3Club* club,
+    const uint8_t* game,
+    uint32_t trades_seen,
+    uint8_t traits);
+/* gen3_club_set_offer_traits with GEN3_OFFER_TRAITS_UNKNOWN: it decrypts nothing either. The offer
+ * is then usable for an R/S, Emerald or unknown partner, and never for FRLG. */
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen);
 /* O1: the app is editing the offer. While set, offer_stale is true (EEBB to every GBA block in
  * Menu, and an unsolicited EEBB), and the club never sits, nor sends DDDD or CCDD. Setting it
@@ -298,7 +329,10 @@ void gen3_club_get_received(
     uint32_t* trades_done);
 /* Tests only; production uses GEN3_CLUB_CARD_DELAY_BURSTS. */
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts);
-/* Tests only; production uses GEN3_CLUB_ROUND1_DELAY_BURSTS and GEN3_CLUB_ROUND_DELAY_BURSTS. */
+/* Tests only. Production takes the delays from the GBA's game at its 0x1122 LinkPlayerBlock:
+ * GEN3_CLUB_ROUND1_DELAY_BURSTS_FRLG and GEN3_CLUB_ROUND_DELAY_BURSTS_FRLG for FRLG, else
+ * GEN3_CLUB_ROUND1_DELAY_BURSTS and GEN3_CLUB_ROUND_DELAY_BURSTS (also from init). A call fixes
+ * both for every GBA until gen3_club_init. */
 void gen3_club_set_round_delays(Gen3Club* club, uint8_t first, uint8_t later);
 /* The GBA's party slot 0..5 (game form) from the last exchange; zeros for another slot or a slot
  * no exchange has filled. Each of rounds 1-3 refills two slots. */

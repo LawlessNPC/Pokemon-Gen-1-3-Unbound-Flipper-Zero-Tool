@@ -471,6 +471,454 @@ TEST(test_frlg_swap_cartridge) {
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
 }
 
+/* ---- The trade menu (§B2, §C3, §C4) ---- */
+
+/* The Flipper's Pokemon in these tests: Y, the default offer CHARMANDER; T, TREECKO (#252); M, a
+ * Mew without the fateful-encounter bit */
+static void make_y(uint8_t out[GEN3_PARTY_SIZE]) {
+    tm_make(4, 5, 21, out);
+}
+static void make_t(uint8_t out[GEN3_PARTY_SIZE]) {
+    tm_make(252, 5, 21, out);
+}
+static void make_m(uint8_t out[GEN3_PARTY_SIZE]) {
+    tm_make_unfateful(151, 22, out);
+}
+
+/* bench_init's GBA party with slot 1 or 2 replaced (NULL keeps it): {A, B, X} by default */
+static void set_gba_party(Bench* b, const uint8_t* slot1, const uint8_t* slot2) {
+    uint8_t party[3][GEN3_PARTY_SIZE];
+    tm_make(1, 5, 11, party[0]);
+    tm_make(4, 5, 12, party[1]);
+    tm_make(7, 10, 13, party[2]);
+    if(slot1) memcpy(party[1], slot1, GEN3_PARTY_SIZE);
+    if(slot2) memcpy(party[2], slot2, GEN3_PARTY_SIZE);
+    bench_set_party(b, party, 3);
+}
+
+static bool run_until_fake_phase(Bench* b, FakeRubyPhase phase, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_phase(&b->ruby) == phase) return true;
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+    }
+    return false;
+}
+
+static bool run_until_menu_state(Bench* b, FakeRubyMenuState state, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_menu_state(&b->ruby) == state) return true;
+    }
+    return false;
+}
+
+/* The k-th 20-byte (§B3.1) block among blocks[0..n), or NULL */
+static const BenchBlock* trade_block(const BenchBlock* blocks, uint8_t n, size_t k) {
+    for(uint8_t i = 0; i < n; i++) {
+        if(blocks[i].size != GEN3_TRADE_BLOCK_SIZE) continue;
+        if(k-- == 0) return &blocks[i];
+    }
+    return NULL;
+}
+
+/* The codes of the 20-byte blocks among blocks[0..n) are exactly want[0..count), in order */
+static bool codes_are(const BenchBlock* blocks, uint8_t n, const uint16_t* want, size_t count) {
+    uint16_t codes[BENCH_BLOCKS];
+    const size_t got = bench_codes(blocks, n, codes, BENCH_BLOCKS);
+    bool ok = got == count;
+    for(size_t i = 0; ok && i < count; i++) ok = codes[i] == want[i];
+    if(!ok) {
+        printf("  codes:");
+        for(size_t i = 0; i < got; i++) printf(" %04X", codes[i]);
+        printf("\n");
+    }
+    return ok;
+}
+
+/* Index of the latest block of `size` among blocks[0..n), or -1 */
+static int latest_block(const BenchBlock* blocks, uint8_t n, uint16_t size) {
+    for(int i = n - 1; i >= 0; i--) {
+        if(blocks[i].size == size) return i;
+    }
+    return -1;
+}
+
+/* The latest 0x1122 session's five margins: margin[k] is the burst of the Flipper's CCCC k
+ * (k = 0 for round 1) minus the later last_burst of the two blocks before it (both
+ * LinkPlayerBlocks for round 1, both blocks of round k for round k + 1). False if that session's
+ * exchange isn't complete. */
+static bool exchange_margins(const Bench* b, int64_t margin[GEN3_TRADE_ROUNDS]) {
+    const int fk = latest_block(b->f_blocks, b->n_f_blocks, GEN3_LINK_PLAYER_BLOCK_SIZE);
+    const int gk = latest_block(b->g_blocks, b->n_g_blocks, GEN3_LINK_PLAYER_BLOCK_SIZE);
+    if(fk < 0 || gk < 0 || b->n_f_cccc != GEN3_TRADE_ROUNDS) return false;
+    if(b->n_f_blocks < fk + 1 + GEN3_TRADE_ROUNDS || b->n_g_blocks < gk + 1 + GEN3_TRADE_ROUNDS) {
+        return false;
+    }
+    for(int k = 0; k < GEN3_TRADE_ROUNDS; k++) {
+        const uint32_t f = b->f_blocks[fk + k].last_burst;
+        const uint32_t g = b->g_blocks[gk + k].last_burst;
+        margin[k] = (int64_t)b->f_cccc_burst[k] - (int64_t)(f > g ? f : g);
+    }
+    return true;
+}
+
+TEST(test_frlg_exchange) {
+    /* §B2.1 against fr: trade.c: BufferTradeParties: five rounds, then FireRed's trade menu with
+     * the Flipper's one Pokemon */
+    static const uint16_t types[GEN3_TRADE_ROUNDS] = {1, 1, 1, 3, 4};
+    Bench b;
+    uint8_t y[GEN3_PARTY_SIZE];
+    make_y(y);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuBrowsing);
+    const Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseMenu);
+    ASSERT_EQ(st.round, 5);
+    ASSERT_TRUE(st.offer_usable);
+    ASSERT_EQ(fake_ruby_enemy_count(&b.ruby), 1);
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), y, GEN3_PARTY_SIZE);
+    ASSERT_EQ(fake_ruby_max_enemy_species(&b.ruby), 4);
+    ASSERT_EQ(b.n_f_cccc, GEN3_TRADE_ROUNDS);
+    for(int r = 0; r < GEN3_TRADE_ROUNDS; r++) ASSERT_EQ(b.f_cccc[r], types[r]);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_exchange_margins) {
+    /* §C4: the club mirrors an FRLG master, 16 idle bursts before round 1 and 12 before each
+     * later round, against Ruby's 10 and 6 */
+    Bench b;
+    int64_t margin[GEN3_TRADE_ROUNDS];
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(exchange_margins(&b, margin));
+    ASSERT_TRUE(margin[0] >= 17);
+    for(int k = 1; k < GEN3_TRADE_ROUNDS; k++) ASSERT_TRUE(margin[k] >= 13);
+}
+
+TEST(test_frlg_round1_delay_needed) {
+    /* The round-1 rule holds for FRLG too: a CCCC right after the LinkPlayerBlocks reaches
+     * FireRed before its case 1, which clears the Flipper's block flag. set_round_delays fixes
+     * the delays, so the GBA's 0x1122 block doesn't replace them */
+    Bench b;
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    gen3_club_set_round_delays(&b.club, 0, GEN3_CLUB_ROUND_DELAY_BURSTS_FRLG);
+    ASSERT_TRUE(bench_to_room(&b));
+    fake_ruby_sit(&b.ruby, 1);
+    for(int i = 0; i < 900 && fake_ruby_error(&b.ruby) == NULL; i++) step(&b);
+    const char* error = fake_ruby_error(&b.ruby);
+    ASSERT_TRUE(error != NULL);
+    ASSERT_TRUE(strcmp(error, "stale block") == 0 || strcmp(error, "exchange stalled") == 0);
+}
+
+TEST(test_frlg_no_natdex_never_sits) {
+    /* A FireRed save without the National Dex, and TREECKO on the Flipper: the club never sits,
+     * so FireRed never sees it */
+    Bench b;
+    uint8_t t[GEN3_PARTY_SIZE];
+    make_t(t);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_offer(&b, t));
+    ASSERT_TRUE(bench_to_room(&b));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(st.has_offer);
+    ASSERT_EQ(st.offer_traits, Gen3OfferNonKanto);
+    ASSERT_TRUE(!st.offer_usable);
+    fake_ruby_sit(&b.ruby, 1);
+    run(&b, 900);
+    ASSERT_EQ(b.sent_cafe16, 0);
+    st = club_status(&b);
+    ASSERT_TRUE(st.gba_seated);
+    ASSERT_TRUE(!st.flipper_seated);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubySeated);
+    ASSERT_EQ(fake_ruby_max_enemy_species(&b.ruby), 0);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_natdex_sits) {
+    /* With the National Dex, FireRed may see TREECKO */
+    Bench b;
+    uint8_t t[GEN3_PARTY_SIZE];
+    make_t(t);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, true);
+    ASSERT_TRUE(bench_offer(&b, t));
+    ASSERT_TRUE(bench_reach_menu(&b));
+    const Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.offer_traits, Gen3OfferNonKanto);
+    ASSERT_TRUE(st.offer_usable);
+    ASSERT_EQ(fake_ruby_enemy_count(&b.ruby), 1);
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), t, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_unusable_before_round1) {
+    /* An edit lands in the frame the Flipper sits: round 1 shows an empty partner column, as with
+     * no offer, and the stale offer sends FireRed back to the room */
+    static const uint16_t eebb[] = {GEN3_TRADE_BOTH_CANCEL};
+    Bench b;
+    uint8_t t[GEN3_PARTY_SIZE];
+    make_t(t);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_to_room(&b));
+    ASSERT_TRUE(club_status(&b).offer_usable); /* CHARMANDER, a Kanto Pokemon */
+    fake_ruby_sit(&b.ruby, 1);
+    for(int i = 0; i < 300 && b.sent_cafe16 == 0; i++) step(&b);
+    ASSERT_EQ(b.sent_cafe16, 1);
+    ASSERT_TRUE(bench_offer(&b, t));
+    ASSERT_TRUE(!club_status(&b).offer_usable);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 1200));
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    ASSERT_EQ(fake_ruby_max_enemy_species(&b.ruby), 0);
+    ASSERT_EQ(fake_ruby_enemy_count(&b.ruby), 0);
+    ASSERT_TRUE(codes_are(b.f_blocks, b.n_f_blocks, eebb, 1));
+    ASSERT_EQ(club_status(&b).phase, Gen3ClubPhaseRoom);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_unusable_in_menu) {
+    /* An edit to TREECKO in the menu: EEBB at once, and no seat in the room after */
+    static const uint16_t eebb[] = {GEN3_TRADE_BOTH_CANCEL};
+    Bench b;
+    uint8_t t[GEN3_PARTY_SIZE];
+    make_t(t);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    const uint32_t at = b.bursts;
+    ASSERT_TRUE(bench_offer(&b, t));
+    ASSERT_TRUE(club_status(&b).offer_stale);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 200));
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    ASSERT_TRUE(codes_are(b.f_blocks, b.n_f_blocks, eebb, 1));
+    ASSERT_TRUE(trade_block(b.f_blocks, b.n_f_blocks, 0)->first_burst - at <= 12);
+    const uint32_t sat = b.sent_cafe16;
+    ASSERT_EQ(sat, 1);
+    fake_ruby_resit(&b.ruby);
+    run(&b, 600);
+    ASSERT_EQ(b.sent_cafe16, sat);
+    ASSERT_TRUE(club_status(&b).gba_seated);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubySeated);
+    ASSERT_EQ(fake_ruby_max_enemy_species(&b.ruby), 4);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_gba_cant_offer_non_kanto) {
+    /* fr: trade.c: CanTradeSelectedMon: without its own National Dex, FireRed can't offer
+     * CHIKORITA (#152); it sends nothing */
+    Bench b;
+    uint8_t chikorita[GEN3_PARTY_SIZE];
+    tm_make(152, 5, 14, chikorita);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    set_gba_party(&b, NULL, chikorita);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    run(&b, 60);
+    ASSERT_TRUE(codes_are(b.g_blocks, b.n_g_blocks, NULL, 0));
+    ASSERT_TRUE(codes_are(b.f_blocks, b.n_f_blocks, NULL, 0));
+    ASSERT_EQ(fake_ruby_cant_trade(&b.ruby), FakeRubyCantTradeNational);
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuMessage);
+    fake_ruby_press_a(&b.ruby);
+    run(&b, 5);
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuBrowsing);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_gba_offers_non_kanto) {
+    /* With its own National Dex FireRed offers CHIKORITA: the Flipper's progressFlags 0x01
+     * (LinkPlayerBlock 0x20) say it has the National Dex too */
+    static const uint16_t aabb[] = {GEN3_TRADE_READY};
+    static const uint16_t dddd[] = {GEN3_TRADE_SET_MONS};
+    Bench b;
+    uint8_t chikorita[GEN3_PARTY_SIZE];
+    tm_make(152, 5, 14, chikorita);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, true);
+    set_gba_party(&b, NULL, chikorita);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 300));
+    ASSERT_EQ(fake_ruby_cant_trade(&b.ruby), FakeRubyCantTradeNone);
+    ASSERT_TRUE(codes_are(b.g_blocks, b.n_g_blocks, aabb, 1));
+    ASSERT_EQ(trade_block(b.g_blocks, b.n_g_blocks, 0)->arg, 2);
+    ASSERT_TRUE(codes_are(b.f_blocks, b.n_f_blocks, dddd, 1));
+    ASSERT_EQ(trade_block(b.f_blocks, b.n_f_blocks, 0)->arg, 0);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_gba_egg) {
+    /* An egg: with its own National Dex FireRed offers it and the club refuses it (DDEE);
+     * without, it is species 412 to FireRed, above 151, and FireRed sends nothing */
+    static const uint16_t aabb[] = {GEN3_TRADE_READY};
+    static const uint16_t ddee[] = {GEN3_TRADE_PLAYER_CANCEL};
+    uint8_t egg[GEN3_PARTY_SIZE];
+    tm_make_egg(egg);
+    {
+        Bench b;
+        bench_init_frlg(&b, GEN3_VERSION_FIRERED, true);
+        set_gba_party(&b, egg, NULL);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        fake_ruby_offer(&b.ruby, 1);
+        ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuMessage, 200));
+        ASSERT_EQ(fake_ruby_cant_trade(&b.ruby), FakeRubyCantTradeNone);
+        ASSERT_TRUE(codes_are(b.g_blocks, b.n_g_blocks, aabb, 1));
+        ASSERT_EQ(trade_block(b.g_blocks, b.n_g_blocks, 0)->arg, 1);
+        ASSERT_TRUE(codes_are(b.f_blocks, b.n_f_blocks, ddee, 1));
+        ASSERT_EQ(club_status(&b).refused, Gen3RefuseEgg);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+    {
+        Bench b;
+        bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+        set_gba_party(&b, egg, NULL);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        fake_ruby_offer(&b.ruby, 1);
+        run(&b, 60);
+        ASSERT_EQ(fake_ruby_cant_trade(&b.ruby), FakeRubyCantTradeNational);
+        ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuMessage);
+        ASSERT_TRUE(codes_are(b.g_blocks, b.n_g_blocks, NULL, 0));
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+}
+
+TEST(test_frlg_unfateful_mew_refused) {
+    /* §C3: FireRed refuses a Mew without the fateful-encounter bit, so the club never sits */
+    Bench b;
+    uint8_t m[GEN3_PARTY_SIZE];
+    make_m(m);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, true);
+    ASSERT_TRUE(bench_offer(&b, m));
+    ASSERT_TRUE(bench_to_room(&b));
+    const Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(st.has_offer);
+    ASSERT_EQ(st.offer_traits, Gen3OfferUnfateful);
+    ASSERT_TRUE(!st.offer_usable);
+    fake_ruby_sit(&b.ruby, 1);
+    run(&b, 900);
+    ASSERT_EQ(b.sent_cafe16, 0);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubySeated);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_unfateful_mew_bypass) {
+    /* The club's rule bypassed on purpose (traits that lie), to pin FireRed's own: on YES it
+     * finds the Flipper's Mew unfateful (fr: trade.c: CheckValidityOfTradeMons), sends no BBBB
+     * but BBCC 180 frames later, and the club's DDEE cancels the trade */
+    static const uint16_t g_codes[] = {GEN3_TRADE_READY, GEN3_TRADE_CONFIRM_NO};
+    static const uint16_t f_codes[] = {GEN3_TRADE_SET_MONS, GEN3_TRADE_PLAYER_CANCEL};
+    Bench b;
+    uint8_t m[GEN3_PARTY_SIZE];
+    make_m(m);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, true);
+    ASSERT_TRUE(gen3_club_set_offer_traits(&b.club, m, 0, 0));
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), m, GEN3_PARTY_SIZE);
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 300));
+    fake_ruby_answer(&b.ruby, true);
+    for(int i = 0; i < 10 && fake_ruby_menu_state(&b.ruby) == FakeRubyMenuPrompt; i++) step(&b);
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuStandby);
+    const uint32_t answered = b.bursts;
+    ASSERT_TRUE(fake_ruby_partner_mon_invalid(&b.ruby));
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuMessage, 400));
+    run(&b, 60);
+    ASSERT_TRUE(codes_are(b.g_blocks, b.n_g_blocks, g_codes, 2));
+    const uint32_t bbcc = trade_block(b.g_blocks, b.n_g_blocks, 1)->first_burst;
+    ASSERT_TRUE(bbcc - answered >= 180 && bbcc - answered <= 190);
+    ASSERT_TRUE(codes_are(b.f_blocks, b.n_f_blocks, f_codes, 2));
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuMessage);
+    const Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(!st.trade_pending);
+    ASSERT_EQ(st.menu, Gen3ClubMenuIdle);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_swap_delays) {
+    /* Ruby, then FireRed, then Ruby again in one session: the exchange delays follow the GBA
+     * linked now */
+    Bench b;
+    int64_t margin[GEN3_TRADE_ROUNDS];
+    uint8_t y[GEN3_PARTY_SIZE];
+    make_y(y);
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_offer(&b, y));
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(exchange_margins(&b, margin));
+    ASSERT_TRUE(margin[0] >= 11 && margin[0] <= 16);
+    fake_ruby_power_off(&b.ruby);
+    run(&b, 120);
+    ASSERT_EQ(club_status(&b).phase, Gen3ClubPhaseWaiting);
+
+    const Gen3LinkPlayer fr = bench_frlg_player(GEN3_VERSION_FIRERED);
+    bench_swap_gba(&b, &fr, false);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(exchange_margins(&b, margin));
+    ASSERT_TRUE(margin[0] >= 17);
+    for(int k = 1; k < GEN3_TRADE_ROUNDS; k++) ASSERT_TRUE(margin[k] >= 13);
+    fake_ruby_power_off(&b.ruby);
+    run(&b, 120);
+    ASSERT_EQ(club_status(&b).phase, Gen3ClubPhaseWaiting);
+
+    const Gen3LinkPlayer ruby = bench_ruby_player();
+    bench_swap_gba(&b, &ruby, false);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(exchange_margins(&b, margin));
+    ASSERT_TRUE(margin[0] >= 11 && margin[0] <= 16);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_late_sit) {
+    /* The late sit with FRLG: FireRed waits on its seat with no timeout (fr: cable_club.c:
+     * Task_EnterCableClubSeat case 2), and the club sits once the offer is usable */
+    Bench b;
+    uint8_t t[GEN3_PARTY_SIZE];
+    uint8_t y[GEN3_PARTY_SIZE];
+    make_t(t);
+    make_y(y);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+    ASSERT_TRUE(bench_offer(&b, t));
+    ASSERT_TRUE(bench_to_room(&b));
+    fake_ruby_sit(&b.ruby, 1);
+    run(&b, 300);
+    ASSERT_EQ(b.sent_cafe16, 0);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(st.gba_seated);
+    ASSERT_TRUE(!st.offer_usable);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubySeated);
+
+    ASSERT_TRUE(bench_offer(&b, y));
+    for(int i = 0; i < 200 && b.sent_cafe16 == 0; i++) step(&b);
+    ASSERT_EQ(b.sent_cafe16, 1);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyMenu, 200));
+    ASSERT_TRUE(run_until_browsing(&b, 600));
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), y, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_frlg_set_offer_unknown_traits) {
+    /* gen3_club_set_offer decrypts nothing: its offer's traits are unknown, which FRLG refuses
+     * even with the National Dex, and Ruby never does */
+    Bench b;
+    uint8_t y[GEN3_PARTY_SIZE];
+    make_y(y);
+    bench_init_frlg(&b, GEN3_VERSION_FIRERED, true);
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, y, 0));
+    ASSERT_TRUE(bench_to_room(&b));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.offer_traits, GEN3_OFFER_TRAITS_UNKNOWN);
+    ASSERT_TRUE(!st.offer_usable);
+    fake_ruby_sit(&b.ruby, 1);
+    run(&b, 600);
+    ASSERT_EQ(b.sent_cafe16, 0);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+
+    bench_init_trade(&b);
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, y, 0));
+    ASSERT_TRUE(bench_to_room(&b));
+    st = club_status(&b);
+    ASSERT_EQ(st.offer_traits, GEN3_OFFER_TRAITS_UNKNOWN);
+    ASSERT_TRUE(st.offer_usable);
+}
+
 int main(void) {
     if(!bulk_file_open()) return 1;
     RUN(test_frlg_claim_game);
@@ -487,5 +935,20 @@ int main(void) {
     RUN(test_frlg_room_and_leave);
     RUN(test_frlg_link_test);
     RUN(test_frlg_swap_cartridge);
+    RUN(test_frlg_exchange);
+    RUN(test_frlg_exchange_margins);
+    RUN(test_frlg_round1_delay_needed);
+    RUN(test_frlg_no_natdex_never_sits);
+    RUN(test_frlg_natdex_sits);
+    RUN(test_frlg_unusable_before_round1);
+    RUN(test_frlg_unusable_in_menu);
+    RUN(test_frlg_gba_cant_offer_non_kanto);
+    RUN(test_frlg_gba_offers_non_kanto);
+    RUN(test_frlg_gba_egg);
+    RUN(test_frlg_unfateful_mew_refused);
+    RUN(test_frlg_unfateful_mew_bypass);
+    RUN(test_frlg_swap_delays);
+    RUN(test_frlg_late_sit);
+    RUN(test_frlg_set_offer_unknown_traits);
     TEST_EXIT();
 }

@@ -31,7 +31,13 @@
  * - its own trainer card with the version byte at 0x38
  *   (fr: trainer_card.c: TrainerCard_GenerateCardForLinkPlayer), and the check of the version
  *   byte of the Flipper's (fr: cable_club.c: Task_LinkupAwaitTrainerCardData): "bad card" below,
- *   whose stars check holds in both modes.
+ *   whose stars check holds in both modes;
+ * - the trade menu's creation, with its wireless-only state 5 (one frame on a cable) before the
+ *   party exchange (fr: trade.c: CB2_CreateTradeMenu);
+ * - the party exchange's 11-frame delay before every round's request case, on this child too
+ *   (fr: trade.c: BufferTradeParties cases 2/6/10/14/18, §C4);
+ * - which of its own Pokemon it may offer (fr: trade.c: CanTradeSelectedMon) and, on YES, the
+ *   Flipper's (fr: trade.c: CheckValidityOfTradeMons): fake_ruby_offer, fake_ruby_answer.
  * The room, the seats, the walk-in, the 0x1111 re-establish and the 300-frame tasks are Ruby's,
  * as FRLG's are the same (§C5; fr: cable_club.c: Task_EnterCableClubSeat,
  * Task_WaitForLinkPlayerConnection, cartridge build). */
@@ -70,6 +76,18 @@ typedef enum {
     FakeRubyMenuMessage, /* state 8: canceled / friend wants to trade; needs A */
     FakeRubyMenuClosing, /* states 10-13 or 11-12: fading out to the trade or the room */
 } FakeRubyMenuState;
+
+/* Why fake_ruby_offer sent nothing. FRLG mode: fr: trade.c CANT_TRADE_* (CanTradeSelectedMon,
+ * the cartridge build, no BUGFIX). Ruby mode gives LastMon only (sub_80499F0
+ * [CheckValidityOfTradeMons]: no other battler). */
+typedef enum {
+    FakeRubyCantTradeNone,
+    FakeRubyCantTradeLastMon,
+    FakeRubyCantTradeNational,
+    FakeRubyCantTradeInvalidMon,
+    FakeRubyCantTradeEggYet,
+    FakeRubyCantTradePartnerEggYet,
+} FakeRubyCantTrade;
 
 /* Private state below; tests use the functions only. */
 
@@ -264,7 +282,9 @@ struct FakeRuby {
     uint8_t enemy_count; /* gEnemyPartyCount */
     uint8_t partner_mail[FAKE_RUBY_MAIL_SIZE]; /* gUnknown_02029700 [gLinkPartnerMail] */
     uint8_t partner_ribbons[FAKE_RUBY_RIBBONS]; /* unk_00b5 */
-    uint8_t xchg_case; /* its unk_0075 */
+    /* Highest species (internal, an egg as 412) in any Flipper party slot stored since init */
+    uint16_t max_enemy_species;
+    uint8_t xchg_case; /* its unk_0075 (FRLG: bufferPartyState) */
     uint32_t xchg_case_frame; /* frame the current case began */
     uint8_t send_copy; /* the round (1..5) whose case copy gBlockSendBuffer holds; 0 none */
     uint8_t requests; /* blocks begun by CCCC types 0/1/3/4 since OpenLink: the k-th is round k's */
@@ -292,6 +312,8 @@ struct FakeRuby {
     bool in_summary; /* callback2 is the summary screen; callback1 still reads the blocks */
     bool answer_pending; /* kept until the prompt is up */
     bool answer_yes;
+    FakeRubyCantTrade cant_trade; /* the latest offer's local refusal; None once one passes */
+    bool partner_mon_invalid; /* FRLG: the latest YES found the Flipper's Pokemon unfateful */
 
     /* Part B: the trade (§B4) and the link save (§B5), callback2 sub_804B41C .. sub_804DC88 */
     uint8_t cb2_state; /* gMain.state of the callback2 running (SetMainCallback2 zeroes it) */
@@ -408,6 +430,9 @@ const uint8_t* fake_ruby_party(const FakeRuby* g, uint8_t slot, bool saved);
 /* The Flipper's party from the latest exchange, slot 0..5; NULL for another slot. */
 const uint8_t* fake_ruby_enemy(const FakeRuby* g, uint8_t slot);
 uint8_t fake_ruby_enemy_count(const FakeRuby* g); /* CalculateEnemyPartyCount */
+/* The highest internal species (an egg counts as 412, SPECIES_EGG) in any Flipper party block
+ * this GBA stored (rounds 1-3) since init: every slot that decrypts with a species. 0 if none. */
+uint16_t fake_ruby_max_enemy_species(const FakeRuby* g);
 FakeRubyMenuState fake_ruby_menu_state(const FakeRuby* g);
 /* The main loop skips the next `frames` frames (a map load or flash write): LinkMain1, LinkMain2
  * and the game don't run, VBlank and the serial IRQs do, so the receive queue backs up. */
@@ -417,13 +442,27 @@ void fake_ruby_stall(FakeRuby* g, uint8_t frames);
  * the menu is running in the state named, except fake_ruby_answer, which waits for its prompt. */
 /* Browsing: select own party slot, TRADE (a slot past the party can't be selected). With no other
  * battle-able Pokemon (not an egg, HP > 0) nothing is sent: "That's your only POKéMON for
- * battle." (Message). */
+ * battle." (Message). FRLG mode instead (fr: trade.c: CanTradeSelectedMon, the cartridge build),
+ * in this order: without this save's National Dex, a species-or-egg above 151 (an Egg is 412) is
+ * National; with a Flipper not R/S whose progressFlagsCopy & 0x0F is 0, an Egg is
+ * PartnerEggYet and a species above 151 InvalidMon; its own Mew or Deoxys without the
+ * fateful-encounter bit is InvalidMon; no other Pokemon but eggs, HP not tested, is LastMon.
+ * Every refusal sends nothing and shows its message (Message; fake_ruby_cant_trade). */
 void fake_ruby_offer(FakeRuby* g, uint8_t slot);
+/* Why the latest fake_ruby_offer sent nothing; None after one that passed its checks (AABB), and
+ * from init. */
+FakeRubyCantTrade fake_ruby_cant_trade(const FakeRuby* g);
 /* Browsing: CANCEL, "Cancel trade?" YES: EEAA 5 frames later (QueueAction(5, 0)), Standby. */
 void fake_ruby_cancel_trade(FakeRuby* g);
 /* "Is this trade okay?": YES (BBBB) or NO (BBCC), applied once the prompt is up. Either is sent
- * only while gLinkCallback is NULL, as on Ruby; then Standby. */
+ * only while gLinkCallback is NULL, as on Ruby; then Standby. FRLG mode: YES with the Flipper's
+ * Pokemon (its DDDD slot) a Mew or Deoxys without the fateful-encounter bit sends no BBBB: "The
+ * other TRAINER's POKéMON can't be traded now.", and BBCC 180 frames later, unguarded
+ * (fr: trade.c: CommunicateWhetherMonCanBeTraded, CheckValidityOfTradeMons); Standby. */
 void fake_ruby_answer(FakeRuby* g, bool yes);
+/* FRLG mode: the latest YES found the Flipper's Pokemon a Mew or Deoxys without the
+ * fateful-encounter bit (PARTNER_MON_INVALID). False from init, and always in Ruby mode. */
+bool fake_ruby_partner_mon_invalid(const FakeRuby* g);
 /* Message: A, back to Browsing. */
 void fake_ruby_press_a(FakeRuby* g);
 /* Browsing: SUMMARY of a Pokemon (ShowPokemonSummaryScreen). callback1 still handles the

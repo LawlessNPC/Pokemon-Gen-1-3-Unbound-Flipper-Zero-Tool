@@ -171,19 +171,38 @@ static void send_own_player_block(Gen3Club* club, uint32_t link_type) {
 }
 
 /* The pending trade is over (D5): Done (sync 3) and Assumed (lost after the sync-2 answer) take
- * the GBA's Pokemon, which is then also the offer and the Pokemon the GBA is shown next (§B6.1).
- * Field to field, no local buffer (R2): 300 B. */
+ * the GBA's Pokemon, which is then also the offer, with the traits its AABB decrypt gave, and the
+ * Pokemon the GBA is shown next (§B6.1). Field to field, no local buffer (R2): 300 B. */
 static void end_trade(Gen3Club* club, Gen3TradeResult result) {
     if(result == Gen3TradeResultDone || result == Gen3TradeResultAssumed) {
         memcpy(club->received, club->pending_mon, sizeof(club->received));
         memcpy(club->party_mon, club->pending_mon, sizeof(club->party_mon));
         memcpy(club->offer, club->pending_mon, sizeof(club->offer));
         club->has_offer = true;
+        club->offer_traits = club->pending_traits;
         club->trades_done++;
     }
     club->trade_pending = false;
     club->save_window = false;
     club->last_result = result;
+}
+
+/* §B2.2, §C4: the party exchange's delays for the GBA of a 0x1122 LinkPlayerBlock, by its game,
+ * unless a test fixed them (delays_fixed). An FRLG GBA gets an FRLG master's. */
+static void set_round_delays_for(Gen3Club* club, uint16_t version) {
+    if(club->delays_fixed) return;
+    switch(gen3_link_game(version)) {
+    case Gen3LinkGameFRLG:
+        club->round1_delay = GEN3_CLUB_ROUND1_DELAY_BURSTS_FRLG;
+        club->round_delay = GEN3_CLUB_ROUND_DELAY_BURSTS_FRLG;
+        break;
+    case Gen3LinkGameRS:
+    case Gen3LinkGameE:
+    case Gen3LinkGameUnknown:
+        club->round1_delay = GEN3_CLUB_ROUND1_DELAY_BURSTS;
+        club->round_delay = GEN3_CLUB_ROUND_DELAY_BURSTS;
+        break;
+    }
 }
 
 /* The GBA's first block of a session is complete. The Flipper's own block goes out for every
@@ -199,6 +218,7 @@ static void on_player_block(Gen3Club* club) {
         /* Every parsed block, any link type, before the claim: the GBA linked now, so after a
          * cartridge swap its rules replace the old GBA's at its first block */
         gen3_partner_rules(&lp, &club->partner_rules);
+        if(lp.link_type == GEN3_LINKTYPE_TRADE_CONNECTING) set_round_delays_for(club, lp.version);
         if(club->trade_pending && lp.link_type != GEN3_LINKTYPE_TRADE_DISCONNECTED) {
             /* D3: the GBA restarted or came back from the counter: the trade never began on it */
             end_trade(club, Gen3TradeResultCanceled);
@@ -277,15 +297,26 @@ static void on_room_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     }
 }
 
-/* §B1.4 with R5: in a trade session with an offer, the Flipper sits as soon as the GBA sits, or
- * later once it has an offer and no edit is open (O1; the GBA polls GetCableClubPartnersReady
- * with no timeout). It never sits first, nor while leaving (D9: a 0x16 after its 0x17 would turn
- * its EXITING slot READY and start the trade menu), nor once left: left is sticky, and a GBA that
- * walks back in after End trade must not start a new trade in a session that is ending. One CAFE
- * 0016, then zero bursts only, so G's 5FFF isn't delayed (§B1.5). It stays READY if the GBA
- * stands up (§B1.4: legal). */
+/* The offer may be shown to this GBA: there is one, and the rules of the GBA whose block last
+ * parsed don't refuse its traits (§C3). Otherwise the club treats it as no offer: it doesn't sit,
+ * round 1 shows an empty party (R8), and the menu's view of it is stale. So no party block ever
+ * carries a Pokemon the partner's own game would refuse. R/S, Emerald and unknown games never
+ * refuse: there it is has_offer. Flash only, no decrypt: safe in the link ISR. */
+static bool offer_usable(const Gen3Club* club) {
+    return club->has_offer &&
+           gen3_partner_refuse(&club->partner_rules, club->offer_traits) == Gen3RefuseNone;
+}
+
+/* §B1.4 with R5: in a trade session with a usable offer (offer_usable), the Flipper sits as soon
+ * as the GBA sits, or later once its offer is usable and no edit is open (O1; the GBA polls
+ * GetCableClubPartnersReady with no timeout, as FRLG does: fr: cable_club.c:
+ * Task_EnterCableClubSeat). It never sits first, nor while leaving (D9: a 0x16 after its 0x17
+ * would turn its EXITING slot READY and start the trade menu), nor once left: left is sticky,
+ * and a GBA that walks back in after End trade must not start a new trade in a session that is
+ * ending. One CAFE 0016, then zero bursts only, so G's 5FFF isn't delayed (§B1.5). It stays READY
+ * if the GBA stands up (§B1.4: legal). */
 static void try_sit(Gen3Club* club) {
-    if(club->phase != Gen3ClubPhaseRoom || !club->cfg.trading || !club->has_offer ||
+    if(club->phase != Gen3ClubPhaseRoom || !club->cfg.trading || !offer_usable(club) ||
        !club->gba_seated || club->flipper_seated || club->editing || club->leaving || club->left) {
         return;
     }
@@ -343,19 +374,21 @@ static void on_exchange_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]
 }
 
 /* Round r: {CCCC, type} and the Flipper's block, 17 or 18 commands into an empty queue. Round 1
- * fixes the Pokemon the GBA is shown: the offer now, or zeros without one (R8). */
+ * fixes the Pokemon the GBA is shown: the offer now, or zeros without a usable one (R8,
+ * offer_usable). An empty partner column is legal for FRLG as for Ruby (fr: trade.c:
+ * CB2_CreateTradeMenu, SetActiveMenuOptions). */
 static void start_round(Gen3Club* club, uint8_t round) {
-    if(round == 1 && club->has_offer) {
-        memcpy(club->party_mon, club->offer, sizeof(club->party_mon));
-    } else if(round == 1) {
-        memset(club->party_mon, 0, sizeof(club->party_mon));
-    }
-    /* R8: Ruby counts the Flipper's party up to the first species 0. The offer has a species
-     * (it passed gen3_trade_offer_check); without one the GBA's partner column is empty. The
-     * hasSpecies bit is required too: conservative, Ruby counts by the species alone. */
     if(round == 1) {
-        club->party_shown = club->has_offer &&
-                            (club->party_mon[PKM_FLAGS_OFF] & PKM_HAS_SPECIES) != 0;
+        const bool usable = offer_usable(club);
+        if(usable) {
+            memcpy(club->party_mon, club->offer, sizeof(club->party_mon));
+        } else {
+            memset(club->party_mon, 0, sizeof(club->party_mon));
+        }
+        /* R8: Ruby counts the Flipper's party up to the first species 0. The offer has a species
+         * (it passed gen3_trade_offer_check); without one the GBA's partner column is empty. The
+         * hasSpecies bit is required too: conservative, Ruby counts by the species alone. */
+        club->party_shown = usable && (club->party_mon[PKM_FLAGS_OFF] & PKM_HAS_SPECIES) != 0;
     }
     gen3_trade_round_block(round, round == 1 ? club->party_mon : NULL, club->round_block);
     send_cmd(club, CMD_SEND_BLOCK_REQ, gen3_trade_round_request(round));
@@ -460,13 +493,16 @@ static void drop_stopped_block(Gen3Club* club) {
     }
 }
 
-/* D4 (O1, D9): the GBA's view of the Flipper's party is out of date. No offer, an offer other
- * than the one round 1 showed (party_mon), a checksum error counted in this 0x1122 session (a
- * block of the GBA's may be wrong in the club's copy), the app is editing, or a leave is asked.
- * Then every GBA block gets EEBB, never DDDD or CCDD (save safety, §B3.4), and with nothing
- * pending the GBA gets an unsolicited one. A 100-byte compare, no copy (R2). */
+/* D4 (O1, D9): the GBA's view of the Flipper's party is out of date. No usable offer
+ * (offer_usable), an offer other than the one round 1 showed (party_mon), a checksum error
+ * counted in this 0x1122 session (a block of the GBA's may be wrong in the club's copy), the app
+ * is editing, or a leave is asked or done (leaving, left). After left, a menu can still come from
+ * a trade pending when the GBA was taken as gone, finished by a late relink: its post-save menu
+ * must not start another trade. Then every GBA block gets EEBB, never DDDD or CCDD (save safety,
+ * §B3.4), and with nothing pending the GBA gets an unsolicited one. A 100-byte compare, no copy
+ * (R2). */
 static bool offer_stale(const Gen3Club* club) {
-    return !club->has_offer || club->tainted || club->editing || club->leaving ||
+    return !offer_usable(club) || club->tainted || club->editing || club->leaving || club->left ||
            memcmp(club->offer, club->party_mon, sizeof(club->offer)) != 0;
 }
 
@@ -495,6 +531,8 @@ static uint16_t menu_reply(Gen3Club* club) {
             club->menu = Gen3ClubMenuIdle;
             return GEN3_TRADE_PLAYER_CANCEL;
         }
+        /* The traits it will have as the offer once traded, from the scratch just decrypted */
+        club->pending_traits = gen3_offer_traits(&club->scratch);
         club->gba_slot = (uint8_t)slot;
         club->menu = Gen3ClubMenuOffered;
         return GEN3_TRADE_SET_MONS;
@@ -805,9 +843,15 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->left = club->left;
     out->relinking = club->relink_due;
     out->partner_rules = club->partner_rules;
+    out->offer_traits = club->offer_traits;
+    out->offer_usable = offer_usable(club);
 }
 
-bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {
+bool gen3_club_set_offer_traits(
+    Gen3Club* club,
+    const uint8_t* game,
+    uint32_t trades_seen,
+    uint8_t traits) {
     if(trades_seen != club->trades_done) return false;
     if(game) {
         memcpy(club->offer, game, sizeof(club->offer));
@@ -815,7 +859,12 @@ bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_se
         memset(club->offer, 0, sizeof(club->offer));
     }
     club->has_offer = game != NULL;
+    club->offer_traits = game ? traits : 0;
     return true;
+}
+
+bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {
+    return gen3_club_set_offer_traits(club, game, trades_seen, GEN3_OFFER_TRAITS_UNKNOWN);
 }
 
 bool gen3_club_set_editing(Gen3Club* club, bool on, uint32_t trades_seen) {
@@ -842,6 +891,7 @@ void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts) {
 void gen3_club_set_round_delays(Gen3Club* club, uint8_t first, uint8_t later) {
     club->round1_delay = first;
     club->round_delay = later;
+    club->delays_fixed = true;
 }
 
 void gen3_club_gba_mon(const Gen3Club* club, uint8_t slot, uint8_t out[GEN3_PARTY_SIZE]) {

@@ -132,12 +132,19 @@ static inline void bench_init(Bench* b, uint32_t ruby_link_type) {
     bench_init_cfg(b, ruby_link_type, &club_cfg);
 }
 
-/* The Flipper offers mon (game form), as the app would: gen3_club_set_offer with the club's
- * trades_done. */
+/* The Flipper offers mon (game form; NULL clears the offer), as the app does: its traits
+ * computed outside the club (gen3_offer_traits; GEN3_OFFER_TRAITS_UNKNOWN if it doesn't
+ * decrypt), then gen3_club_set_offer_traits with the club's trades_done. */
 static inline bool bench_offer(Bench* b, const uint8_t mon[GEN3_PARTY_SIZE]) {
     Gen3ClubStatus st;
+    Gen3Pkm p;
+    uint8_t traits = 0;
     gen3_club_status(&b->club, &st);
-    return gen3_club_set_offer(&b->club, mon, st.trades_done);
+    if(mon) {
+        traits = gen3_pkm_decrypt(mon, GEN3_PARTY_SIZE, &p) ? gen3_offer_traits(&p) :
+                                                              GEN3_OFFER_TRAITS_UNKNOWN;
+    }
+    return gen3_club_set_offer_traits(&b->club, mon, st.trades_done, traits);
 }
 
 /* bench_init(b, 0x1133) as a trade session (club_cfg_trade) offering tm_make(252, 5, 21). The

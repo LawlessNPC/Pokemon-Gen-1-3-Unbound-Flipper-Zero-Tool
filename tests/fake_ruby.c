@@ -64,6 +64,10 @@
 #define MENU_ENEMIES   6 /* CalculateEnemyPartyCount, the party icons */
 #define MENU_BUILD     7 /* states 7-21: held items, names, HP bars, the fade-in */
 #define MENU_RUNNING   22 /* gMain.callback1 = sub_80494D8 [CB1_UpdateLink] */
+/* FRLG mode only, no Ruby state: fr: trade.c: CB2_CreateTradeMenu case 5, between its case 4
+ * (MENU_EXCHANGE) and BufferTradeParties, waits for a wireless link; on a cable it passes in one
+ * frame */
+#define MENU_FRLG_WIRELESS 23
 #define MENU_DELAY_MAX 11 /* state 2 leaves once ++unk_00b4 > 11 */
 #define MENU_BUILD_FRAMES 32 /* state 6 up to callback1 (states 6-21 and the fade-in) */
 #define XCHG_STALL_FRAMES 600 /* test limit: a sub_8048D44 wait case has no timeout on Ruby */
@@ -182,8 +186,19 @@
 #define PROGRESS_NATIONAL_DEX  0x01 /* IsNationalPokedexEnabled() */
 #define PROGRESS_CAN_LINK_RS   0x10 /* FLAG_SYS_CAN_LINK_WITH_RS */
 #define PROGRESS_CLEARED_GAME  0xF0 /* the bits fr: trade.c: GetGameProgressForLinkTrade tests */
+/* the bits of a partner's progressFlagsCopy fr: trade.c: CanTradeSelectedMon tests */
+#define PROGRESS_PARTNER_NATIONAL_DEX 0x0F
 /* fr: include/trainer_card.h: struct TrainerCard.version, after its TrainerCardRSE (0x00..0x37) */
 #define CARD_VERSION 0x38
+/* fr: include/constants/species.h, internal numbers (Ruby's are the same) */
+#define SPECIES_MEW    151 /* KANTO_SPECIES_END */
+#define SPECIES_DEOXYS 410
+#define SPECIES_EGG    412 /* MON_DATA_SPECIES_OR_EGG of an egg */
+/* fr: trade.c: BufferTradeParties delay cases 2/6/10/14/18 leave once ++timer > 10 */
+#define FRLG_XCHG_DELAY_MAX 10
+/* fr: trade.c: CommunicateWhetherMonCanBeTraded, PARTNER_MON_INVALID:
+ * QueueAction(180, QUEUE_SEND_DATA) */
+#define FRLG_REFUSE_SEND_DELAY 180
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -1007,11 +1022,24 @@ static void xchg_copy(FakeRuby* g, uint8_t round) {
     g->send_copy = round;
 }
 
+/* max_enemy_species, for one stored Flipper slot: one that doesn't decrypt, or has species 0,
+ * doesn't count. */
+static void note_enemy_species(FakeRuby* g, const uint8_t* mon) {
+    Gen3Pkm p;
+    if(!gen3_pkm_decrypt(mon, GEN3_PARTY_SIZE, &p)) return;
+    uint16_t species = (uint16_t)gen3_pkm_get(&p, Gen3FieldSpecies);
+    if(species == 0) return;
+    if(gen3_pkm_get(&p, Gen3FieldIsEgg) != 0) species = SPECIES_EGG;
+    if(species > g->max_enemy_species) g->max_enemy_species = species;
+}
+
 /* Cases 3/6/9/12/15: the Flipper's block (slot mpId ^ 1 = 0) into round r's place. */
 static void xchg_store(FakeRuby* g, uint8_t round) {
     const uint8_t* src = g->block_recv_buffer[0];
     if(round <= 3) {
         memcpy(g->enemy[2 * (round - 1)], src, 2 * GEN3_PARTY_SIZE);
+        note_enemy_species(g, g->enemy[2 * (round - 1)]);
+        note_enemy_species(g, g->enemy[2 * (round - 1) + 1]);
     } else if(round == 4) {
         memcpy(g->partner_mail, src, sizeof(g->partner_mail));
     } else {
@@ -1055,6 +1083,59 @@ static bool buffer_trade_parties(FakeRuby* g) {
         xchg_next(g);
         return false;
     default: /* 16: the Shedinja nickname fix (not modelled) */
+        return true;
+    }
+    if(g->frame - g->xchg_case_frame >= XCHG_STALL_FRAMES) set_error(g, "exchange stalled");
+    return false;
+}
+
+/* FRLG mode: fr: trade.c: BufferTradeParties (bufferPartyState), one case per frame; true at case
+ * 21. Ruby's copy, wait and reset cases renumbered, and before each round's request case a delay
+ * case that holds this child too: ++timer > 10, so 11 frames, with no id == 0 test (§C4). The
+ * request cases are the master's (SendBlockRequest), so this child just advances. The wait cases
+ * keep Ruby's rules: case 1's reset makes the round-1 deadlock, and one that lasts
+ * XCHG_STALL_FRAMES is the black screen ("exchange stalled"). */
+static bool frlg_buffer_trade_parties(FakeRuby* g) {
+    const uint8_t c = g->xchg_case;
+    switch(c) {
+    case 0: /* round r = c / 4 + 1 into gBlockSendBuffer */
+    case 5:
+    case 9:
+    case 13:
+    case 17:
+        xchg_copy(g, (uint8_t)(c / 4 + 1));
+        xchg_next(g);
+        return false;
+    case 1: /* IsLinkTaskFinished, then ResetBlockReceivedFlags if any flag is set */
+        if(g->callback != FakeRubyCbNone) break;
+        g->block_received = 0;
+        xchg_next(g);
+        return false;
+    case 2: /* the delay before round c / 4 + 1's request */
+    case 6:
+    case 10:
+    case 14:
+    case 18:
+        if(g->frame - g->xchg_case_frame > FRLG_XCHG_DELAY_MAX) xchg_next(g);
+        return false;
+    case 3: /* if (id == 0) SendBlockRequest: the master's; this child just advances */
+    case 7:
+    case 11:
+    case 15:
+    case 19:
+        xchg_next(g);
+        return false;
+    case 4: /* round r = c / 4: the Flipper's block and our own echo */
+    case 8:
+    case 12:
+    case 16:
+    case 20:
+        if(g->block_received != 0x3) break;
+        xchg_store(g, (uint8_t)(c / 4));
+        g->block_received = 0;
+        xchg_next(g);
+        return false;
+    default: /* 21: the Shedinja nickname fix (not modelled) */
         return true;
     }
     if(g->frame - g->xchg_case_frame >= XCHG_STALL_FRAMES) set_error(g, "exchange stalled");
@@ -1183,17 +1264,70 @@ static bool can_battle(const uint8_t* mon) {
     return gen3_pkm_get(&p, Gen3FieldIsEgg) == 0 && gen3_pkm_get(&p, Gen3FieldHp) != 0;
 }
 
+/* FRLG mode: fr: pokemon.c: GetMonData MON_DATA_SPECIES_OR_EGG, SPECIES_EGG for an egg, else the
+ * species. A slot that fails its checksum reads as an egg: FRLG flags a Bad Egg as one. */
+static uint16_t species_or_egg(const uint8_t* mon) {
+    Gen3Pkm p;
+    if(!gen3_pkm_decrypt(mon, GEN3_PARTY_SIZE, &p)) return SPECIES_EGG;
+    const uint16_t species = (uint16_t)gen3_pkm_get(&p, Gen3FieldSpecies);
+    return species != 0 && gen3_pkm_get(&p, Gen3FieldIsEgg) != 0 ? SPECIES_EGG : species;
+}
+
+/* FRLG mode: a Mew or Deoxys (internal species) whose fateful-encounter bit is 0
+ * (MON_DATA_MODERN_FATEFUL_ENCOUNTER, fr: trade.c: CanTradeSelectedMon,
+ * CheckValidityOfTradeMons). */
+static bool unfateful(const uint8_t* mon) {
+    Gen3Pkm p;
+    if(!gen3_pkm_decrypt(mon, GEN3_PARTY_SIZE, &p)) return false;
+    const uint32_t species = gen3_pkm_get(&p, Gen3FieldSpecies);
+    return (species == SPECIES_MEW || species == SPECIES_DEOXYS) &&
+           gen3_pkm_get(&p, Gen3FieldFateful) == 0;
+}
+
+/* FRLG mode: fr: trade.c: CanTradeSelectedMon on own slot `slot` of `count`, the cartridge build
+ * (no BUGFIX). This save's National Dex is its own progressFlags bit 0
+ * (fake_ruby_set_frlg_progress); the Flipper's is its progressFlagsCopy, read raw from its
+ * LinkPlayer as this GBA converted it (frlg_convert_link_player). */
+static FakeRubyCantTrade frlg_can_trade(const FakeRuby* g, uint8_t slot, uint8_t count) {
+    const uint16_t selected = species_or_egg(g->party[slot]);
+    if((g->me.name[LP_PROGRESS_FLAGS] & PROGRESS_NATIONAL_DEX) == 0) {
+        if(selected > SPECIES_MEW) return FakeRubyCantTradeNational; /* an Egg (412) too */
+        if(selected == 0) return FakeRubyCantTradeEggYet; /* meant for SPECIES_EGG */
+    }
+    const Gen3LinkPlayer* partner = &g->link_players[0]; /* gLinkPlayers[GetMultiplayerId() ^ 1] */
+    if(!is_rs_version(partner->version) &&
+       (partner->name[LP_PROGRESS_FLAGS_COPY] & PROGRESS_PARTNER_NATIONAL_DEX) == 0) {
+        if(selected == SPECIES_EGG) return FakeRubyCantTradePartnerEggYet;
+        if(selected > SPECIES_MEW) return FakeRubyCantTradeInvalidMon;
+    }
+    if(unfateful(g->party[slot])) return FakeRubyCantTradeInvalidMon;
+    /* numMonsLeft: the other slots' species, an egg as none. No HP test, unlike Ruby's */
+    for(uint8_t i = 0; i < count; i++) {
+        const uint16_t species = species_or_egg(g->party[i]);
+        if(i != slot && species != 0 && species != SPECIES_EGG) return FakeRubyCantTradeNone;
+    }
+    return FakeRubyCantTradeLastMon;
+}
+
 /* sub_8049860 [CB_ProcessSelectedMonInput] TRADE on own slot: sub_80499F0
- * [CheckValidityOfTradeMons] wants another battler, then sub_8049620 [SetReadyToTrade]. */
+ * [CheckValidityOfTradeMons] wants another battler, then sub_8049620 [SetReadyToTrade]. FRLG
+ * mode: frlg_can_trade instead (fr: trade.c: CB_ProcessSelectedMonInput); a refusal queues its
+ * message and waits for A (CB_HandleTradeCanceled), as Ruby's does. */
 static void trade_select(FakeRuby* g, uint8_t slot) {
     const uint8_t count = own_party_count(g);
     if(slot >= count) return; /* sub_8048C70: the cursor can't reach an empty slot */
     g->cursor = slot;
-    bool other = false;
-    for(uint8_t i = 0; i < count; i++) {
-        if(i != slot && can_battle(g->party[i])) other = true;
+    if(g->frlg) {
+        g->cant_trade = frlg_can_trade(g, slot, count);
+    } else {
+        bool other = false;
+        for(uint8_t i = 0; i < count; i++) {
+            if(i != slot && can_battle(g->party[i])) other = true;
+        }
+        /* "That's your only POKéMON for battle." */
+        g->cant_trade = other ? FakeRubyCantTradeNone : FakeRubyCantTradeLastMon;
     }
-    if(!other) { /* "That's your only POKéMON for battle." */
+    if(g->cant_trade != FakeRubyCantTradeNone) {
         set_trade_state(g, TRADE_MESSAGE);
         return;
     }
@@ -1215,9 +1349,24 @@ static void trade_request_cancel(FakeRuby* g) {
 
 /* sub_8049AC0 [CB_ProcessConfirmTradeInput]: YES (sub_8049A20) or NO, each sent only while
  * IsLinkTaskFinished, else this GBA waits in Link standby forever (§B3.4). sub_8049A20's own BBCC
- * (no battler left) can't happen: trade_select already checked this GBA's other slots. */
+ * (no battler left) can't happen: trade_select already checked this GBA's other slots.
+ * FRLG mode, YES: fr: trade.c: CommunicateWhetherMonCanBeTraded. CheckValidityOfTradeMons tests
+ * the Flipper's Pokemon first (PARTNER_MON_INVALID): then no BBBB, but its message and BBCC 180
+ * frames later, queued with no IsLinkTaskFinished guard, and CB_IDLE (Standby). Its own-side
+ * PLAYER_MON_INVALID (no other live Pokemon, by HP: frlg_can_trade counts by species) isn't
+ * modelled: it too sends BBCC 180 frames later, which the Flipper answers with the same DDEE. */
 static void trade_answer(FakeRuby* g, bool yes) {
     const bool link_idle = g->callback == FakeRubyCbNone;
+    if(yes && g->frlg) {
+        g->partner_mon_invalid = unfateful(g->enemy[g->partner_pos % FAKE_RUBY_PARTY]);
+        if(g->partner_mon_invalid) { /* "The other TRAINER's POKéMON can't be traded now." */
+            g->link_data[0] = CODE_CONFIRM_NO;
+            g->send_queued = true;
+            g->send_delay = FRLG_REFUSE_SEND_DELAY;
+            set_trade_state(g, TRADE_STANDBY);
+            return;
+        }
+    }
     if(yes) {
         g->link_data[0] = CODE_CONFIRM;
         if(link_idle) trade_send_data(g);
@@ -1459,11 +1608,17 @@ static void run_create_menu(FakeRuby* g) {
             set_error(g, "link type"); /* Ruby: state 4 never passes, a silent hang (§B8) */
             break;
         }
-        g->menu_state = MENU_PARTIES; /* CalculatePlayerPartyCount */
+        /* CalculatePlayerPartyCount; FRLG mode: fr: trade.c: CB2_CreateTradeMenu case 5 first */
+        g->menu_state = g->frlg ? MENU_FRLG_WIRELESS : MENU_PARTIES;
+        break;
+    case MENU_FRLG_WIRELESS: /* fr: trade.c: CB2_CreateTradeMenu case 5, !gWirelessCommType */
+        g->menu_state = MENU_PARTIES;
         break;
     case MENU_PARTIES:
         /* then sub_804AF84 [SaveTradeGiftRibbons], not modelled */
-        if(buffer_trade_parties(g)) g->menu_state = MENU_ENEMIES;
+        if(g->frlg ? frlg_buffer_trade_parties(g) : buffer_trade_parties(g)) {
+            g->menu_state = MENU_ENEMIES;
+        }
         break;
     case MENU_ENEMIES:
         calculate_enemy_party_count(g);
@@ -2107,6 +2262,10 @@ uint8_t fake_ruby_enemy_count(const FakeRuby* g) {
     return g->enemy_count;
 }
 
+uint16_t fake_ruby_max_enemy_species(const FakeRuby* g) {
+    return g->max_enemy_species;
+}
+
 FakeRubyMenuState fake_ruby_menu_state(const FakeRuby* g) {
     if(g->phase != FakeRubyMenu) return FakeRubyMenuNone;
     return g->in_summary ? FakeRubyMenuSummary : g->menu;
@@ -2127,6 +2286,10 @@ void fake_ruby_offer(FakeRuby* g, uint8_t slot) {
     g->offer_slot = slot;
 }
 
+FakeRubyCantTrade fake_ruby_cant_trade(const FakeRuby* g) {
+    return g->cant_trade;
+}
+
 void fake_ruby_cancel_trade(FakeRuby* g) {
     if(trade_menu_running(g)) g->cancel_pending = true;
 }
@@ -2135,6 +2298,10 @@ void fake_ruby_answer(FakeRuby* g, bool yes) {
     if(!trade_menu_running(g)) return;
     g->answer_pending = true;
     g->answer_yes = yes;
+}
+
+bool fake_ruby_partner_mon_invalid(const FakeRuby* g) {
+    return g->partner_mon_invalid;
 }
 
 void fake_ruby_press_a(FakeRuby* g) {
