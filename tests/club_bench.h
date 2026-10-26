@@ -6,8 +6,10 @@
 #include <string.h>
 
 #include "fake_ruby.h"
+#include "trade_mons.h"
 #include <src/gen3/gen3_block.h>
 #include <src/gen3/gen3_club.h>
+#include <src/gen3/gen3_link.h>
 #include <src/gen3/gen3_text.h>
 
 /* Test bench shared by the club and trade tests: the Flipper (club) and fake Ruby wired back to
@@ -15,6 +17,8 @@
 
 static const Gen3ClubConfig club_cfg =
     {.name = "FLIPPER", .tid = 22222, .sid = 0, .gender = 0, .trading = false};
+static const Gen3ClubConfig club_cfg_trade =
+    {.name = "FLIPPER", .tid = 22222, .sid = 0, .gender = 0, .trading = true};
 
 #define BENCH_BLOCKS 96 /* f_blocks, g_blocks */
 #define BENCH_CCCC   32 /* f_cccc, f_cccc_burst */
@@ -50,9 +54,10 @@ typedef struct {
     uint32_t g_cafe_seen; /* bit k: the GBA sent CAFE k (k < 32) */
     uint32_t sent_cafe16; /* Flipper CAFE 0016 count */
     uint32_t f_cafe16_burst, g_cafe16_burst; /* latest CAFE 0016 burst per side */
+    bool muted; /* bench_mute */
 } Bench;
 
-static inline void bench_init(Bench* b, uint32_t ruby_link_type) {
+static inline void bench_init_cfg(Bench* b, uint32_t ruby_link_type, const Gen3ClubConfig* cfg) {
     memset(b, 0, sizeof(*b));
     b->me.version = GEN3_VERSION_RUBY;
     b->me.trainer_id = (54321u << 16) | 12345u;
@@ -60,8 +65,30 @@ static inline void bench_init(Bench* b, uint32_t ruby_link_type) {
     b->me.gender = 0;
     b->me.link_type = ruby_link_type;
     b->me.language = GEN3_LANGUAGE_ENGLISH;
-    gen3_club_init(&b->club, &club_cfg);
+    gen3_club_init(&b->club, cfg);
     fake_ruby_init(&b->ruby, &b->me);
+}
+
+/* A Link Test session (trading false). */
+static inline void bench_init(Bench* b, uint32_t ruby_link_type) {
+    bench_init_cfg(b, ruby_link_type, &club_cfg);
+}
+
+/* The Flipper offers mon (game form), as the app would: gen3_club_set_offer with the club's
+ * trades_done. */
+static inline bool bench_offer(Bench* b, const uint8_t mon[GEN3_PARTY_SIZE]) {
+    Gen3ClubStatus st;
+    gen3_club_status(&b->club, &st);
+    return gen3_club_set_offer(&b->club, mon, st.trades_done);
+}
+
+/* bench_init(b, 0x1133) as a trade session (club_cfg_trade) offering tm_make(252, 5, 21). The
+ * test's main must have called bulk_file_open. */
+static inline void bench_init_trade(Bench* b) {
+    uint8_t mon[GEN3_PARTY_SIZE];
+    bench_init_cfg(b, GEN3_LINKTYPE_TRADE_SETUP, &club_cfg_trade);
+    tm_make(252, 5, 21, mon);
+    bench_offer(b, mon);
 }
 
 /* The GBA restarts (or its player is back at the counter) and links again; same club. */
@@ -146,8 +173,20 @@ static inline void bench_record(Bench* b, const MlinkTx* tx) {
     }
 }
 
+/* While muted, step() doesn't call the club: the fake gets frames without transfers (a stalled
+ * master). b->rx keeps the answer to the club's last tx for when it runs again. */
+static inline void bench_mute(Bench* b, bool muted) {
+    b->muted = muted;
+}
+
 static inline void step(Bench* b) {
     MlinkTx tx;
+    if(b->muted) {
+        MlinkRx none;
+        memset(&tx, 0, sizeof(tx));
+        fake_ruby_frame(&b->ruby, &tx, &none);
+        return;
+    }
     gen3_club_frame(&b->club, b->started ? &b->rx : NULL, &tx);
     b->started = true;
     count_sent(b, &tx);
@@ -201,6 +240,37 @@ static inline bool reach_room(Bench* b) {
     bench_init(b, GEN3_LINKTYPE_TRADE_SETUP);
     fake_ruby_open_link(&b->ruby);
     return run_until_room(b, 400) && fake_ruby_error(&b->ruby) == NULL;
+}
+
+/* As reach_room, on a bench already initialised (no re-init). */
+static inline bool bench_to_room(Bench* b) {
+    fake_ruby_open_link(&b->ruby);
+    return run_until_room(b, 420) && fake_ruby_error(&b->ruby) == NULL;
+}
+
+/* For `frames` frames a fresh Gen3Link is the master instead of the club: it handshakes, and on
+ * Connected queues {2222, 1133} and lp's LinkPlayerBlock once, then idles. The club doesn't run,
+ * so it is out of step with the wire afterwards. */
+static inline void bench_raw_relink(Bench* b, const Gen3LinkPlayer* lp, uint32_t frames) {
+    static const uint16_t req[GEN3_CMD_LEN] = {0x2222, GEN3_LINKTYPE_TRADE_SETUP};
+    uint8_t block[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    Gen3Link link;
+    bool sent = false;
+    gen3_link_player_block_build(lp, block);
+    gen3_link_init(&link);
+    for(uint32_t i = 0; i < frames; i++) {
+        MlinkTx tx;
+        uint16_t cmd[GEN3_CMD_LEN];
+        /* b->rx answers the club's last tx: a fresh link starts without it */
+        if(i > 0 && gen3_link_rx(&link, &b->rx, cmd) == Gen3LinkEventConnected && !sent) {
+            gen3_link_send(&link, req);
+            gen3_block_send(&link, block, sizeof(block), 0);
+            sent = true;
+        }
+        gen3_link_tx(&link, &tx);
+        fake_ruby_frame(&b->ruby, &tx, &b->rx);
+        bench_record(b, &tx);
+    }
 }
 
 /* The GBA player walks out of the room (§B7); the club must go through Closing to Waiting. */

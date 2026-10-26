@@ -60,6 +60,7 @@ TEST(test_club_other_room) {
     Gen3ClubStatus st = club_status(&b);
     ASSERT_EQ(st.last_error, Gen3ClubErrorOtherRoom);
     ASSERT_TRUE(!st.partner_valid);
+    ASSERT_EQ(st.link_type, 0x2233);
     ASSERT_EQ(b.sent_5fff, 0);
 
     run(&b, 400);
@@ -67,9 +68,118 @@ TEST(test_club_other_room) {
     ASSERT_EQ(b.sent_cccc, 0);
     ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    /* D2: any other room gets a 0x1133 block */
+    ASSERT_EQ(fake_ruby_partner(&b.ruby)->link_type, GEN3_LINKTYPE_TRADE_SETUP);
     st = club_status(&b);
     ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
     ASSERT_EQ(st.last_error, Gen3ClubErrorOtherRoom);
+}
+
+TEST(test_club_link_test_refuses_trade_types) {
+    /* D2: a Link Test (trading false) answers every Part B link type with a 0x1133 block, so the
+     * GBA stalls before anything happens, and stops with Error/Unexpected. */
+    static const uint32_t types[] = {
+        GEN3_LINKTYPE_TRADE, GEN3_LINKTYPE_TRADE_CONNECTING, GEN3_LINKTYPE_TRADE_DISCONNECTED};
+    for(size_t i = 0; i < sizeof(types) / sizeof(types[0]); i++) {
+        Bench b;
+        bench_init(&b, types[i]);
+        fake_ruby_open_link(&b.ruby);
+        ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 400));
+        Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.last_error, Gen3ClubErrorUnexpected);
+        ASSERT_EQ(st.link_type, types[i]);
+        ASSERT_TRUE(!st.partner_valid);
+        ASSERT_TRUE(!st.trainer_valid);
+        run(&b, 400);
+        ASSERT_EQ(b.sent_5fff, 1);
+        ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        ASSERT_EQ(fake_ruby_partner(&b.ruby)->link_type, GEN3_LINKTYPE_TRADE_SETUP);
+        ASSERT_EQ(club_status(&b).last_error, Gen3ClubErrorUnexpected);
+    }
+}
+
+/* A raw GBA (slot 1) on the club's wire, for a block the fake never sends: it answers the
+ * handshake, then puts its next queued command (or zeros) in each burst, with the previous
+ * burst's checksum in transfer #1 (§A2). The club's blocks are logged as on the bench. */
+typedef struct {
+    Gen3Club club;
+    MlinkRx rx;
+    bool started;
+    uint16_t sum; /* this burst's checksum, sent in the next burst's transfer #1 */
+    uint16_t cmds[8][GEN3_CMD_LEN];
+    uint8_t n_cmds, next_cmd;
+    uint32_t bursts;
+    Gen3BlockRx f_rx;
+    uint32_t f_rx_first;
+    BenchBlock f_blocks[4];
+    uint8_t n_f_blocks;
+} RawGba;
+
+static void raw_gba_step(RawGba* r) {
+    MlinkTx tx;
+    gen3_club_frame(&r->club, r->started ? &r->rx : NULL, &tx);
+    r->started = true;
+    memset(&r->rx, 0, sizeof(r->rx));
+    r->rx.count = tx.count;
+    if(tx.count != MLINK_BURST_LEN) {
+        r->rx.word[0] = GEN3_SLAVE_HANDSHAKE;
+        return;
+    }
+    r->rx.word[0] = r->sum;
+    if(r->next_cmd < r->n_cmds) {
+        memcpy(&r->rx.word[1], r->cmds[r->next_cmd++], sizeof(r->cmds[0]));
+    }
+    uint16_t sum = 0;
+    for(int i = 1; i < MLINK_BURST_LEN; i++) sum = (uint16_t)(sum + tx.word[i] + r->rx.word[i]);
+    r->sum = sum;
+    bench_parse(&r->f_rx, &r->f_rx_first, r->f_blocks, &r->n_f_blocks, &tx.word[1], ++r->bursts);
+}
+
+TEST(test_club_bad_magic_still_replies) {
+    /* The GBA's LinkPlayerBlock fails the magic check: the Flipper still sends its own block, so
+     * the GBA (which checks the Flipper's magic, not its own) never waits for one. */
+    static RawGba r;
+    Gen3LinkPlayer gba;
+    Gen3LinkPlayer flipper;
+    uint8_t block[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    memset(&r, 0, sizeof(r));
+    gen3_club_init(&r.club, &club_cfg);
+    memset(&gba, 0, sizeof(gba));
+    gba.version = GEN3_VERSION_RUBY;
+    gba.trainer_id = 12345;
+    gen3_text_encode("RUBY", gba.name, sizeof(gba.name), 7);
+    gba.link_type = GEN3_LINKTYPE_TRADE_SETUP;
+    gba.language = GEN3_LANGUAGE_ENGLISH;
+    gen3_link_player_block_build(&gba, block);
+    block[0x2C + 4] ^= 0x20; /* "GameFreak" -> "Gamefreak" in magic2 */
+    r.cmds[0][0] = GEN3_CMD_INIT_BLOCK;
+    r.cmds[0][1] = GEN3_LINK_PLAYER_BLOCK_SIZE;
+    r.cmds[0][2] = 0x81;
+    for(uint8_t c = 0; c < 5; c++) {
+        r.cmds[1 + c][0] = GEN3_CMD_CONT_BLOCK;
+        for(int w = 0; w < 7; w++) {
+            size_t off = (size_t)c * GEN3_BLOCK_CHUNK_BYTES + 2 * w;
+            uint16_t lo = off < sizeof(block) ? block[off] : 0;
+            uint16_t hi = off + 1 < sizeof(block) ? block[off + 1] : 0;
+            r.cmds[1 + c][1 + w] = (uint16_t)(lo | (hi << 8));
+        }
+    }
+    r.n_cmds = 6;
+
+    for(int i = 0; i < 40; i++) raw_gba_step(&r);
+    Gen3ClubStatus st;
+    gen3_club_status(&r.club, &st);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseError);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorBadPlayerBlock);
+    ASSERT_TRUE(!st.partner_valid);
+    ASSERT_EQ(st.link.checksum_errors, 0);
+    ASSERT_EQ(r.n_f_blocks, 1);
+    ASSERT_EQ(r.f_blocks[0].size, GEN3_LINK_PLAYER_BLOCK_SIZE);
+    ASSERT_TRUE(gen3_link_player_block_parse(r.f_rx.data, &flipper));
+    ASSERT_EQ(flipper.link_type, GEN3_LINKTYPE_TRADE_SETUP);
+    ASSERT_EQ(flipper.trainer_id, 22222);
+    ASSERT_EQ(gen3_link_queued(&r.club.link), 0);
 }
 
 TEST(test_club_card_delay_needed) {
@@ -319,8 +429,8 @@ TEST(test_club_own_block_after_gba) {
 
     ASSERT_TRUE(run_until_room(&b, 400));
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
-    ASSERT_TRUE(b.n_g_blocks >= 1);
-    ASSERT_EQ(b.n_f_blocks, 2); /* LinkPlayerBlock, trainer card */
+    ASSERT_EQ(b.n_g_blocks, 2); /* LinkPlayerBlock, trainer card */
+    ASSERT_EQ(b.n_f_blocks, 2);
     const BenchBlock* g_lp = &b.g_blocks[0];
     const BenchBlock* f_lp = &b.f_blocks[0];
     ASSERT_EQ(g_lp->size, GEN3_LINK_PLAYER_BLOCK_SIZE);
@@ -437,6 +547,8 @@ int main(void) {
     RUN(test_club_reaches_cards);
     RUN(test_club_gba_not_ready);
     RUN(test_club_other_room);
+    RUN(test_club_link_test_refuses_trade_types);
+    RUN(test_club_bad_magic_still_replies);
     RUN(test_club_card_delay_needed);
     RUN(test_club_room_idle);
     RUN(test_club_answers_2ffe_once);

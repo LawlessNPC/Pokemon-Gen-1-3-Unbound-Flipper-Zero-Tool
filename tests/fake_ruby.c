@@ -42,10 +42,24 @@
 #define WALK_IN_FRAMES         30 /* zero-command frames between the cards and 0x2FFE */
 #define STANDBY_TIMEOUT_FRAMES 600 /* test limit; Ruby itself waits forever */
 /* Script pacing in game updates; the player's reading time, not protocol values. */
-#define PROMPT_UPDATES    60 /* "Terminate the link?" until the player picks YES */
-#define TERMINATE_UPDATES 60 /* "Terminating the link..." until ExitLinkRoom */
-#define EXIT_FADE_UPDATES 30 /* FadeScreen and music fade-out before SetCloseLinkCallback */
-#define CORRUPT_BIT       0x0001
+#define PROMPT_UPDATES     60 /* "Terminate the link?" until the player picks YES */
+#define TERMINATE_UPDATES  60 /* "Terminating the link..." until ExitLinkRoom */
+#define EXIT_FADE_UPDATES  30 /* FadeScreen and music fade-out before SetCloseLinkCallback */
+#define SEAT_PRINT_UPDATES 30 /* "Please wait..." prints (sub_80839DC cases 0-1) */
+#define CORRUPT_BIT        0x0001
+
+/* Part B (docs/gen3/link-protocol-trade.md §B1) */
+#define START_FADE_FRAMES 17 /* sub_8083AAC case 1: FadeScreen(1, 0) */
+#define WAIT_LINK_FRAMES  300 /* sub_8083C50 [Task_WaitForLinkPlayerConnection] */
+#define SAVED_PLAYERS     2 /* sub_800820C [GetSavedPlayerCount], saved at the Part A linkup */
+/* sub_8047EC0 [CB2_CreateTradeMenu] gMain.state values */
+#define MENU_SETUP     0 /* graphics and windows, ResetTasks */
+#define MENU_OPEN      1 /* gLinkType = 0x1122, OpenLink, the 300-frame task */
+#define MENU_DELAY     2 /* unk_00b4 counts 12 frames */
+#define MENU_PLAYERS   3 /* child: GetLinkPlayerCount_2() >= sub_800820C() */
+#define MENU_EXCHANGE  4 /* gReceivedRemoteLinkPlayers && IsLinkPlayerDataExchangeComplete */
+#define MENU_PARTIES   5 /* sub_8048D44 [BufferTradeParties] (§B2) */
+#define MENU_DELAY_MAX 11 /* state 2 leaves once ++unk_00b4 > 11 */
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -175,9 +189,10 @@ static void serial_irq(FakeRuby* g, uint16_t master_word, uint16_t own_word) {
     } else if(g->state == FakeRubyLinkHandshake) {
         if(do_handshake(g, slots)) {
             /* Child: straight to CONN_ESTABLISHED; send/recv indexes are still 0, so the
-             * next transfer is burst #1's checksum slot. */
+             * next transfer is burst #1's checksum slot. Only the counter's link
+             * (fake_ruby_open_link) is a linkup phase; Part B relinks keep theirs. */
             g->state = FakeRubyLinkConnected;
-            g->phase = FakeRubyLinkup;
+            if(g->phase == FakeRubyHandshake) g->phase = FakeRubyLinkup;
         }
     }
     g->irq_counter++;
@@ -284,7 +299,18 @@ static void receive_link_player(FakeRuby* g, uint8_t slot) {
     for(uint8_t i = 0; i < g->player_count && i < FAKE_RUBY_PLAYERS; i++) {
         pending += g->link_player_pending[i];
     }
-    if(pending == 0) g->received_link_players = true;
+    if(pending == 0 && !g->received_link_players) {
+        g->received_link_players = true;
+        g->relink_frames = g->frame - g->open_frame;
+    }
+}
+
+/* IsLinkPlayerDataExchangeComplete: every linkType equals slot 0's. */
+static bool link_types_match(const FakeRuby* g) {
+    for(int i = 1; i < FAKE_RUBY_PLAYERS; i++) {
+        if(g->link_players[i].link_type != g->link_players[0].link_type) return false;
+    }
+    return true;
 }
 
 static void cont_block(FakeRuby* g, uint8_t slot, const uint16_t* cmd) {
@@ -473,15 +499,33 @@ static void start_leave_script(FakeRuby* g, FakeRubyScript script, uint16_t upda
     g->phase = FakeRubyLeaving;
 }
 
+/* sub_8055808: the seat's coord-event script takes over the local player (§B1.1). Its
+ * `special sub_8083B5C` starts the seat task when the script runs, later in this update. */
+static void start_seat_script(FakeRuby* g, uint8_t seat) {
+    g->key_cb = FakeRubyKeyDeferToEventScript;
+    g->controls_locked = true;
+    g->script = FakeRubyScriptSeat;
+    g->seat = seat;
+    g->on_seat = true;
+    g->phase = FakeRubySeated;
+}
+
 /* sub_8054FF8 [HandleLinkPlayerKeyInput], per slot per game update. While anyone is
  * EXITING_ROOM, an IDLE player is made BUSY and that update's key is dropped (early return), so
  * only a player that is already not IDLE takes 0x17. A partner's 0x17 processed in the update
- * right after our own echoed 0x17 is lost, and we then wait forever for all EXITING_ROOM. */
-static void handle_link_player_key(FakeRuby* g, uint8_t slot, uint16_t key) {
+ * right after our own echoed 0x17 is lost, and we then wait forever for all EXITING_ROOM.
+ * seat_step: this GBA's player finished a step onto a seat in this update (movement mode 2). */
+static void handle_link_player_key(FakeRuby* g, uint8_t slot, uint16_t key, bool seat_step) {
     bool local = slot == LOCAL_ID;
     uint8_t* state = &g->link_state[slot];
     if(*state == PLAYER_IDLE) {
-        /* No coord-event script (sub_8055648): no avatar ever takes a step in this model. */
+        /* sub_8055648 [TryGetTileEventScript]: only the local avatar ever steps in this model,
+         * and only onto a seat. Every GBA makes the slot BUSY; the local one runs the script. */
+        if(local && seat_step) {
+            *state = PLAYER_BUSY;
+            start_seat_script(g, g->sit_seat);
+            return;
+        }
         if(any_player_in(g, PLAYER_EXITING)) {
             *state = PLAYER_BUSY;
             if(local) start_leave_script(g, FakeRubyScriptTerminate, TERMINATE_UPDATES);
@@ -522,8 +566,9 @@ static void handle_link_player_key(FakeRuby* g, uint8_t slot, uint16_t key) {
     }
 }
 
-/* gUnknown_03000584: this GBA's next key code, after every player's key was handled. */
-static uint16_t key_intercept(FakeRuby* g) {
+/* gUnknown_03000584: this GBA's next key code, after every player's key was handled. b_new:
+ * JOY_NEW(B_BUTTON) in this update. */
+static uint16_t key_intercept(FakeRuby* g, bool b_new) {
     switch(g->key_cb) {
     case FakeRubyKeySelfIdle:
         /* 0x1B/0x1C flow control needs a queue above 4; one burst per frame keeps both <= 1. */
@@ -538,7 +583,23 @@ static uint16_t key_intercept(FakeRuby* g) {
             g->key_cb = FakeRubyKeySendNothing;
         }
         return KEY_CODE_EMPTY;
-    case FakeRubyKeyDeferToEventScript: /* controls stay locked: see start_leave_script */
+    case FakeRubyKeyDeferToEventScript:
+        /* The exit scripts never unlock before ExitLinkRoom replaces this (start_leave_script);
+         * the seat script does when it ends after a cancel. */
+        if(g->controls_locked) return KEY_CODE_EMPTY;
+        g->key_cb = FakeRubyKeyIdle;
+        return KEY_CODE_IDLE;
+    case FakeRubyKeySetReady:
+        g->key_cb = FakeRubyKeyReady;
+        return KEY_CODE_READY;
+    case FakeRubyKeyReady:
+        if(g->link_state[LOCAL_ID] == PLAYER_READY && b_new) {
+            g->key_cb = FakeRubyKeyExitingSeat;
+            return KEY_CODE_EXIT_SEAT;
+        }
+        return KEY_CODE_EMPTY;
+    case FakeRubyKeyExitingSeat:
+    case FakeRubyKeyIdle:
     case FakeRubyKeySendNothing:
         return KEY_CODE_EMPTY;
     }
@@ -574,18 +635,175 @@ static void run_room_script(FakeRuby* g) {
             g->script = FakeRubyScriptExitWait;
         }
         break;
+    case FakeRubyScriptSeat: /* special sub_8083B5C -> sub_8083A84: the seat task, then waitstate */
+        g->seat_task = FakeRubySeatPrint;
+        g->seat_updates = SEAT_PRINT_UPDATES;
+        g->script = FakeRubyScriptSeatWait;
+        break;
+    case FakeRubyScriptSeatWait:
+        break;
+    case FakeRubyScriptSeatEnd: /* ScriptContext_RunScript: the script ended */
+        g->controls_locked = false;
+        g->script = FakeRubyScriptNone;
+        break;
+    }
+}
+
+/* sub_80554F8 [GetCableClubPartnersReady] (§B1.3): 0 wait, 1 everyone ready, 2 cancel. */
+static int partners_ready(const FakeRuby* g) {
+    uint8_t own = g->link_state[LOCAL_ID];
+    if(any_player_in(g, PLAYER_EXITING)) return 2;
+    if(g->key_cb == FakeRubyKeyReady && own != PLAYER_READY) return 0;
+    if(g->key_cb == FakeRubyKeyExitingSeat && own == PLAYER_BUSY) return 2;
+    return all_players_in(g, PLAYER_READY) ? 1 : 0;
+}
+
+/* sub_80839DC [Task_EnterCableClubSeat], in callback2's RunTasks after the script (§B1.1). */
+static void run_seat_task(FakeRuby* g) {
+    switch(g->seat_task) {
+    case FakeRubySeatNone:
+        break;
+    case FakeRubySeatPrint: /* case 0 ShowFieldMessage; case 1 once IsFieldMessageBoxHidden */
+        if(--g->seat_updates > 0) break;
+        g->key_cb = FakeRubyKeySetReady; /* sub_8055574 [SetInCableClubSeat] */
+        g->me.id = g->seat; /* sub_8007270: localLinkPlayer.id, sent from the next relink on */
+        g->seat_task = FakeRubySeatWait;
+        break;
+    case FakeRubySeatWait: /* case 2, no timeout */
+        switch(partners_ready(g)) {
+        case 1: /* HideFieldMessageBox; follow-up sub_8083B44 starts sub_8083AAC */
+            g->seat_task = FakeRubySeatNone;
+            g->start_case = 0;
+            next_task(g, FakeRubyTaskStartTrade);
+            break;
+        case 2:
+            g->seat_task = FakeRubySeatCancel;
+            break;
+        default:
+            break;
+        }
+        break;
+    case FakeRubySeatCancel: /* case 3: sub_8055588 [SetLinkWaitingForScript], ScriptContext_Enable */
+        g->key_cb = FakeRubyKeyDeferToEventScript;
+        g->script = FakeRubyScriptSeatEnd;
+        g->seat_task = FakeRubySeatNone;
+        g->phase = FakeRubyRoom;
+        break;
     }
 }
 
 /* One game update in the room: callback1 (sub_8055354 [CB1_OverworldLink]: every player's key
- * in lockstep, own echo included, then sub_8055280 keeps 0x11..0x1D), then callback2. */
+ * in lockstep, own echo included, then sub_8055280 keeps 0x11..0x1D), then callback2 (the script,
+ * then the tasks). fake_ruby_sit and fake_ruby_stand_up take effect in this update. */
 static void room_update(FakeRuby* g) {
+    const bool seat_step = g->sit_pending && !g->on_seat;
+    const bool b_new = g->b_press;
+    g->sit_pending = false;
+    g->b_press = false;
     for(uint8_t i = 0; i < FAKE_RUBY_PLAYERS; i++) {
-        handle_link_player_key(g, i, g->held_keys[i]);
+        handle_link_player_key(g, i, g->held_keys[i], seat_step);
     }
-    uint16_t key = key_intercept(g);
+    uint16_t key = key_intercept(g, b_new);
     g->held_key_to_send = (key >= KEY_CODE_EMPTY && key < KEY_CODE_END) ? key : KEY_CODE_EMPTY;
     run_room_script(g);
+    run_seat_task(g);
+}
+
+/* OpenLink (link.c): ResetSerial, InitLink (EnableSerial, gSendCmd = 0xEFFF filler),
+ * gLinkCallback = LinkCB_RequestPlayerDataExchange, the handshake trigger task. */
+static void open_link(FakeRuby* g) {
+    enable_serial(g);
+    for(int i = 0; i < FAKE_RUBY_CMD_LEN; i++) g->send_cmd[i] = CMD_NONE;
+    g->link_open = true;
+    g->callback = FakeRubyCbRequestPlayerData;
+    g->block_send_active = false;
+    g->block_received = 0;
+    g->received_link_players = false;
+    memset(g->link_players, 0, sizeof(g->link_players));
+    memset(g->block_recv_size, 0, sizeof(g->block_recv_size));
+    memset(g->block_recv_pos, 0, sizeof(g->block_recv_pos));
+    memset(g->ready_close, 0, sizeof(g->ready_close));
+    memset(g->ready_standby, 0, sizeof(g->ready_standby));
+    for(int i = 0; i < FAKE_RUBY_PLAYERS; i++) g->link_player_pending[i] = true;
+    g->trigger_active = true; /* CreateTask(Task_TriggerHandshake) */
+    g->trigger_runs = 0;
+    g->open_frame = g->frame;
+    g->relink_frames = UINT32_MAX;
+}
+
+/* sub_8083AAC [Task_StartWiredTrade] (§B1.5): from the seat to the trade menu. */
+static void run_start_trade(FakeRuby* g) {
+    switch(g->start_case) {
+    case 0: /* LockPlayerFieldControls, FadeScreen(1, 0), ClearLinkCallback_2: no more CAFE and
+               no more lockstep skipping */
+        g->controls_locked = true;
+        g->callback = FakeRubyCbNone;
+        g->task_frame = g->frame;
+        g->start_case = 1;
+        break;
+    case 1:
+        if(g->frame - g->task_frame >= START_FADE_FRAMES) g->start_case = 2;
+        break;
+    case 2: /* m4aMPlayAllStop, SetCloseLinkCallback: it acts only while gLinkCallback is NULL */
+        if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbReadyCloseLink;
+        g->start_case = 3;
+        break;
+    case 3: /* CloseLink cleared gReceivedRemoteLinkPlayers */
+        if(!g->received_link_players) next_task(g, FakeRubyTaskStartMenu); /* SetMainCallback2 */
+        break;
+    default:
+        break;
+    }
+}
+
+/* sub_8047EC0 [CB2_CreateTradeMenu] states 0-5 (§B1.6). */
+static void run_create_menu(FakeRuby* g) {
+    switch(g->menu_state) {
+    case MENU_SETUP:
+        g->menu_state = MENU_OPEN;
+        break;
+    case MENU_OPEN:
+        g->me.link_type = GEN3_LINKTYPE_TRADE_CONNECTING; /* gLinkType; InitLocalLinkPlayer */
+        open_link(g);
+        g->wait_task = true; /* CreateTask(sub_8083C50): it runs this frame */
+        g->wait_count = 0;
+        g->menu_count = 0;
+        g->menu_state = MENU_DELAY;
+        g->phase = FakeRubyMenu;
+        break;
+    case MENU_DELAY:
+        if(++g->menu_count > MENU_DELAY_MAX) {
+            g->menu_count = 0;
+            g->menu_state = MENU_PLAYERS;
+        }
+        break;
+    case MENU_PLAYERS: /* the child's branch */
+        if(g->player_count >= SAVED_PLAYERS) g->menu_state = MENU_EXCHANGE;
+        break;
+    case MENU_EXCHANGE:
+        if(!g->received_link_players) break;
+        if(!link_types_match(g)) {
+            set_error(g, "link type"); /* Ruby: state 4 never passes, a silent hang (§B8) */
+            break;
+        }
+        g->menu_state = MENU_PARTIES; /* CalculatePlayerPartyCount */
+        break;
+    default: /* MENU_PARTIES: the party exchange */
+        break;
+    }
+}
+
+/* sub_8083C50 [Task_WaitForLinkPlayerConnection]: CloseLink and CB2_LinkError unless both
+ * LinkPlayers are in within 300 frames of OpenLink. */
+static void run_wait_task(FakeRuby* g) {
+    if(!g->wait_task) return;
+    if(++g->wait_count > WAIT_LINK_FRAMES) {
+        g->wait_task = false;
+        close_link(g);
+        set_error(g, "link timeout");
+        return;
+    }
+    if(g->received_link_players) g->wait_task = false;
 }
 
 /* cable_club.c (child side of the Trade Center linkup) and the counter script. */
@@ -599,7 +817,7 @@ static void run_linkup_task(FakeRuby* g) {
     case FakeRubyTaskExchange:
         if(!g->received_link_players) break;
         /* GetLinkPlayerDataExchangeStatusTimed: every linkType must equal slot 0's. */
-        if(g->link_players[0].link_type != g->link_players[1].link_type) {
+        if(!link_types_match(g)) {
             if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbReadyCloseLink;
             next_task(g, FakeRubyTaskStop);
             break;
@@ -646,15 +864,35 @@ static void run_linkup_task(FakeRuby* g) {
         break;
     case FakeRubyTaskStop:
         break;
+    case FakeRubyTaskStartTrade:
+        run_start_trade(g);
+        break;
+    case FakeRubyTaskStartMenu: /* sub_8047CD8: SetMainCallback2(sub_8047EC0) */
+        g->menu_state = MENU_SETUP;
+        next_task(g, FakeRubyTaskCreateMenu);
+        break;
+    case FakeRubyTaskCreateMenu:
+        run_create_menu(g);
+        break;
     }
 }
 
+/* Part B's callbacks and tasks count frames between CloseLink and OpenLink too. */
+static bool runs_while_closed(FakeRubyTask task) {
+    return task == FakeRubyTaskStartTrade || task == FakeRubyTaskStartMenu ||
+           task == FakeRubyTaskCreateMenu;
+}
+
+/* Callback2's own step (it may OpenLink), then RunTasks: the timeout and the handshake trigger,
+ * so a trigger created this frame runs this frame (§B1.6: OpenLink at c+3, HANDSHAKE at c+8). */
 static void run_tasks(FakeRuby* g) {
+    if(g->link_open || runs_while_closed(g->task)) run_linkup_task(g);
+    if(g->error) return;
+    run_wait_task(g);
     if(g->trigger_active && ++g->trigger_runs == TRIGGER_HANDSHAKE_RUNS) {
         g->should_advance = true;
         g->trigger_active = false;
     }
-    if(g->link_open) run_linkup_task(g);
 }
 
 static void main_loop(FakeRuby* g) {
@@ -676,26 +914,12 @@ void fake_ruby_init(FakeRuby* g, const Gen3LinkPlayer* me) {
     g->powered = true;
     g->phase = FakeRubyOff;
     g->state = FakeRubyLinkStart1; /* link closed: serial off */
+    g->relink_frames = UINT32_MAX;
 }
 
 void fake_ruby_open_link(FakeRuby* g) {
     if(!g->powered || g->error) return;
-    /* OpenLink: ResetSerial, InitLink (EnableSerial, gSendCmd = 0xEFFF filler) */
-    enable_serial(g);
-    for(int i = 0; i < FAKE_RUBY_CMD_LEN; i++) g->send_cmd[i] = CMD_NONE;
-    g->link_open = true;
-    g->callback = FakeRubyCbRequestPlayerData;
-    g->block_send_active = false;
-    g->block_received = 0;
-    g->received_link_players = false;
-    memset(g->link_players, 0, sizeof(g->link_players));
-    memset(g->block_recv_size, 0, sizeof(g->block_recv_size));
-    memset(g->block_recv_pos, 0, sizeof(g->block_recv_pos));
-    memset(g->ready_close, 0, sizeof(g->ready_close));
-    memset(g->ready_standby, 0, sizeof(g->ready_standby));
-    for(int i = 0; i < FAKE_RUBY_PLAYERS; i++) g->link_player_pending[i] = true;
-    g->trigger_active = true; /* CreateTask(Task_TriggerHandshake) */
-    g->trigger_runs = 0;
+    open_link(g);
     g->card_ready = false;
     next_task(g, FakeRubyTaskExchange);
     g->phase = FakeRubyHandshake;
@@ -713,6 +937,23 @@ void fake_ruby_leave_room(FakeRuby* g) {
     if(g->phase != FakeRubyRoom || g->error) return;
     g->facing_exit = true; /* SelfIdle now sends 0x12 until the prompt takes over */
     g->phase = FakeRubyLeaving;
+}
+
+void fake_ruby_sit(FakeRuby* g, uint8_t seat) {
+    g->sit_pending = true;
+    g->sit_seat = seat;
+}
+
+void fake_ruby_stand_up(FakeRuby* g) {
+    g->b_press = true;
+}
+
+uint8_t fake_ruby_link_state(const FakeRuby* g, uint8_t slot) {
+    return slot < FAKE_RUBY_PLAYERS ? g->link_state[slot] : 0;
+}
+
+uint32_t fake_ruby_relink_frames(const FakeRuby* g) {
+    return g->relink_frames;
 }
 
 void fake_ruby_corrupt_next(FakeRuby* g) {

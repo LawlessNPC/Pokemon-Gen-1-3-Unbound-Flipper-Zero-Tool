@@ -10,7 +10,11 @@
 #define CMD_SEND_HELD_KEYS     0xCAFE
 #define CMD_SEND_BLOCK_REQ     0xCCCC
 
+/* Room key codes (§A7, §B1.2) */
+#define KEY_CODE_READY     0x16
 #define KEY_CODE_EXIT_ROOM 0x17
+#define KEY_CODE_IDLE      0x1A
+#define KEY_CODE_EXIT_SEAT 0x1D
 
 #define BLOCK_REQ_TRAINER_CARD 2
 #define FLIPPER_MULTIPLAYER_ID 0 /* slot 0: block headers carry 0x80 */
@@ -37,7 +41,8 @@ static void set_error(Gen3Club* club, Gen3ClubError error) {
     club->last_error = error;
 }
 
-/* Per link session. The trainer (and the config) outlive it. */
+/* Per link session, so the seats are per room session. The trainer, the config and the trade
+ * context (D3) outlive it. */
 static void reset_session(Gen3Club* club) {
     gen3_block_rx_reset(&club->block_rx);
     club->partner_valid = false;
@@ -47,6 +52,8 @@ static void reset_session(Gen3Club* club) {
     club->close_answered = false;
     club->exit_answer_due = false;
     club->idle_bursts = 0;
+    club->gba_seated = false;
+    club->flipper_seated = false;
 }
 
 void gen3_club_claim_game(
@@ -87,17 +94,17 @@ static void on_connected(Gen3Club* club) {
     send_cmd(club, CMD_SEND_LINK_TYPE, GEN3_LINKTYPE_TRADE_SETUP);
 }
 
-/* D2: the Flipper's block carries the GBA's link type in a trade session (§B1.6: a mismatch
- * hangs the GBA silently), else 0x1133. */
-static uint32_t own_link_type(uint32_t gba_link_type) {
-    switch(gba_link_type) {
-    case GEN3_LINKTYPE_TRADE:
-    case GEN3_LINKTYPE_TRADE_CONNECTING:
-    case GEN3_LINKTYPE_TRADE_DISCONNECTED:
-        return gba_link_type;
-    default:
-        return GEN3_LINKTYPE_TRADE_SETUP;
-    }
+/* D2: the Flipper's block carries the GBA's link type only where the club follows the GBA there
+ * (§B1.6: a mismatch hangs the GBA silently, before anything is written). Otherwise 0x1133: a
+ * Link Test never trades, and the 0x1144 and 0x1111 relinks come with Tasks 6 and 7. */
+static uint32_t own_link_type(const Gen3Club* club, uint32_t gba_link_type) {
+    if(club->cfg.trading && gba_link_type == GEN3_LINKTYPE_TRADE_CONNECTING) return gba_link_type;
+    return GEN3_LINKTYPE_TRADE_SETUP;
+}
+
+static bool is_trade_link_type(uint32_t link_type) {
+    return link_type == GEN3_LINKTYPE_TRADE || link_type == GEN3_LINKTYPE_TRADE_CONNECTING ||
+           link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED;
 }
 
 /* §A6 "Optional" (D2): the Flipper's LinkPlayerBlock follows the GBA's. Six commands; nothing
@@ -114,8 +121,9 @@ static void send_own_player_block(Gen3Club* club, uint32_t link_type) {
         FLIPPER_MULTIPLAYER_ID);
 }
 
-/* The GBA's LinkPlayerBlock is complete. Whatever it holds, the Flipper's own block goes out, so
- * the GBA never waits forever for one. */
+/* The GBA's first block of a session is complete. The Flipper's own block goes out for every
+ * completed block, whatever it holds, so the GBA never waits forever for one. A bad block header
+ * (Gen3BlockRxBad) sends no block. */
 static void on_player_block(Gen3Club* club) {
     Gen3LinkPlayer lp;
     uint32_t own_type = GEN3_LINKTYPE_TRADE_SETUP;
@@ -125,13 +133,20 @@ static void on_player_block(Gen3Club* club) {
     } else {
         club->partner = lp;
         club->link_type = lp.link_type;
-        own_type = own_link_type(lp.link_type);
+        own_type = own_link_type(club, lp.link_type);
         if(lp.link_type == GEN3_LINKTYPE_TRADE_SETUP) {
             club->partner_valid = true;
             club->trainer = lp; /* the GBA's player, kept across relinks */
             club->trainer_valid = true;
             club->phase = Gen3ClubPhasePlayers;
             club->idle_bursts = 0;
+        } else if(own_type == GEN3_LINKTYPE_TRADE_CONNECTING) {
+            /* §B1.6: the trade menu. The party exchange starts after both blocks (Task 4). */
+            club->partner_valid = true;
+            club->phase = Gen3ClubPhaseExchange;
+        } else if(is_trade_link_type(lp.link_type)) {
+            /* A Cable Club trade type the club doesn't follow: the 0x1133 block stalls the GBA. */
+            set_error(club, Gen3ClubErrorUnexpected);
         } else {
             /* At a 0x1133 linkup the GBA reports "different selections" and sends 5FFF (§A6). */
             set_error(club, Gen3ClubErrorOtherRoom);
@@ -153,9 +168,35 @@ static void on_room_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     }
     if(cmd[0] == CMD_READY_EXIT_STANDBY) {
         send_cmd(club, CMD_READY_EXIT_STANDBY, 0);
-    } else if(cmd[0] == CMD_SEND_HELD_KEYS && cmd[1] == KEY_CODE_EXIT_ROOM) {
-        club->exit_answer_due = true;
+    } else if(cmd[0] == CMD_SEND_HELD_KEYS) {
+        switch(cmd[1]) {
+        case KEY_CODE_EXIT_ROOM:
+            club->exit_answer_due = true;
+            break;
+        case KEY_CODE_READY: /* §B1.2: the GBA sat down */
+            club->gba_seated = true;
+            break;
+        case KEY_CODE_EXIT_SEAT: /* B on "Please wait..." */
+        case KEY_CODE_IDLE: /* its seat script ended */
+            club->gba_seated = false;
+            break;
+        default:
+            break;
+        }
     }
+}
+
+/* §B1.4 with R5: in a trade session with an offer, the Flipper sits as soon as the GBA sits, or
+ * later once it has an offer (the GBA polls GetCableClubPartnersReady with no timeout). It never
+ * sits first. One CAFE 0016, then zero bursts only, so G's 5FFF isn't delayed (§B1.5). It stays
+ * READY if the GBA stands up (§B1.4: legal). */
+static void try_sit(Gen3Club* club) {
+    if(club->phase != Gen3ClubPhaseRoom || !club->cfg.trading || !club->has_offer ||
+       !club->gba_seated || club->flipper_seated) {
+        return;
+    }
+    send_cmd(club, CMD_SEND_HELD_KEYS, KEY_CODE_READY);
+    club->flipper_seated = true;
 }
 
 static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
@@ -198,7 +239,8 @@ static void on_command(Gen3Club* club, const uint16_t cmd[GEN3_CMD_LEN]) {
     case Gen3ClubPhaseRoom:
         on_room_command(club, cmd);
         break;
-    default: /* Closing: keep bursting until the GBA closes (Disconnected) */
+    default: /* Exchange: idle until Task 4's rounds. Closing: keep bursting until the GBA closes
+                (Disconnected). */
         break;
     }
 }
@@ -247,6 +289,7 @@ void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx) {
     }
     if(club->phase == Gen3ClubPhaseRoom) club->room_frames++;
     request_cards(club);
+    try_sit(club);
     gen3_link_tx(&club->link, tx);
 }
 
@@ -262,6 +305,21 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out) {
     out->link_type = club->link_type;
     out->trainer_valid = club->trainer_valid;
     out->trainer = club->trainer;
+    out->has_offer = club->has_offer;
+    out->gba_seated = club->gba_seated;
+    out->flipper_seated = club->flipper_seated;
+    out->trades_done = club->trades_done;
+}
+
+bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen) {
+    if(trades_seen != club->trades_done) return false;
+    if(game) {
+        memcpy(club->offer, game, sizeof(club->offer));
+    } else {
+        memset(club->offer, 0, sizeof(club->offer));
+    }
+    club->has_offer = game != NULL;
+    return true;
 }
 
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts) {

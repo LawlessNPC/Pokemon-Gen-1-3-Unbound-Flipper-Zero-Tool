@@ -6,10 +6,12 @@
 #include <src/gen3/gen3_link.h>
 #include <src/gen3/gen3_block.h>
 #include <src/gen3/gen3_link_player.h>
+#include <src/gen3/gen3_pkm.h>
 
 /* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
- * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7). Pure C, no heap; gen3_club_frame runs in
- * the link frame ISR. */
+ * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down and the
+ * relink for the trade menu (docs/gen3/link-protocol-trade.md §B1). Pure C, no heap;
+ * gen3_club_frame runs in the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
 
@@ -56,6 +58,10 @@ typedef struct {
     uint32_t link_type; /* the GBA's link type this session; 0 until its LinkPlayerBlock arrives */
     bool trainer_valid; /* trainer: the GBA's LinkPlayer from the last 0x1133 linkup, kept across */
     Gen3LinkPlayer trainer; /* disconnects and relinks */
+    bool has_offer;
+    bool gba_seated; /* this room session: the GBA sent CAFE 0016 and hasn't sent 001D/001A since */
+    bool flipper_seated; /* this room session: the Flipper sent CAFE 0016 */
+    uint32_t trades_done; /* finalized trades since init; stays 0 until Task 6 */
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -83,6 +89,13 @@ struct Gen3Club {
     uint8_t idle_bursts;
     uint32_t frames;
     uint32_t room_frames;
+    /* Room seats, per room session (§B1.3, §B1.4) */
+    bool gba_seated;
+    bool flipper_seated;
+    /* Trade context: survives relinks (D3) */
+    uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
+    bool has_offer;
+    uint32_t trades_done;
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
@@ -91,7 +104,8 @@ struct Gen3Club {
  * gender 0/1, id 0, language GEN3_LANGUAGE_ENGLISH, card gen3_trainer_card_build (§A5). lp_field_2
  * is GEN3_LP_NATIONAL_DEX only for GEN3_LINKTYPE_TRADE_DISCONNECTED with national_dex set, else 0.
  * partner (the GBA's LinkPlayer of this session) is unused until plan 4 claims FireRed/LeafGreen
- * for an FRLG partner (§C1, §C2). Pure: safe in the link ISR. */
+ * for an FRLG partner (§C1, §C2). partner may be zeroed (bad block) or unaccepted (other type);
+ * plan 4's FRLG choice must default to Ruby then. Pure: safe in the link ISR. */
 void gen3_club_claim_game(
     const Gen3ClubConfig* cfg,
     const Gen3LinkPlayer* partner,
@@ -104,5 +118,9 @@ void gen3_club_init(Gen3Club* club, const Gen3ClubConfig* cfg);
 /* One call per frame from the driver callback. rx is NULL on the first call. */
 void gen3_club_frame(Gen3Club* club, const MlinkRx* rx, MlinkTx* tx);
 void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out);
+/* Sets (game != NULL) or clears the offer: the Flipper's one party Pokemon, game form. false and
+ * nothing changed if trades_seen != the club's trades_done (D6; trades_done is 0 until Task 6).
+ * Unchecked (G6): the app offers only a Pokemon that passes gen3_trade_offer_check. */
+bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen);
 /* Tests only; production uses GEN3_CLUB_CARD_DELAY_BURSTS. */
 void gen3_club_set_card_delay(Gen3Club* club, uint8_t bursts);
