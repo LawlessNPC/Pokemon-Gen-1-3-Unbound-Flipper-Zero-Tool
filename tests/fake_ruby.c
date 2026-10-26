@@ -122,8 +122,17 @@
 #define LP_NATIONAL_DEX      0x8000 /* sub_804BA64: the partner's lp_field_2 */
 
 /* Back to the room after EEBB (§B6.3) and the re-sit (§B7) */
-#define RETURN_FIELD_FRAMES 17 /* sub_805465C, CB2_ReturnToFieldLink's 14 states, OpenLink (T5) */
-#define REESTABLISH_FRAMES  10 /* sub_8083710 hands over to sub_8083760 once data[0] >= 10 */
+/* Frames from the one sub_8049DC4 sees the close (t) to the 0x1111 OpenLink: SetMainCallback2
+ * takes effect the next frame, so sub_805465C runs at t+1 (CB2_ReturnToField: SetMainCallback2
+ * (CB2_ReturnToFieldLink)), sub_8054A9C's states 0-13 at t+2..t+15 (12: RunFieldCallback,
+ * sub_8080A3C creates task_mpl_807DD60; 13 returns 1: SetMainCallback2(CB2_Overworld)), and
+ * CB2_Overworld's RunTasks at t+16 runs task_mpl_807DD60 case 0 (priority 10), whose sub_8083664
+ * creates sub_8083710 (priority 80, after it in the list), which OpenLinks in the same RunTasks */
+#define RETURN_FIELD_FRAMES 16
+/* sub_8083710: data[0] 0 at OpenLink (frame o), 1..9 at o+1..o+9; at o+10 data[0] >= 10 hands
+ * over to sub_8083760, which runs from o+11 and, with 2 players, hands over to sub_80837EC from
+ * the next frame: its check comes at o+12 at the earliest */
+#define REESTABLISH_FRAMES  12
 #define FADE_IN_UPDATES     17 /* task_mpl_807DD60: the fade-in, controls locked */
 #define RESIT_STEP_UPDATES  16 /* game updates of one held D-pad key (the step isn't modelled) */
 #define NAME_EOS            0xFF
@@ -1779,10 +1788,12 @@ static void run_linkup_task(FakeRuby* g) {
         next_task(g, FakeRubyTaskReestablish);
         break;
     case FakeRubyTaskReestablish:
-        /* sub_8083710, then the child's sub_8083760 (2 players) and sub_80837EC: both
-         * LinkPlayers in with every link type equal (else a silent hang, §B8), sub_800826C,
-         * then sub_8007B14 [StartSendingKeysToLink]: CAFE with no walk-in and no 2FFE */
-        if(g->frame - g->task_frame <= REESTABLISH_FRAMES || g->player_count < SAVED_PLAYERS) {
+        /* sub_8083710, then the child's sub_8083760 (2 players) and, from the next frame,
+         * sub_80837EC: both LinkPlayers in with every link type equal (else a silent hang, §B8),
+         * sub_800826C, then sub_8007B14 [StartSendingKeysToLink]: CAFE with no walk-in and no
+         * 2FFE. The player count sub_8083760 waits for comes with the handshake, before the
+         * LinkPlayers that sub_80837EC waits for, so one check here is exact */
+        if(g->frame - g->task_frame < REESTABLISH_FRAMES || g->player_count < SAVED_PLAYERS) {
             break;
         }
         if(!g->received_link_players) break;

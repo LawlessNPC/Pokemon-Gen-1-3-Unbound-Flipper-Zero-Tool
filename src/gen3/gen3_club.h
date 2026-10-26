@@ -12,9 +12,9 @@
 /* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
  * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down, the
  * relink for the trade menu, its party exchange, the trade menu with the Flipper as the arbiter,
- * the trade and the GBA's link save, and the EEBB that sends the GBA back to the room when the
- * Flipper's Pokemon changes (docs/gen3/link-protocol-trade.md §B1-B7). Pure C, no heap;
- * gen3_club_frame runs in the link frame ISR. */
+ * the trade and the GBA's link save, the EEBB that sends the GBA back to the room when the
+ * Flipper's Pokemon changes (docs/gen3/link-protocol-trade.md §B1-B7), and walking the GBA out of
+ * the room when the app asks (D9). Pure C, no heap; gen3_club_frame runs in the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
 /* Idle bursts before a party-exchange CCCC (§B2.2). Round 1's follows both LinkPlayerBlocks: the
@@ -32,6 +32,22 @@
 #define GEN3_CLUB_REPLY_DELAY_BURSTS  6
 #define GEN3_CLUB_SAVE_SYNCS          3 /* the GBA's 2FFEs in one link save (§B5.1) */
 #define GEN3_CLUB_EEBB_RETRY_BURSTS   180 /* resend an EEBB without the GBA's 5FFF (T2: ~3 s) */
+/* Menu: an incomplete GBA block is dropped after GEN3_CLUB_BLOCK_GAP_BURSTS bursts in a row with
+ * no chunk for it, as Ruby sends a block's chunks on consecutive frames; after its header, the
+ * GEN3_CLUB_BLOCK_HEADER_BURSTS that LinkCB_BlockSendBegin waits before the first chunk come on
+ * top. A glitched size header then can't hold the arbiter forever. */
+#define GEN3_CLUB_BLOCK_GAP_BURSTS    2
+#define GEN3_CLUB_BLOCK_HEADER_BURSTS 3
+/* D9: the GBA CAFEs (one per GBA frame) the club sees in a room session before its CAFE 0017.
+ * After a 0x1111 relink the GBA fades in with its controls locked for about 20 frames from its
+ * first CAFE (task_mpl_807DD60); an exit forced then would find them unlocked when the fade ends
+ * (sub_80553E4 sends 0x1A) and restart. */
+#define GEN3_CLUB_LEAVE_DELAY_CAFES   30
+/* After the GBA closed a link to open the next one at once (the 5FFF answered in Room for the
+ * trade menu, in Menu or in Save), the frames the club waits for it to connect before taking the
+ * GBA as gone. Ruby opens the next link within about 20 frames of its CloseLink (§B1.5, §B4.1,
+ * §B6.1, §B6.3) and gives a 0x1122 or 0x1111 relink 300 frames (§B8). */
+#define GEN3_CLUB_RELINK_WAIT_FRAMES  300
 
 /* The values are the phase numbers in the link log: append only. */
 typedef enum {
@@ -115,6 +131,8 @@ typedef struct {
      * GBA's next CAFE 0016 or a 0x1133 linkup */
     bool resit_needed;
     bool editing; /* gen3_club_set_editing (O1) */
+    bool leaving; /* requested, not done yet */
+    bool left; /* the GBA walked out and closed the link after a request, or no GBA was linked */
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -138,6 +156,9 @@ struct Gen3Club {
     bool card_requested; /* 0xCCCC and own card queued this session */
     bool close_answered; /* {5FFF} queued this session */
     bool exit_answer_due; /* the GBA sent CAFE 0017: answer after its next command */
+    bool gba_exit_seen; /* the GBA sent CAFE 0017 this session */
+    bool exit_sent; /* the Flipper's CAFE 0017 queued this session (an answer or D9's) */
+    uint8_t room_cafes; /* the GBA's CAFEs this session in Room, up to UINT8_MAX */
     uint8_t card_delay; /* idle bursts to wait before 0xCCCC */
     uint8_t idle_bursts;
     uint32_t frames;
@@ -154,6 +175,7 @@ struct Gen3Club {
     /* Trade menu, per session (§B3) */
     Gen3ClubMenu menu;
     bool reply_due; /* the GBA's block below awaits its one reply */
+    uint8_t rx_gap; /* bursts since the latest command of the GBA's incoming block */
     uint16_t gba_code, gba_arg; /* that block's words 0 and 1 */
     uint8_t gba_slot;
     Gen3Refuse refused;
@@ -184,6 +206,13 @@ struct Gen3Club {
     bool return_due;
     bool resit_needed;
     bool editing; /* O1: app state, like the offer */
+    /* D9: app state, like the offer */
+    bool leaving;
+    bool left;
+    /* The GBA closed the link to open the next one at once (closes_for_relink): from that
+     * Disconnected until the next Connected, or GEN3_CLUB_RELINK_WAIT_FRAMES (relink_wait) */
+    bool relink_due;
+    uint16_t relink_wait;
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
@@ -216,6 +245,15 @@ bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_se
  * fails (false, nothing changed) while trade_pending, or when trades_seen != trades_done (a
  * received Pokemon the app hasn't seen). Clearing it always succeeds (trades_seen unused). */
 bool gen3_club_set_editing(Gen3Club* club, bool on, uint32_t trades_seen);
+/* Ask the GBA to walk out (D9); safe in any phase. Done when status.left.
+ * - No GBA linked (Waiting, and no relink due): left at once.
+ * - Room: one CAFE 0017 once the GBA's CAFEs run (GEN3_CLUB_LEAVE_DELAY_CAFES), unless the GBA's
+ *   own 0017 has its answer; the GBA's later 0017 gets none. The club no longer sits.
+ * - Menu: the offer is stale, so the GBA gets EEBB and comes back to the room through 0x1111.
+ * - Elsewhere, a pending trade and its link save included, the club goes on until Room or Menu.
+ * Once the GBA's link is lost for good (Waiting with no relink due: its exit's close, a power-off
+ * or a pulled cable), left is set and leaving cleared. */
+void gen3_club_request_leave(Gen3Club* club);
 /* National Dex for the GBA (D10, §B4.5): while on, the Flipper's 0x1144 block carries lp_field_2
  * 0x8000. Off after init; the club never changes it. */
 void gen3_club_set_national_dex(Gen3Club* club, bool on);
