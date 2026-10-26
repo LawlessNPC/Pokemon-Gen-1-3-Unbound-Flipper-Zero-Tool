@@ -11,6 +11,13 @@
 - `files/gen3_bulk.bin` (species, move and item names, and learnsets) ships as an app asset; if the editor says `Data missing`, delete `apps_assets/pokemon` on the SD card and reopen
 - See `docs/gen3/editor-test.md`
 
+**Gen III Cable Club trade with Ruby/Sapphire (experimental)**
+- Add `Trade` to the Gen III menu: the Flipper sits at the Cable Club Trade Center table with Pokemon Ruby and trades the Pokemon from `Edit Pokemon`; the one it gets back can be edited and traded back without leaving the room, and the link keeps running behind every Gen III screen
+- The GBA player becomes the OT of the default Pokemon and of each species picked after linking; `OT: use <NAME>` in the editor gives any Pokemon the player's OT
+- The Flipper refuses Eggs, Bad Eggs and Mail holders, and doesn't offer Mail, the ENIGMA BERRY or items Ruby lacks; Back is locked while the GBA saves, and `End trade` makes the GBA walk out of the Trade Center by itself
+- `National Dex: Off` / `On` in the Gen III menu (off at every start) lets a trade unlock the GBA's National Dex, for good on that save
+- See `docs/gen3/hardware-test-2.md`
+
 ## Version 2.3
 - Fix potential bug in copying incoming trade data to the live working struct
 

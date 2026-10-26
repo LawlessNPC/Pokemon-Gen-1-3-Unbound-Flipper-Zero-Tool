@@ -11,6 +11,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 - **The log** is `apps_data/pokemon/gen3_link.log`. It is overwritten each time a Trade or Link Test link starts, so after a failed run copy it off the SD card before you start another one. It grows by about 8 KB/s while you are in the Trade Center. Each line carries the link phase as `p0` to `p10`: `p0` waiting for the GBA, `p1`-`p3` linking, `p4` Trade Center room, `p5` closing, `p6` error, `p7` trade menu loading, `p8` trade menu, `p9` trade animation, `p10` the GBA's link save.
 - **The trade screen** shows `Gen III Trade` on top, three lines that say what is happening and what to do on the GBA, then `Flipper: <NICKNAME>`, the Pokemon the Flipper offers. `E<n>` at the top right counts checksum errors on the link; it should never appear. `Edit` at the bottom (the OK button) opens the editor; it is hidden while a trade is under way.
 - **The link runs behind every Gen III screen** once `Trade` has started it: the editor, its keyboards and lists, the species picker, `.pk3` load and save. `Trade` in the Gen III menu returns to the trade screen. While the link runs, the Gen III menu has `End trade` in place of `Link Test`.
+- **Between the GBA's links** (sitting down, the trade, after the save, back to the room) the trade screen shows `Linking...` for a moment, or `Trading...` during a trade. While you stay in the Trade Center it never shows `Go to the Cable Club`.
 - The trade screen's texts are shown on three lines; this checklist writes them on one, except where it quotes the lines.
 - On any failure, report the step, what each screen showed (Flipper and GBA, including any `E<n>`), and the log file.
 
@@ -29,7 +30,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 
 ## C. First trade (GBA → Flipper)
 
-1. **Sit.** Walk onto either seat: the Flipper shows `Opening the trade menu...`. Ruby shows the trade menu with BULBASAUR alone on the right.
+1. **Sit.** Walk onto either seat: the Flipper shows `Opening the trade menu...` (with `Linking...` for a moment, never `Go to the Cable Club`). Ruby shows the trade menu with BULBASAUR alone on the right.
 2. **Trade.** Choose one of yours → TRADE → YES. The Flipper shows `Confirm the trade on the GBA.`, then `Trading... Watch the GBA.`, then during "SAVING..." `The GBA is saving. Don't unplug or turn off. Back is locked.` Press Back on the Flipper during the save: nothing happens.
 3. **After the save** Ruby shows the trade menu again, with your Pokemon on the Flipper side. The Flipper shows `Flipper: <its nickname>` and `Edit it (OK), or pick the next trade on the GBA.` (The Flipper recalculates a received Pokemon's stats. If it did so only after the menu reopened, Ruby goes back to the room once instead and the Flipper asks you to sit again, as in D.3. Note it if that happens.)
 4. **Ruby:** BULBASAUR is in your party, with you as OT.
@@ -100,3 +101,44 @@ With the GBA in the Trade Center (opening the editor sends it from the trade men
 ## J. OT row (D7)
 
 1. **Use your OT.** With a trade session running and the GBA in the Trade Center, Edit Pokemon → `OT TID` → any number but yours (say `12345`). After `OT SID` a row `OT: use <your Ruby name>` appears. Choose it: `OT Name`, `OT TID` and `OT SID` are yours again, `Shiny` is unchanged, and the row goes. If the Pokemon can't stay shiny under your OT ID, `Shiny lost` / `No shiny PID for this OT ID.` shows first; `OK` returns to the editor with your OT.
+2. **A loaded Pokemon.** Gen III → `Load .pk3` → `enigma-berry` (its OT is `FLIPPER`, TID `22222`). Edit Pokemon shows `OT: use <your Ruby name>`; choose it, and the OT rows are yours. Like any edit, this recalculates the stats, so a loaded Pokemon that was hurt comes back with full HP. That is by design.
+3. **Remembered after End trade.** Gen III menu → `End trade` → `End`, and wait for `Link ended`. Edit Pokemon → `Pokemon` → pick another species: `OT Name`, `OT TID` and `OT SID` are still yours. The Flipper remembers the last GBA player until the app exits.
+
+## K. Memory
+
+1. **Free heap.** Start a trade session and enter the Trade Center (Gen III → `Trade`), then open `Edit Pokemon`. In the qFlipper CLI (or `ufbt cli`), run `free` and write down `Free heap size`. It must be at least 12,000.
+
+## Results
+
+| Section | Pass / fail | What each screen showed (Flipper, Ruby) |
+|---|---|---|
+| A Setup and Link Test regression | | |
+| B Start a trade | | |
+| C First trade (GBA → Flipper) | | |
+| D Edit and trade back | | |
+| E Background link (with the E.2a times) | | |
+| F Cancels and refusals | | |
+| G Summary screen and the save lock | | |
+| H End trade | | |
+| I National Dex | | |
+| J OT row | | |
+| K Memory: free heap (bytes) | | |
+
+## On failure
+
+Report the step (for example `D.3`), what each screen showed (the trade screen's three lines and any `E<n>` on the Flipper, Ruby's message on the GBA), and the log `apps_data/pokemon/gen3_link.log`. Copy the log off the SD card before you start another Trade or Link Test, because starting one overwrites it.
+
+If section E fails (Ruby shows a link error while you edit), use the fallback for the rest of the test: walk out of the Trade Center before editing, and back in afterwards. Report the log; the follow-up keeps the link protocol as it is.
+
+To finish a run, use `End trade` → `End`. If you had to use `Stop link?` and Ruby shows a link error, restart the GBA; it saved before linking.
+
+## If it fails (for whoever reads the log)
+
+Each log line carries the link phase as `p0` to `p10` (see Notes). The trade tunables are `#define`s at the top of `src/gen3/gen3_club.h`. The link-level hints in `docs/gen3/hardware-test-1.md` still apply, and `docs/gen3/link-protocol-trade.md` (Part B) has the background.
+
+| Symptom | Where to look |
+|---|---|
+| Black screen on the GBA after sitting down | the party exchange (`p7`): check the `CCCC` sequence and `GEN3_CLUB_ROUND1_DELAY_BURSTS` (§B2.2) |
+| "Link standby..." on the GBA forever | a reply the Flipper didn't send in the trade menu (`p8`, §B3.4) |
+| A link error when the GBA goes back to the room | the 0x1111 identity check (§B6.3): the Flipper's LinkPlayerBlock must match the one from the first linkup |
+| `E<n>` on the trade screen, or checksum errors in the log | the wire timing, as in test 1 |

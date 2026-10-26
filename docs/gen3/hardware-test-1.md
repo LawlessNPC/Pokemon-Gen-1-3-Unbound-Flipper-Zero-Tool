@@ -22,7 +22,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 - The log is overwritten each time the Link Test screen is opened. After a failed run, copy `apps_data/pokemon/gen3_link.log` off the SD card BEFORE reopening Link Test. The screen's last line is `Log: on` when logging works, `Log: off` when it does not.
 - Leaving the Link Test while linked shows a `Stop link?` dialog (`Stay` / `Stop`; Back is the same as `Stay`). Its text: "Your GBA may show a link error and need a restart. It saved before linking." After `Stop`, power-cycle the GBA if it shows a link error; Ruby saved before linking, so nothing is lost.
 - Screen layout: `Gen III Link Test`, `Cable: ...`, `Link: ...`, partner line (`name TID nnnnn`), `Frm n Err n T/O n`, `Log: ...`.
-- Other `Link:` texts on failure: `error: bad data`, `GBA chose other room`. A checksum error does not change the `Link:` line: it counts in `Err`, and if the GBA saw it too, the GBA drops the link and the Flipper goes back to `waiting for GBA`.
+- Other `Link:` texts on failure: `error: bad data`, `GBA chose other room`, `error: unexpected`. `error: unexpected` shows when the Link Test meets a GBA that a trade session left in the middle of a relink (for example after `Stop link?` on the trade screen): restart the GBA and go to the Trade Center again. A checksum error does not change the `Link:` line: it counts in `Err`, and if the GBA saw it too, the GBA drops the link and the Flipper goes back to `waiting for GBA`.
 
 ## Results
 

@@ -12,10 +12,11 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 - A Pokemon loaded from a file keeps its current HP until the first edit. Any edit then heals it to full HP. That is by design.
 - The Flipper keyboard types lower case, except the first character, which comes out as a capital. A long press types the other case. `_` typed as the first character (or with a long press) becomes a space, so type it with a short press after another character.
 - Error messages are shown on two lines; this checklist writes them on one.
+- Run this test in a fresh app run without `Trade`. Once a GBA has linked for a trade, new species take the GBA player as OT and an `OT: use <NAME>` row appears, until the app exits (see `docs/gen3/hardware-test-2.md`).
 
 ## A. Editor basics
 
-1. **Gen III menu.** Main menu → `Gen III  (GBA non-JPN)` shows 4 items: `Edit Pokemon`, `Load .pk3`, `Save .pk3` and `Link Test`. `Link Test` still opens the Link Test screen, and Back from it returns to this menu.
+1. **Gen III menu.** Main menu → `Gen III  (GBA non-JPN)` shows 6 items: `Trade`, `Edit Pokemon`, `Load .pk3`, `Save .pk3`, `National Dex: Off` and `Link Test`. `Link Test` still opens the Link Test screen, and Back from it returns to this menu. (`Trade` is for `docs/gen3/hardware-test-2.md`; don't open it in this test.)
 2. **Defaults.** `Edit Pokemon` shows, in this order: Pokemon `BULBASAUR`, Nickname `BULBASAUR`, Level `5`, `Random IV, Zero EV`, Nature (any nature), Ability `OVERGROW`, Shiny `No`, Gender `Male` or `Female`, Ball `POKE BALL`, Held Item `No Item`, `Select Moves`, Pokerus `Clean`, OT Name `FLIPPER`, OT TID `22222`, OT SID `00000`. For Unown only, an Unown Form row comes between Gender and Ball. The menu has no header. The values line up in one column, except the preset row (`Random IV, Zero EV`, which has no label) and `Select Moves` (which has no value).
 3. **Nickname.** Set it to `Leafy` → the row shows `Leafy`. Clear the field and save it empty → the row shows `BULBASAUR`. Type `A_B` (`a` comes out as `A`, `_` with a short press, then long-press `b` for `B`) → the keyboard shows `Unsupported character!` and stays open.
 4. **OT Name.** Set it to `Ash` → the row shows `Ash`. Clear the field and save it empty → the keyboard shows `Name can't be empty!` and stays open; Back leaves the name as `Ash`.
@@ -67,7 +68,7 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 5. **PKHeX (optional).** Open the saved file → no checksum warning, and species, level, nature, moves and OT match. Export a Gen III Pokemon from PKHeX as `.pk3` → it loads on the Flipper. If the file had a held Mail item or a mail index other than none (a 100-byte party file from a save where it held mail), a duplicate move, a move gap, an out-of-range level, or a wrong ability bit on a one-ability species, the result also says `Fixed: mail moves level ability` (only the parts that changed).
 6. **No SD card.** After opening `Edit Pokemon` in this session (so the Gen III data is ready), remove the SD card → `Load .pk3` shows `No SD card`.
 7. **Data missing.** With `gen3_bulk.bin` renamed (see E), `Load .pk3` and `Save .pk3` show `Data missing`.
-8. **SD card back.** Open `Edit Pokemon` once, then Back to the Gen III menu. Remove the SD card, wait a few seconds and put it back, without leaving the app. Open `Edit Pokemon`. The first time, the Pokemon row may show no name: a read through the old file handle failed, and that closed the data file. Press Back, then open `Edit Pokemon` again → `Pokemon: <SPECIES>` shows, and picking a species and `Default moves` work. If `Data missing` appears with the card in place, report it.
+8. **SD card back.** Open `Edit Pokemon` once, then Back to the Gen III menu. Remove the SD card, wait a few seconds and put it back, without leaving the app. Open `Edit Pokemon`. The first time, the Pokemon row may show no name: a read through the old file handle failed, and that closed the data file. The Ball row, and the Held Item row unless it shows `No Item`, may then be blank too: their names come from the same file. Press Back, then open `Edit Pokemon` again → `Pokemon: <SPECIES>` shows, and picking a species and `Default moves` work. If `Data missing` appears with the card in place, report it.
 
 ## E. Data file
 
