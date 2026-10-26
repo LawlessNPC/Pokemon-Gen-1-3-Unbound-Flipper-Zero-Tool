@@ -105,9 +105,13 @@ static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
 }
 
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
- * file, so it is created only once the file reads: false (no editor) if it can't be. */
+ * file, so it is created only once the file reads, and Edit, Load and Save need the file: false
+ * if it can't be read. A read that failed since (the SD card pulled) closed it, so it is opened
+ * again here first. */
 static bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
-    if(!pokemon_fap->gen3_editor && gen3_bulk_ready()) {
+    if(!gen3_bulk_ready()) gen3_bulk_furi_open();
+    if(!gen3_bulk_ready()) return false;
+    if(!pokemon_fap->gen3_editor) {
         pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
         if(!gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get())) {
             free(pokemon_fap->gen3_editor);
