@@ -83,3 +83,24 @@ void gen3_trainer_card_build(const Gen3LinkPlayer* lp, uint8_t out[GEN3_TRAINER_
     memset(out + CARD_OFF_VAR28, 0xFF, 8);
     memcpy(out + CARD_OFF_NAME, lp->name, 8);
 }
+
+#define LP_NAME_NEVER_READ    (GEN3_LP_PROGRESS_INDEX + 1)
+#define LP_NAME_PROGRESS_COPY (GEN3_LP_PROGRESS_INDEX + 2)
+
+uint8_t gen3_link_player_progress(const Gen3LinkPlayer* lp) {
+    return lp->name[GEN3_LP_PROGRESS_INDEX];
+}
+
+void gen3_link_player_set_progress(Gen3LinkPlayer* lp, uint8_t flags) {
+    lp->name[GEN3_LP_PROGRESS_INDEX] = flags;
+    lp->name[LP_NAME_NEVER_READ] = 0;
+    /* The receiver overwrites it with progressFlags anyway (fr: link.c: ConvertLinkPlayerName) */
+    lp->name[LP_NAME_PROGRESS_COPY] = flags;
+}
+
+void gen3_trainer_card_build_frlg(
+    const Gen3LinkPlayer* lp,
+    uint8_t out[GEN3_TRAINER_CARD_BLOCK_SIZE]) {
+    gen3_trainer_card_build(lp, out);
+    out[GEN3_FRLG_CARD_VERSION] = (uint8_t)(lp->version & 0xFF);
+}

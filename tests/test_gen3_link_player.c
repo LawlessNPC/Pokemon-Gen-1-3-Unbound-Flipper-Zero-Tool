@@ -102,6 +102,65 @@ TEST(test_card_layout) {
     for(int i = 0x10; i < 0x24; i++) ASSERT_EQ(out[i], 0);
 }
 
+TEST(test_lp_progress_bytes) {
+    /* name[8..10] are block 0x20..0x22: FRLG's progressFlags, neverRead, progressFlagsCopy */
+    ASSERT_EQ(GEN3_LP_PROGRESS_INDEX, 8);
+    ASSERT_EQ(GEN3_FRLG_PROGRESS_NATIONAL_DEX, 0x01);
+    ASSERT_EQ(GEN3_FRLG_PROGRESS_CAN_LINK_RS, 0x10);
+    Gen3LinkPlayer lp, back;
+    make_lp(&lp);
+    uint8_t name[8];
+    memcpy(name, lp.name, sizeof(name));
+    gen3_link_player_set_progress(&lp, 0x11);
+    ASSERT_MEM_EQ(lp.name, name, 8);
+    uint8_t out[GEN3_LINK_PLAYER_BLOCK_SIZE];
+    gen3_link_player_block_build(&lp, out);
+    ASSERT_MEM_EQ(out + 0x18, name, 8);
+    ASSERT_EQ(out[0x20], 0x11);
+    ASSERT_EQ(out[0x21], 0x00);
+    ASSERT_EQ(out[0x22], 0x11);
+    ASSERT_EQ(out[0x23], lp.gender);
+    memset(&back, 0, sizeof(back));
+    ASSERT_TRUE(gen3_link_player_block_parse(out, &back));
+    ASSERT_EQ(gen3_link_player_progress(&back), 0x11);
+    /* The progress is name[8] alone: block 0x22 is a stale copy on a real GBA */
+    back.name[10] = 0x00;
+    ASSERT_EQ(gen3_link_player_progress(&back), 0x11);
+    gen3_link_player_set_progress(&lp, 0x00);
+    ASSERT_EQ(lp.name[8], 0x00);
+    ASSERT_EQ(lp.name[9], 0x00);
+    ASSERT_EQ(lp.name[10], 0x00);
+    ASSERT_EQ(gen3_link_player_progress(&lp), 0x00);
+}
+
+TEST(test_card_frlg_layout) {
+    ASSERT_EQ(GEN3_VERSION_SAPPHIRE, 0x4001);
+    ASSERT_EQ(GEN3_VERSION_EMERALD, 0x4003);
+    ASSERT_EQ(GEN3_VERSION_FIRERED, 0x4004);
+    ASSERT_EQ(GEN3_VERSION_LEAFGREEN, 0x4005);
+    ASSERT_EQ(GEN3_FRLG_CARD_VERSION, 0x38);
+    Gen3LinkPlayer lp;
+    make_lp(&lp);
+    lp.version = GEN3_VERSION_FIRERED;
+    lp.gender = 1;
+    lp.trainer_id = 22222;
+    uint8_t ruby[GEN3_TRAINER_CARD_BLOCK_SIZE];
+    uint8_t out[GEN3_TRAINER_CARD_BLOCK_SIZE];
+    gen3_trainer_card_build(&lp, ruby);
+    memset(out, 0x77, sizeof(out));
+    gen3_trainer_card_build_frlg(&lp, out);
+    /* 0x00..0x37: FRLG's struct TrainerCardRSE, the Ruby card as it is */
+    ASSERT_MEM_EQ(out, ruby, 0x38);
+    ASSERT_EQ(out[0x38], 0x04);
+    for(int i = 0x39; i < GEN3_TRAINER_CARD_BLOCK_SIZE; i++) ASSERT_EQ(out[i], 0);
+    lp.version = GEN3_VERSION_LEAFGREEN;
+    memset(out, 0x77, sizeof(out));
+    gen3_trainer_card_build_frlg(&lp, out);
+    ASSERT_MEM_EQ(out, ruby, 0x38);
+    ASSERT_EQ(out[0x38], 0x05);
+    for(int i = 0x39; i < GEN3_TRAINER_CARD_BLOCK_SIZE; i++) ASSERT_EQ(out[i], 0);
+}
+
 int main(void) {
     RUN(test_lp_build_layout);
     RUN(test_lp_roundtrip);
@@ -109,5 +168,7 @@ int main(void) {
     RUN(test_lp_bad_magic2);
     RUN(test_lp_magic_byte15_ignored);
     RUN(test_card_layout);
+    RUN(test_lp_progress_bytes);
+    RUN(test_card_frlg_layout);
     TEST_EXIT();
 }

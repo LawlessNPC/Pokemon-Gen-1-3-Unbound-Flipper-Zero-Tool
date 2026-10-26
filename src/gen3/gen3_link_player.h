@@ -34,3 +34,37 @@ void gen3_trainer_card_build(const Gen3LinkPlayer* lp, uint8_t out[GEN3_TRAINER_
 #define GEN3_LINKTYPE_TRADE_DISCONNECTED 0x1144 /* trade animation and link save (§B4.1) */
 /* lp_field_2 that makes Ruby unlock its National Dex (§B4.5) */
 #define GEN3_LP_NATIONAL_DEX 0x8000
+
+/* LinkPlayer versions: 0x4000 + the game's VERSION_* (fr: link.c: InitLocalLinkPlayer). Every
+ * receiver reads only the low byte. GEN3_VERSION_RUBY is above. */
+#define GEN3_VERSION_SAPPHIRE  0x4001
+#define GEN3_VERSION_EMERALD   0x4003
+#define GEN3_VERSION_FIRERED   0x4004
+#define GEN3_VERSION_LEAFGREEN 0x4005
+
+/* FRLG and Emerald give name[8..10] (block 0x20..0x22) to progressFlags, neverRead and
+ * progressFlagsCopy (fr: include/link.h: struct LinkPlayer; Part C §C1). */
+#define GEN3_LP_PROGRESS_INDEX 8
+/* Has the National Dex: FRLG reads bits 0-3 as one flag (fr: trade.c: CanTradeSelectedMon) */
+#define GEN3_FRLG_PROGRESS_NATIONAL_DEX 0x01
+/* FLAG_SYS_CAN_LINK_WITH_RS (fr: link.c: InitLocalLinkPlayer) */
+#define GEN3_FRLG_PROGRESS_CAN_LINK_RS 0x10
+/* struct TrainerCard.version, after the Ruby layout (fr: include/trainer_card.h) */
+#define GEN3_FRLG_CARD_VERSION 0x38
+
+/* The three below run in the link ISR, on the GBA's LinkPlayerBlock and in the club's claim.
+ * They are pure, with no heap and no stack buffer. Keep it so. */
+
+/* name[8], the GBA's progressFlags. Never name[10]: a GBA doesn't write its own
+ * progressFlagsCopy (only a receiver does, fr: link.c: ConvertLinkPlayerName), so it goes out
+ * stale. */
+uint8_t gen3_link_player_progress(const Gen3LinkPlayer* lp);
+/* §C1: name[8] = flags, name[9] (neverRead) = 0, name[10] (progressFlagsCopy) = flags.
+ * name[0..7] is unchanged. */
+void gen3_link_player_set_progress(Gen3LinkPlayer* lp, uint8_t flags);
+/* §C2, the FRLG card: bytes 0x00..0x37 as gen3_trainer_card_build (FRLG's struct
+ * TrainerCardRSE), [0x38] = lp->version & 0xFF, which selects the Kanto card
+ * (fr: trainer_card.c: GetCardType), and 0x39..0x63 zero. */
+void gen3_trainer_card_build_frlg(
+    const Gen3LinkPlayer* lp,
+    uint8_t out[GEN3_TRAINER_CARD_BLOCK_SIZE]);

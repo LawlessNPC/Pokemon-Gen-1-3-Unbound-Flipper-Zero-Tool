@@ -43,6 +43,9 @@ uint16_t gen3_trade_round_size(uint8_t round);
  * Any other round writes nothing. */
 void gen3_trade_round_block(uint8_t round, const uint8_t* mon, uint8_t* out);
 
+/* Why the Flipper won't offer, or take, a Pokemon. Only gen3_partner_refuse (gen3_partner.h)
+ * returns the last two. gen3_trade_offer_check and gen3_trade_check_incoming never do, so the
+ * club's refused never holds them. */
 typedef enum {
     Gen3RefuseNone,
     Gen3RefuseEmpty, /* species 0 (check_incoming only) */
@@ -51,6 +54,11 @@ typedef enum {
     Gen3RefuseMail, /* held item 121..132, or mail byte != 0xFF */
     Gen3RefuseItem, /* held item 175, or >= 349 */
     Gen3RefuseBadData, /* species, move or item outside what gen3_pkm_check accepts */
+    /* An FRLG partner without the National Dex, and an offer above #151: FRLG's own sender rule,
+     * mirrored (link-protocol-trade.md §C3 and T14) */
+    Gen3RefuseNationalDex,
+    /* An FRLG partner, and Mew or Deoxys without the fateful-encounter bit (§C3) */
+    Gen3RefuseFateful,
 } Gen3Refuse;
 
 /* Both checks run in the link ISR. They call only gen3_pkm_decrypt, gen3_pkm_check, gen3_pkm_get

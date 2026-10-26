@@ -1114,6 +1114,8 @@ static const char* const REASON[] = {
     [Gen3RefuseMail] = "it holds Mail.",
     [Gen3RefuseItem] = "it holds a bad item.",
     [Gen3RefuseBadData] = "its data is invalid.",
+    [Gen3RefuseNationalDex] = "National Dex needed.",
+    [Gen3RefuseFateful] = "it's not fateful.",
 };
 
 TEST(test_guide_texts) {
@@ -1243,7 +1245,7 @@ TEST(test_guide_texts) {
         "Edit it; stay seated.");
 
     /* No valid offer, each reason */
-    for(Gen3Refuse r = Gen3RefuseEmpty; r <= Gen3RefuseBadData; r++) {
+    for(Gen3Refuse r = Gen3RefuseEmpty; r <= Gen3RefuseFateful; r++) {
         status_reset(&st, Gen3ClubPhaseWaiting);
         st.last_result = Gen3TradeResultRolledBack;
         GUIDE(&st, r, ok, "Can't offer it:", REASON[r], "Edit it first.");
@@ -1321,7 +1323,7 @@ TEST(test_guide_texts) {
     status_reset(&st, Gen3ClubPhaseMenu);
     st.menu = Gen3ClubMenuLeaving;
     GUIDE(&st, no, ok, "Updating the trade", "menu: the GBA goes", "back to the room.");
-    for(Gen3Refuse r = Gen3RefuseEmpty; r <= Gen3RefuseBadData; r++) {
+    for(Gen3Refuse r = Gen3RefuseEmpty; r <= Gen3RefuseFateful; r++) {
         status_reset(&st, Gen3ClubPhaseMenu);
         st.refused = r;
         st.trades_done = 1;
@@ -1423,7 +1425,7 @@ TEST(test_guide_line_lengths) {
                         st.relinking = flags & 128;
                         st.menu = (Gen3ClubMenu)menu;
                         st.trades_done = done;
-                        for(int r = Gen3RefuseNone; r <= Gen3RefuseBadData; r++) {
+                        for(int r = Gen3RefuseNone; r <= Gen3RefuseFateful; r++) {
                             for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed;
                                 res++) {
                                 st.refused = (Gen3Refuse)r;
@@ -1433,7 +1435,7 @@ TEST(test_guide_line_lengths) {
                         }
                         st.refused = Gen3RefuseNone;
                         st.last_result = Gen3TradeResultNone;
-                        for(int offer = Gen3RefuseNone; offer <= Gen3RefuseBadData; offer++) {
+                        for(int offer = Gen3RefuseNone; offer <= Gen3RefuseFateful; offer++) {
                             for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++)
                                 ASSERT_TRUE(
                                     guide_fits(&st, (Gen3Refuse)offer, (Gen3PickupFail)pf));
@@ -1444,7 +1446,7 @@ TEST(test_guide_line_lengths) {
         }
     }
     ASSERT_EQ(GEN3_GUIDE_LINE_LEN, 22);
-    ASSERT_EQ(guide_calls, 11ul * 5 * 256 * 4 * 2 * (7 * 5 + 7 * 3));
+    ASSERT_EQ(guide_calls, 11ul * 5 * 256 * 4 * 2 * (9 * 5 + 9 * 3));
     ASSERT_TRUE(guide_saw_confirm);
     ASSERT_TRUE(guide_saw_next);
 }

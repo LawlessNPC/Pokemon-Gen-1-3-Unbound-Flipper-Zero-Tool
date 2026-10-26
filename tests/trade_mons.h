@@ -50,6 +50,17 @@ static inline void tm_make_mail(uint8_t out[GEN3_PARTY_SIZE]) {
     gen3_pkm_encrypt(&p, out);
 }
 
+/* tm_make(national, 5, seed) with the fateful-encounter bit 0, checksum fixed: a Mew or Deoxys
+ * from a source that doesn't set it (a .pk3, or a trade from Ruby). */
+static inline void
+    tm_make_unfateful(uint16_t national, uint32_t seed, uint8_t out[GEN3_PARTY_SIZE]) {
+    Gen3Pkm p;
+    tm_make_pkm(national, 5, seed, &p);
+    gen3_pkm_set(&p, Gen3FieldFateful, 0);
+    gen3_pkm_fix_checksum(&p);
+    gen3_pkm_encrypt(&p, out);
+}
+
 /* tm_make(1, 5, 3) with one secure-area bit flipped: the checksum no longer matches. */
 static inline void tm_make_bad_egg(uint8_t out[GEN3_PARTY_SIZE]) {
     tm_make(1, 5, 3, out);

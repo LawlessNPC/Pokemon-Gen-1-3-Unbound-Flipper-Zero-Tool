@@ -199,6 +199,10 @@ static const char* guide_reason(Gen3Refuse r) {
         return "it holds Mail.";
     case Gen3RefuseItem:
         return "it holds a bad item.";
+    case Gen3RefuseNationalDex:
+        return "National Dex needed.";
+    case Gen3RefuseFateful:
+        return "it's not fateful.";
     case Gen3RefuseNone: /* never asked for */
     case Gen3RefuseBadData:
         break;
