@@ -183,10 +183,16 @@ TEST(test_data_items) {
     ASSERT_TRUE(!gen3_item_holdable(339)); /* HM01 */
     ASSERT_TRUE(!gen3_item_holdable(376));
     ASSERT_TRUE(!gen3_item_holdable(GEN3_ITEM_COUNT));
+    /* Mail has no mail record behind it (mail index 0xFF); READ/TAKE would write out of bounds. */
+    ASSERT_STR_EQ(gen3_item_name(121), "ORANGE MAIL");
+    ASSERT_STR_EQ(gen3_item_name(132), "RETRO MAIL");
+    for(uint16_t mail = 121; mail <= 132; mail++) ASSERT_TRUE(!gen3_item_holdable(mail));
+    ASSERT_TRUE(gen3_item_holdable(133)); /* Cheri Berry, right after the mail */
 
+    ASSERT_EQ(GEN3_HOLDABLE_COUNT, 231);
     ASSERT_EQ(gen3_holdable_by_name(0), 146);
     ASSERT_STR_EQ(gen3_item_name(146), "AGUAV BERRY");
-    ASSERT_EQ(gen3_holdable_by_name(GEN3_HOLDABLE_COUNT - 1), 70);
+    ASSERT_EQ(gen3_holdable_by_name(230), 70);
     ASSERT_STR_EQ(gen3_item_name(70), "ZINC");
     for(size_t i = 0; i < GEN3_HOLDABLE_COUNT; i++) {
         ASSERT_TRUE(gen3_item_holdable(gen3_holdable_by_name(i)));

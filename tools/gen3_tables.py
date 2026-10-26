@@ -3,6 +3,7 @@
 
 Usage: python3 -I tools/gen3_tables.py <pokeemerald>
 
+The path must be the top of a clean checkout (tracked files) of the pinned commit.
 The clone is read as text only; nothing in it is built or run. Standard library only.
 Only game facts (ids, base stats, learnsets, names, PP) are extracted. On any failed
 check the script names the first failure, exits 1 and writes nothing.
@@ -26,7 +27,7 @@ ABILITY_COUNT = 78
 NATURE_COUNT = 25
 TYPE_COUNT = 18
 LEARNSET_COUNT = 3947
-HOLDABLE_COUNT = 243
+HOLDABLE_COUNT = 231
 OLD_UNOWN_FIRST = 252
 OLD_UNOWN_LAST = 276
 MAX_LEVEL = 100
@@ -393,19 +394,49 @@ def gender_ratio(value, where):
 # Extraction
 
 
-def check_commit(clone):
+def git(clone, *args):
+    """Runs a read-only git query in the clone: no fsmonitor hook, no index refresh writes."""
+    command = ["git", "--no-optional-locks", "-c", "core.fsmonitor=false", "-C", clone, *args]
     try:
-        result = subprocess.run(
-            ["git", "-C", clone, "rev-parse", "HEAD"], capture_output=True, text=True
-        )
+        result = subprocess.run(command, capture_output=True, text=True)
     except OSError as e:
         fail(f"cannot run git: {e.strerror}")
-    head = result.stdout.strip()
-    if result.returncode != 0 or head != PINNED_COMMIT:
+    return result.returncode, result.stdout.strip()
+
+
+def check_clone(clone):
+    """The path must be the top of a clean checkout of the pinned commit."""
+    code, top = git(clone, "rev-parse", "--show-toplevel")
+    if code != 0 or os.path.realpath(top) != os.path.realpath(clone):
+        fail(f"{clone} is not the top-level directory of a git clone")
+    code, head = git(clone, "rev-parse", "HEAD")
+    if code != 0 or head != PINNED_COMMIT:
         fail(
             f"{clone} is at commit {head or '(unknown)'}; "
             f"need pret/pokeemerald {PINNED_COMMIT}"
         )
+    code, changes = git(clone, "status", "--porcelain", "--untracked-files=no")
+    if code != 0 or changes:
+        fail(
+            f"{clone} has local changes to tracked files; "
+            f"need a clean checkout of {PINNED_COMMIT}"
+        )
+
+
+def mail_items(clone, item_ids):
+    """Item ids for which ItemIsMail() in src/mail_data.c returns TRUE."""
+    where = "src/mail_data.c"
+    text = read_source(clone, where)
+    m = re.search(r"\bbool8\s+ItemIsMail\s*\(\s*u16\s+\w+\s*\)\s*\{", text)
+    if not m:
+        fail(f"{where}: ItemIsMail not found")
+    open_pos = m.end() - 1
+    body = " ".join(text[open_pos + 1 : matching_brace(text, open_pos, where)].split())
+    shape = r"switch \(\w+\) \{ ((?:case ITEM_\w+: )+)return TRUE; default: return FALSE; \}"
+    m = re.fullmatch(shape, body)
+    if not m:
+        fail(f"{where}: ItemIsMail is not a plain switch over item ids")
+    return {lookup(item_ids, name, where) for name in re.findall(r"ITEM_\w+", m.group(1))}
 
 
 def extract(clone):
@@ -600,6 +631,9 @@ def extract(clone):
     items = {}
     holdable = []
     enigma_berry = lookup(item_ids, "ITEM_ENIGMA_BERRY", where)
+    # Held mail needs a mail record; the editor sets the mail index to 0xFF, and READ/TAKE on
+    # mail[0xFF] writes out of bounds in Ruby and Emerald. So mail is never offered as held.
+    mail = mail_items(clone, item_ids)
     for name, value in designated(body, "ITEM_", where):
         w = f"{where}: {name}"
         f = struct_fields(value, w)
@@ -617,9 +651,13 @@ def extract(clone):
             and importance != 1
             and f.get("pocket") != "POCKET_KEY_ITEMS"
             and item != enigma_berry
+            and item not in mail
         ):
             holdable.append(item)
     exact_ids(items, ITEM_COUNT, "items")
+    for item in sorted(mail):
+        if not items.get(item):
+            fail(f"src/mail_data.c: mail item {item} has no name in {where}")
     if len(holdable) != HOLDABLE_COUNT:
         fail(f"expected {HOLDABLE_COUNT} holdable items, got {len(holdable)}")
     id_to_item_label = {v: k[len("ITEM_") :] for k, v in item_ids.items() if k.startswith("ITEM_")}
@@ -775,7 +813,7 @@ def main(argv):
         return 2
     clone = argv[1]
     try:
-        check_commit(clone)
+        check_clone(clone)
         text = render(extract(clone))
     except GenError as e:
         print(f"gen3_tables.py: error: {e}", file=sys.stderr)
