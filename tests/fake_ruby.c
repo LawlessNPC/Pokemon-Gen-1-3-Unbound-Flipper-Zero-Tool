@@ -21,6 +21,7 @@
 /* Room key codes (§A7 "Room command format") */
 #define KEY_CODE_EMPTY      0x11
 #define KEY_CODE_DPAD_DOWN  0x12
+#define KEY_CODE_DPAD_UP    0x13
 #define KEY_CODE_READY      0x16
 #define KEY_CODE_EXIT_ROOM  0x17
 #define KEY_CODE_START      0x18
@@ -119,6 +120,13 @@
 #define TRADE_ANIM_FRAMES    600 /* sub_804C29C: not computed (T16); no traffic, no deadline */
 #define TRADE_FRIENDSHIP     70 /* sub_804BA94 [TradeMons]: the received Pokemon's, if no egg */
 #define LP_NATIONAL_DEX      0x8000 /* sub_804BA64: the partner's lp_field_2 */
+
+/* Back to the room after EEBB (§B6.3) and the re-sit (§B7) */
+#define RETURN_FIELD_FRAMES 17 /* sub_805465C, CB2_ReturnToFieldLink's 14 states, OpenLink (T5) */
+#define REESTABLISH_FRAMES  10 /* sub_8083710 hands over to sub_8083760 once data[0] >= 10 */
+#define FADE_IN_UPDATES     17 /* task_mpl_807DD60: the fade-in, controls locked */
+#define RESIT_STEP_UPDATES  16 /* game updates of one held D-pad key (the step isn't modelled) */
+#define NAME_EOS            0xFF
 
 /* The link save (§B5.1): sub_804DC88 [CB2_SaveAndEndTrade] gMain.state values, in run order */
 #define SAVE_STANDBY_TEXT  0 /* "Link standby..." */
@@ -699,6 +707,9 @@ static uint16_t key_intercept(FakeRuby* g, bool b_new) {
     case FakeRubyKeySelfIdle:
         /* 0x1B/0x1C flow control needs a queue above 4; one burst per frame keeps both <= 1. */
         if(g->controls_locked) return KEY_CODE_EMPTY;
+        if(g->resit_updates > 0) { /* sub_80552B0: JOY_HELD(DPAD_UP), then DPAD_DOWN */
+            return g->resit_updates > RESIT_STEP_UPDATES ? KEY_CODE_DPAD_UP : KEY_CODE_DPAD_DOWN;
+        }
         return g->facing_exit ? KEY_CODE_DPAD_DOWN : KEY_CODE_EMPTY;
     case FakeRubyKeySendExitRoomKey:
         g->key_cb = FakeRubyKeyWaitForPlayersToExit;
@@ -818,24 +829,58 @@ static void run_seat_task(FakeRuby* g) {
     }
 }
 
+/* fake_ruby_resit (§B7 step 4), after this update's key: one held D-pad key per game update. An
+ * IDLE player moves without changing state (sub_8054FF8, sub_8055BFC). The step off the seat ends
+ * with the Up updates, the step back on with the Down ones; its coord event then runs at the next
+ * update, as for fake_ruby_sit. It stops if the player leaves SelfIdle or IDLE meanwhile. */
+static void resit_step(FakeRuby* g) {
+    if(g->resit_updates == 0) return;
+    if(g->link_state[LOCAL_ID] != PLAYER_IDLE || g->key_cb != FakeRubyKeySelfIdle) {
+        g->resit_updates = 0;
+        return;
+    }
+    if(--g->resit_updates == RESIT_STEP_UPDATES) g->on_seat = false;
+    if(g->resit_updates == 0) {
+        g->sit_pending = true;
+        g->sit_seat = g->seat;
+    }
+}
+
+/* task_mpl_807DD60 cases 1-2 after the 0x1111 relink: the fade-in, then UnlockPlayerFieldControls.
+ * It runs with the room's tasks, so it counts game updates. */
+static void fade_in_step(FakeRuby* g) {
+    if(g->fade_in_updates == 0 || --g->fade_in_updates > 0) return;
+    g->controls_locked = false;
+    g->phase = FakeRubyRoom;
+}
+
 /* One game update in the room: callback1 (sub_8055354 [CB1_OverworldLink]: every player's key
  * in lockstep, own echo included, then sub_8055280 keeps 0x11..0x1D), then callback2 (the script,
- * then the tasks). fake_ruby_sit and fake_ruby_stand_up take effect in this update. */
+ * then the tasks). fake_ruby_sit, fake_ruby_stand_up and fake_ruby_resit take effect in this
+ * update. */
 static void room_update(FakeRuby* g) {
     const bool seat_step = g->sit_pending && !g->on_seat;
     const bool b_new = g->b_press;
+    const bool resit = g->resit_pending;
     g->sit_pending = false;
     g->b_press = false;
+    g->resit_pending = false;
     for(uint8_t i = 0; i < FAKE_RUBY_PLAYERS; i++) {
         handle_link_player_key(g, i, g->held_keys[i], seat_step);
     }
     /* The step ends on the seat tile even when its coord event didn't run (the player wasn't
      * IDLE), and standing there never runs it again. */
     if(seat_step) g->on_seat = true;
+    if(resit && g->phase == FakeRubyRoom && g->link_state[LOCAL_ID] == PLAYER_IDLE &&
+       g->key_cb == FakeRubyKeySelfIdle && !g->controls_locked) {
+        g->resit_updates = 2 * RESIT_STEP_UPDATES;
+    }
     uint16_t key = key_intercept(g, b_new);
     g->held_key_to_send = (key >= KEY_CODE_EMPTY && key < KEY_CODE_END) ? key : KEY_CODE_EMPTY;
+    resit_step(g);
     run_room_script(g);
     run_seat_task(g);
+    fade_in_step(g);
 }
 
 /* OpenLink (link.c): ResetSerial, InitLink (EnableSerial, gSendCmd = 0xEFFF filler),
@@ -1168,6 +1213,39 @@ static void trade_flipper_block(FakeRuby* g) {
     }
 }
 
+/* sub_805465C [CB2_ReturnToFieldFromMultiplayer] (§B6.3): sub_8054F70 makes every player IDLE,
+ * the key intercept is the room's (SelfIdle), and the field callback sub_8080A3C locks the
+ * controls until task_mpl_807DD60's fade-in ends. The room is redrawn without reloading object
+ * events: the avatar stays on its seat (on_seat). */
+static void return_to_field(FakeRuby* g) {
+    memset(g->link_state, PLAYER_IDLE, sizeof(g->link_state));
+    g->key_cb = FakeRubyKeySelfIdle;
+    g->held_key_to_send = KEY_CODE_EMPTY;
+    g->controls_locked = true;
+    g->script = FakeRubyScriptNone;
+    g->seat_task = FakeRubySeatNone;
+    g->resit_updates = 0;
+    g->phase = FakeRubyReturn;
+    next_task(g, FakeRubyTaskReturnField);
+}
+
+/* sub_800826C [CheckLinkPlayersMatchSaved]: slots 0-1 (the Part A count) against the Part A
+ * copies. trainerId equal, and StringCompareWithoutExtCtrlCodes(name) 0: the same bytes up to and
+ * including the saved name's first EOS (it skips extended control codes, which these names never
+ * hold; stricter not to). */
+static bool link_players_match_saved(const FakeRuby* g) {
+    for(int i = 0; i < SAVED_PLAYERS; i++) {
+        const Gen3LinkPlayer* saved = &g->saved_players[i];
+        const Gen3LinkPlayer* now = &g->link_players[i];
+        if(saved->trainer_id != now->trainer_id) return false;
+        for(size_t c = 0; c < sizeof(saved->name); c++) {
+            if(saved->name[c] != now->name[c]) return false;
+            if(saved->name[c] == NAME_EOS) break;
+        }
+    }
+    return true;
+}
+
 /* sub_804AB30: a queued action counts its delay down once per update, then runs. Action 0 is
  * Trade_SendData. */
 static void run_queued_send(FakeRuby* g) {
@@ -1187,11 +1265,13 @@ static void trade_menu_update(FakeRuby* g) {
     const bool cancel = g->cancel_pending;
     const bool press_a = g->press_a_pending;
     const bool press_r = g->press_r_pending;
+    const bool summary = g->summary_pending;
     const uint32_t elapsed = g->frame - g->trade_state_frame;
     g->offer_pending = false;
     g->cancel_pending = false;
     g->press_a_pending = false;
     g->press_r_pending = false;
+    g->summary_pending = false;
     switch(g->trade_state) {
     case TRADE_BROWSING:
         if(offer) {
@@ -1201,6 +1281,8 @@ static void trade_menu_update(FakeRuby* g) {
         } else if(press_r) { /* sub_8049680: the debug block, no IsLinkTaskFinished guard */
             for(int i = 0; i < LINK_DATA_WORDS; i++) g->link_data[i] = (uint16_t)i;
             trade_send_data(g);
+        } else if(summary) { /* sub_804997C: ShowPokemonSummaryScreen(..., sub_80484F4) */
+            g->in_summary = true;
         }
         break;
     case TRADE_PROMPT:
@@ -1233,10 +1315,9 @@ static void trade_menu_update(FakeRuby* g) {
         }
         set_trade_state(g, TRADE_CLOSE_ROOM);
         break;
-    case TRADE_CLOSE_ROOM: /* SetMainCallback2(sub_805465C): back to the room (Task 7) */
+    case TRADE_CLOSE_ROOM: /* sub_8049DC4: SetMainCallback2(sub_805465C), back to the room */
         if(g->received_link_players) break;
-        g->phase = FakeRubyReturn;
-        next_task(g, FakeRubyTaskNone);
+        return_to_field(g);
         return;
     case TRADE_CLOSE_TRADE: /* sub_8048A90: callback1 = NULL, SetMainCallback2(sub_804B41C) */
         if(g->received_link_players) break;
@@ -1253,6 +1334,17 @@ static void trade_menu_update(FakeRuby* g) {
     run_queued_send(g);
 }
 
+/* callback2 while the summary screen shows (ShowPokemonSummaryScreen leaves callback1 alone, so
+ * run_trade_menu still handles the Flipper's blocks). Closing it runs sub_80484F4
+ * [CB2_ReturnToTradeMenu], whose state 0 sets unk_007b = 0: whatever a block set meanwhile is
+ * lost, an EEBB's fade included (§B3.4, T2). The menu's rebuild isn't timed. */
+static void run_summary(FakeRuby* g) {
+    if(!g->summary_close_pending) return;
+    g->summary_close_pending = false;
+    g->in_summary = false;
+    set_trade_state(g, TRADE_BROWSING);
+}
+
 /* The running trade menu, once a frame: callback1 sub_80494D8 [CB1_UpdateLink] reads and resets
  * the block flags (the Flipper's block is handled, this GBA's own echo only reset; a flag set
  * before callback1 started waits for it), then callback2. */
@@ -1261,6 +1353,10 @@ static void run_trade_menu(FakeRuby* g) {
         if(g->block_received & 1) trade_flipper_block(g);
         g->block_received = 0; /* ResetBlockReceivedFlags */
         if(g->error) return;
+    }
+    if(g->in_summary) {
+        run_summary(g);
+        return;
     }
     trade_menu_update(g);
 }
@@ -1271,6 +1367,9 @@ static void run_create_menu(FakeRuby* g) {
     case MENU_SETUP:
         g->xchg_case = 0; /* unk_0075 */
         g->send_queued = false; /* sub_804AA88 */
+        g->in_summary = false;
+        g->summary_pending = false;
+        g->summary_close_pending = false;
         g->seq = FakeRubySeqNone;
         g->cursor = 0;
         g->menu_state = MENU_OPEN;
@@ -1599,6 +1698,9 @@ static void run_linkup_task(FakeRuby* g) {
         /* Generated in the main loop of frame P+2 (P = blocks complete), after that frame's
          * ProcessRecvCmds: a 0xCCCC processed in burst P+3 or later gets the real card. */
         if(g->frame - g->task_frame + 1 < CARD_READY_BURSTS) break;
+        /* sub_80831F8 saves the LinkPlayers (sub_80081C8) with the card: the 0x1111 relink's
+         * sub_800826C checks against these */
+        memcpy(g->saved_players, g->link_players, sizeof(g->saved_players));
         gen3_trainer_card_build(&g->me, g->block_send_buffer);
         g->send_copy = 0;
         g->card_ready = true;
@@ -1664,6 +1766,39 @@ static void run_linkup_task(FakeRuby* g) {
     case FakeRubyTaskFreeTradeAnim: /* the fade is done: SetMainCallback2(sub_8047CD8) */
         next_task(g, FakeRubyTaskStartMenu);
         break;
+    case FakeRubyTaskReturnField:
+        /* CB2_ReturnToFieldLink's 14 states (the link is closed, so sub_8055870 never waits),
+         * then CB2_Overworld: task_mpl_807DD60 case 0, sub_8083664 (gSpecialVar_0x8004 == 3:
+         * gLinkType = 0x1111) and sub_8083710's first run: OpenLink, ResetLinkPlayers and the
+         * 300-frame sub_8083C50 */
+        if(g->frame - g->task_frame < RETURN_FIELD_FRAMES) break;
+        g->me.link_type = GEN3_LINKTYPE_TRADE;
+        open_link(g);
+        g->wait_task = true; /* it runs this frame */
+        g->wait_count = 0;
+        next_task(g, FakeRubyTaskReestablish);
+        break;
+    case FakeRubyTaskReestablish:
+        /* sub_8083710, then the child's sub_8083760 (2 players) and sub_80837EC: both
+         * LinkPlayers in with every link type equal (else a silent hang, §B8), sub_800826C,
+         * then sub_8007B14 [StartSendingKeysToLink]: CAFE with no walk-in and no 2FFE */
+        if(g->frame - g->task_frame <= REESTABLISH_FRAMES || g->player_count < SAVED_PLAYERS) {
+            break;
+        }
+        if(!g->received_link_players) break;
+        if(!link_types_match(g)) {
+            set_error(g, "link type");
+            break;
+        }
+        if(!link_players_match_saved(g)) {
+            close_link(g);
+            set_error(g, "relink mismatch"); /* CB2_LinkError */
+            break;
+        }
+        g->callback = FakeRubyCbSendHeldKeys;
+        g->fade_in_updates = FADE_IN_UPDATES;
+        next_task(g, FakeRubyTaskRoom);
+        break;
     }
 }
 
@@ -1673,7 +1808,7 @@ static bool runs_while_closed(FakeRubyTask task) {
            task == FakeRubyTaskCreateMenu || task == FakeRubyTaskLinkTrade ||
            task == FakeRubyTaskTradeAnim || task == FakeRubyTaskWaitTrade ||
            task == FakeRubyTaskTradeEvolution || task == FakeRubyTaskSave ||
-           task == FakeRubyTaskFreeTradeAnim;
+           task == FakeRubyTaskFreeTradeAnim || task == FakeRubyTaskReturnField;
 }
 
 /* Callback2's own step (it may OpenLink), then RunTasks: the timeout and the handshake trigger,
@@ -1742,6 +1877,10 @@ void fake_ruby_sit(FakeRuby* g, uint8_t seat) {
 
 void fake_ruby_stand_up(FakeRuby* g) {
     g->b_press = true;
+}
+
+void fake_ruby_resit(FakeRuby* g) {
+    if(g->phase == FakeRubyRoom && !g->error) g->resit_pending = true;
 }
 
 bool fake_ruby_on_seat(const FakeRuby* g) {
@@ -1833,7 +1972,8 @@ uint8_t fake_ruby_enemy_count(const FakeRuby* g) {
 }
 
 FakeRubyMenuState fake_ruby_menu_state(const FakeRuby* g) {
-    return g->phase == FakeRubyMenu ? g->menu : FakeRubyMenuNone;
+    if(g->phase != FakeRubyMenu) return FakeRubyMenuNone;
+    return g->in_summary ? FakeRubyMenuSummary : g->menu;
 }
 
 void fake_ruby_stall(FakeRuby* g, uint8_t frames) {
@@ -1867,6 +2007,14 @@ void fake_ruby_press_a(FakeRuby* g) {
 
 void fake_ruby_press_r(FakeRuby* g) {
     if(trade_menu_running(g)) g->press_r_pending = true;
+}
+
+void fake_ruby_open_summary(FakeRuby* g) {
+    if(trade_menu_running(g)) g->summary_pending = true;
+}
+
+void fake_ruby_close_summary(FakeRuby* g) {
+    if(trade_menu_running(g) && g->in_summary) g->summary_close_pending = true;
 }
 
 uint32_t fake_ruby_saved_trades(const FakeRuby* g) {

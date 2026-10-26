@@ -689,6 +689,25 @@ TEST(test_trade_gba_cancels) {
     ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1); /* no CCDD */
     ASSERT_TRUE(!club_status(&b).trade_pending);
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+
+    /* §B6.3: the 0x1111 relink back into the room, the avatar on its seat */
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseRoom);
+    ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE);
+    ASSERT_TRUE(st.resit_needed);
+    ASSERT_TRUE(fake_ruby_on_seat(&b.ruby));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+
+    /* A restart and a 0x1133 linkup walk the GBA in from the counter: no re-sit needed */
+    fake_ruby_power_off(&b.ruby);
+    run(&b, 30);
+    ruby_relink(&b);
+    ASSERT_TRUE(run_until_room(&b, 420));
+    st = club_status(&b);
+    ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE_SETUP);
+    ASSERT_TRUE(!st.resit_needed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
 }
 
 /* bench_init_trade with the GBA party {tm_make(1, 5, 11), slot1, tm_make(7, 10, 13)}, then
@@ -776,20 +795,22 @@ TEST(test_trade_only_pokemon_stays) {
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
 }
 
-/* bench_init_trade with the offer withdrawn before round 1 (R8): the GBA's menu shows no
- * Flipper Pokemon. Until Browsing. */
+/* bench_init_trade with the offer replaced by 100 zero bytes before round 1 (R8): the GBA's menu
+ * shows no Flipper Pokemon. A test-only offer: the club holds one, unchanged since round 1, so
+ * it sends no EEBB (test_trade_empty_offer_eebb has no offer at all), and round 1 shows nothing
+ * (no hasSpecies bit). Until Browsing. */
 static bool reach_menu_empty_offer(Bench* b) {
     bench_init_trade(b);
     if(!bench_to_room(b)) return false;
     fake_ruby_sit(&b->ruby, 1);
     if(!run_until_fake_phase(b, FakeRubyMenu, 400) || club_status(b).round != 0) return false;
-    if(!gen3_club_set_offer(&b->club, NULL, 0)) return false;
+    if(!gen3_club_set_offer(&b->club, zero_mon, 0)) return false;
     return run_until_browsing(b, 600) && fake_ruby_enemy_count(&b->ruby) == 0;
 }
 
 TEST(test_trade_no_dddd_to_empty_party) {
     /* R8: the GBA shows no Flipper Pokemon, so a DDDD would point at a partner icon Ruby never
-     * made. Its AABB gets DDEE. */
+     * made. Its AABB gets DDEE (the R8 gate: round 1 showed nothing). */
     Bench b;
     ASSERT_TRUE(reach_menu_empty_offer(&b));
     fake_ruby_offer(&b.ruby, 2);
@@ -1695,6 +1716,542 @@ TEST(test_trade_pending_survives_menu_close) {
     ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
 }
 
+TEST(test_trade_sync2_answer_framing_error) {
+    /* T6 carry-over: a stop-bit error on the GBA's word in the burst that carried the club's
+     * sync-2 answer makes the burst suspect both ways: the answer stays unconfirmed, and a link
+     * lost the next frame counts as RolledBack (the cost: one frame of delay) */
+    Bench b;
+    MlinkTx tx;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(run_until_trade_link(&b, 600));
+    for(int i = 0; i < 1000 && club_status(&b).save_syncs != 2; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+    ASSERT_EQ(club_status(&b).save_syncs, 2); /* the answer went out in this step's burst */
+    ASSERT_TRUE(b.club.sync2_unconfirmed);
+    ASSERT_EQ(b.rx.timeout_mask, 0);
+    b.rx.framing_mask |= 1u << 4; /* complete and checksummed, but one stop bit low */
+    gen3_club_frame(&b.club, &b.rx, &tx);
+    count_sent(&b, &tx);
+    ASSERT_TRUE(b.club.sync2_unconfirmed);
+    fake_ruby_power_off(&b.ruby);
+    fake_ruby_frame(&b.ruby, &tx, &b.rx);
+    bench_record(&b, &tx);
+    run(&b, 30);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(st.last_result, Gen3TradeResultRolledBack);
+    ASSERT_EQ(st.trades_done, 0);
+    ASSERT_TRUE(!st.trade_pending);
+}
+
+TEST(test_trade_sync2_answer_still_queued) {
+    /* T6 carry-over, pinning the queue clause: a command queued ahead of the sync-2 answer keeps
+     * it in the queue through the next clean burst, so it is still unconfirmed; the GBA is gone
+     * before the answer leaves, never commits, and the club counts RolledBack */
+    Bench b;
+    MlinkTx tx;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(run_until_trade_link(&b, 600));
+    bool sync2 = false;
+    for(int i = 0; i < 1000 && !sync2; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        sync2 = b.rx.word[1] == 0x2FFE && club_status(&b).save_syncs == 1;
+    }
+    ASSERT_TRUE(sync2); /* the GBA's sync-2 2FFE is in b.rx; the club reads it next */
+    bench_inject_cmd(&b, 0, 0); /* an idle burst, queued ahead of the answer */
+    gen3_club_frame(&b.club, &b.rx, &tx);
+    count_sent(&b, &tx);
+    ASSERT_EQ(club_status(&b).save_syncs, 2);
+    ASSERT_EQ(gen3_link_queued(&b.club.link), 1);
+    ASSERT_EQ(tx.word[1], 0);
+    fake_ruby_frame(&b.ruby, &tx, &b.rx);
+    bench_record(&b, &tx);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    ASSERT_EQ(b.rx.timeout_mask, 0);
+    gen3_club_frame(&b.club, &b.rx, &tx); /* a whole clean burst, the answer still queued */
+    count_sent(&b, &tx);
+    ASSERT_TRUE(b.club.sync2_unconfirmed);
+    ASSERT_EQ(tx.word[1], 0x2FFE); /* it leaves only now */
+    fake_ruby_power_off(&b.ruby);
+    fake_ruby_frame(&b.ruby, &tx, &b.rx);
+    bench_record(&b, &tx);
+    run(&b, 30);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 0);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_EQ(st.last_result, Gen3TradeResultRolledBack);
+    ASSERT_EQ(st.trades_done, 0);
+}
+
+/* ---- Editing between trades: EEBB, the 0x1111 room, re-sitting (§B6.3, §B7) ---- */
+
+/* Z, the Pokemon the Flipper switches to */
+static void make_z(uint8_t out[GEN3_PARTY_SIZE]) {
+    tm_make(255, 12, 31, out);
+}
+
+/* How many of the Flipper's 20-byte blocks carry `code`. */
+static size_t f_code_count(const Bench* b, uint16_t code) {
+    uint16_t codes[BENCH_BLOCKS];
+    const size_t n = bench_codes(b->f_blocks, b->n_f_blocks, codes, BENCH_BLOCKS);
+    size_t count = 0;
+    for(size_t i = 0; i < n; i++) count += codes[i] == code;
+    return count;
+}
+
+/* After the Flipper's EEBB: until the GBA is back in the room (fake Return, then Room). */
+static bool run_until_back_in_room(Bench* b) {
+    return run_until_fake_phase(b, FakeRubyReturn, 200) &&
+           run_until_fake_phase(b, FakeRubyRoom, 200);
+}
+
+TEST(test_trade_unexpected_1111) {
+    /* D2: a 0x1111 block that no EEBB of the Flipper's led to gets a 0x1133 block (the GBA hangs
+     * before its room) and Error/Unexpected */
+    Bench b;
+    bench_init_cfg(&b, GEN3_LINKTYPE_TRADE, &club_cfg_trade);
+    fake_ruby_open_link(&b.ruby);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 400));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.last_error, Gen3ClubErrorUnexpected);
+    ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE);
+    ASSERT_TRUE(!st.resit_needed);
+    run(&b, 400);
+    ASSERT_EQ(fake_ruby_partner(&b.ruby)->link_type, GEN3_LINKTYPE_TRADE_SETUP);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyClosed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_edit_in_menu_sends_eebb) {
+    /* Review Focus 1, §B7: the offer changes while the GBA browses. One unsolicited EEBB sends it
+     * back to the room (0x1111, its avatar still on its seat); it steps off and back on, and the
+     * fresh exchange shows the new Pokemon */
+    Bench b;
+    uint8_t z[GEN3_PARTY_SIZE];
+    char name[16];
+    make_z(z);
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(!club_status(&b).offer_stale);
+    const uint32_t at = b.bursts;
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 0));
+    step(&b);
+    ASSERT_TRUE(club_status(&b).offer_stale);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 120));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+    const BenchBlock* eebb = trade_block(b.f_blocks, b.n_f_blocks, 0);
+    ASSERT_TRUE(trade_block_is(eebb, GEN3_TRADE_BOTH_CANCEL, 0));
+    ASSERT_TRUE(eebb->first_burst <= at + 12);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    ASSERT_TRUE(fake_ruby_relink_frames(&b.ruby) < 100);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseRoom);
+    ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE);
+    ASSERT_TRUE(st.partner_valid);
+    ASSERT_TRUE(st.resit_needed);
+    ASSERT_TRUE(!st.offer_stale);
+    /* §B6.3: the GBA checked the Flipper's 0x1111 LinkPlayer against its Part A copy */
+    const Gen3LinkPlayer* p = fake_ruby_partner(&b.ruby);
+    ASSERT_EQ(p->link_type, GEN3_LINKTYPE_TRADE);
+    ASSERT_EQ(p->trainer_id, 22222);
+    gen3_text_decode(p->name, sizeof(p->name), name, sizeof(name));
+    ASSERT_STR_EQ(name, "FLIPPER");
+    ASSERT_TRUE(fake_ruby_on_seat(&b.ruby));
+
+    /* Standing on the seat never triggers it again (§B1.1) */
+    const uint32_t sits = b.sent_cafe16;
+    fake_ruby_sit(&b.ruby, 1);
+    run(&b, 300);
+    ASSERT_EQ(b.sent_cafe16, sits);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyRoom);
+    ASSERT_TRUE(club_status(&b).resit_needed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+
+    fake_ruby_resit(&b.ruby);
+    ASSERT_TRUE(run_until_browsing(&b, 800));
+    ASSERT_EQ(b.sent_cafe16, sits + 1);
+    ASSERT_EQ(fake_ruby_enemy_count(&b.ruby), 1);
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), z, GEN3_PARTY_SIZE);
+    st = club_status(&b);
+    ASSERT_TRUE(!st.resit_needed);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseMenu);
+    ASSERT_TRUE(!st.offer_stale);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 1);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_edit_after_dddd_never_ccdd) {
+    /* Save safety (§B3.4): the offer changes after the DDDD, while the GBA confirms. No EEBB
+     * interrupts its prompt; its YES (BBBB) gets EEBB, never CCDD */
+    Bench b;
+    uint8_t z[GEN3_PARTY_SIZE];
+    uint16_t codes[8];
+    make_z(z);
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuConfirming, 60));
+    ASSERT_EQ(club_status(&b).menu, Gen3ClubMenuOffered);
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 0));
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 200));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1); /* the DDDD only */
+    fake_ruby_answer(&b.ruby, true);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 120));
+    ASSERT_EQ(bench_codes(b.f_blocks, b.n_f_blocks, codes, 8), 2);
+    ASSERT_EQ(codes[0], GEN3_TRADE_SET_MONS);
+    ASSERT_EQ(codes[1], GEN3_TRADE_BOTH_CANCEL);
+    const BenchBlock* bbbb = trade_block(b.g_blocks, b.n_g_blocks, 1);
+    ASSERT_TRUE(trade_block_is(bbbb, GEN3_TRADE_CONFIRM, 2));
+    ASSERT_TRUE(replied_after(bbbb, trade_block(b.f_blocks, b.n_f_blocks, 1)));
+    ASSERT_TRUE(!club_status(&b).trade_pending);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    run(&b, 100);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_START), 0);
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 0);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_edit_before_reexchange) {
+    /* §B6.1, D6: an offer set before the post-save exchange's round 1 is what that exchange shows,
+     * with no EEBB and no GBA input */
+    Bench b;
+    uint8_t z[GEN3_PARTY_SIZE];
+    bool answered = false;
+    bool set = false;
+    make_z(z);
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    for(int i = 0; i < 4000; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        const FakeRubyMenuState menu = fake_ruby_menu_state(&b.ruby);
+        if(!answered && menu == FakeRubyMenuPrompt) {
+            fake_ruby_answer(&b.ruby, true);
+            answered = true;
+        }
+        if(!set && club_status(&b).trades_done == 1) {
+            ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 1)); /* the frame of sync 3 */
+            set = true;
+        }
+        if(set && menu == FakeRubyMenuBrowsing) break;
+    }
+    ASSERT_TRUE(set);
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuBrowsing);
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), z, GEN3_PARTY_SIZE);
+    run(&b, 2000);
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuBrowsing);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 0);
+    ASSERT_TRUE(!club_status(&b).offer_stale);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_two_round_trips) {
+    /* Review Focus 1: trade, edit the offer (EEBB, back to the room, re-sit), trade again */
+    Bench b;
+    uint8_t z[GEN3_PARTY_SIZE];
+    uint8_t y_traded[GEN3_PARTY_SIZE];
+    uint8_t got[GEN3_PARTY_SIZE];
+    uint32_t done = 0;
+    Gen3Pkm want;
+    Gen3Pkm have;
+    make_z(z);
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    ASSERT_TRUE(bench_trade(&b, 2));
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 1));
+    ASSERT_TRUE(run_until_back_in_room(&b));
+    fake_ruby_resit(&b.ruby);
+    ASSERT_TRUE(run_until_browsing(&b, 800));
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), z, GEN3_PARTY_SIZE);
+    memcpy(y_traded, fake_ruby_party(&b.ruby, 2, false), GEN3_PARTY_SIZE);
+    ASSERT_TRUE(bench_trade(&b, 2));
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+
+    /* The GBA saved Z with Friendship 70 in slot 2 */
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 2);
+    tm_make_pkm(255, 12, 31, &want);
+    gen3_pkm_set(&want, Gen3FieldFriendship, 70);
+    gen3_pkm_fix_checksum(&want);
+    ASSERT_TRUE(gen3_pkm_decrypt(fake_ruby_party(&b.ruby, 2, true), GEN3_PARTY_SIZE, &have));
+    ASSERT_MEM_EQ(have.raw, want.raw, GEN3_PARTY_SIZE);
+
+    /* The Flipper received the GBA's slot 2 before trade 2: Y with Friendship 70 */
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.trades_done, 2);
+    ASSERT_EQ(st.last_result, Gen3TradeResultDone);
+    gen3_club_get_received(&b.club, got, &done);
+    ASSERT_EQ(done, 2);
+    ASSERT_MEM_EQ(got, y_traded, GEN3_PARTY_SIZE);
+    traded_offer(&want);
+    ASSERT_TRUE(gen3_pkm_decrypt(got, GEN3_PARTY_SIZE, &have));
+    ASSERT_MEM_EQ(have.raw, want.raw, GEN3_PARTY_SIZE);
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 1);
+}
+
+TEST(test_trade_eebb_retry_after_summary) {
+    /* Review Focus 4, §B3.4 (T2): an EEBB that arrives while the GBA shows a summary is lost; the
+     * club resends it once GEN3_CLUB_EEBB_RETRY_BURSTS pass without the GBA's 5FFF */
+    Bench b;
+    uint8_t z[GEN3_PARTY_SIZE];
+    make_z(z);
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_open_summary(&b.ruby);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuSummary, 5));
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, z, 0));
+    run(&b, 100);
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+    const BenchBlock* first = trade_block(b.f_blocks, b.n_f_blocks, 0);
+    ASSERT_TRUE(trade_block_is(first, GEN3_TRADE_BOTH_CANCEL, 0));
+    ASSERT_EQ(fake_ruby_menu_state(&b.ruby), FakeRubyMenuSummary);
+    fake_ruby_close_summary(&b.ruby);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuBrowsing, 5)); /* the EEBB is lost */
+    const uint32_t answers = b.sent_5fff;
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 200));
+    ASSERT_EQ(b.sent_5fff, answers + 1);
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 2);
+    const BenchBlock* second = trade_block(b.f_blocks, b.n_f_blocks, 1);
+    ASSERT_TRUE(trade_block_is(second, GEN3_TRADE_BOTH_CANCEL, 0));
+    ASSERT_TRUE(second->first_burst >= first->first_burst + 180);
+    ASSERT_TRUE(second->first_burst <= first->first_burst + 190);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 2);
+    ASSERT_EQ(club_status(&b).link_type, GEN3_LINKTYPE_TRADE);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_checksum_glitch_resits) {
+    /* Review Focus 4, D4: a checksum error the Flipper counts in the party exchange (a glitch at
+     * its own receiver: the GBA is fine) taints the session. The GBA gets an unsolicited EEBB,
+     * never DDDD; it re-sits, and the clean exchange trades */
+    Bench b;
+    uint16_t codes[8];
+    bool glitched = false;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_to_room(&b));
+    fake_ruby_sit(&b.ruby, 1);
+    for(int i = 0; i < 900 && club_status(&b).phase != Gen3ClubPhaseMenu; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        if(!glitched && club_status(&b).round == 2) {
+            fake_ruby_corrupt_next_checksum(&b.ruby);
+            glitched = true;
+        }
+    }
+    ASSERT_TRUE(glitched);
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseMenu);
+    ASSERT_EQ(st.link.checksum_errors, 1);
+    ASSERT_TRUE(st.offer_stale);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 200));
+    ASSERT_EQ(bench_codes(b.f_blocks, b.n_f_blocks, codes, 8), 1);
+    ASSERT_EQ(codes[0], GEN3_TRADE_BOTH_CANCEL);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    fake_ruby_resit(&b.ruby);
+    ASSERT_TRUE(run_until_browsing(&b, 800));
+    st = club_status(&b);
+    ASSERT_EQ(st.link.checksum_errors, 1);
+    ASSERT_TRUE(!st.offer_stale);
+    ASSERT_TRUE(bench_trade(&b, 0));
+    ASSERT_EQ(bench_codes(b.f_blocks, b.n_f_blocks, codes, 8), 4);
+    ASSERT_EQ(codes[0], GEN3_TRADE_BOTH_CANCEL);
+    ASSERT_EQ(codes[1], GEN3_TRADE_SET_MONS);
+    ASSERT_EQ(codes[2], GEN3_TRADE_START);
+    ASSERT_EQ(codes[3], GEN3_TRADE_ANIM_ACK);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+/* From Browsing, set_offer(Z) sends the GBA back to the room. At its 0x1111 OpenLink a raw
+ * master relinks instead of the club, with the club's 0x1111 LinkPlayer but this trainer id and
+ * name. The fake's error after 200 frames. */
+static const char* relink_1111_as(Bench* b, uint32_t trainer_id, const char* name) {
+    Gen3LinkPlayer lp;
+    uint8_t card[GEN3_TRAINER_CARD_BLOCK_SIZE];
+    uint8_t z[GEN3_PARTY_SIZE];
+    make_z(z);
+    bench_init_trade(b);
+    gen3_club_claim_game(&club_cfg_trade, &b->me, GEN3_LINKTYPE_TRADE, false, &lp, card);
+    lp.trainer_id = trainer_id;
+    gen3_text_encode(name, lp.name, sizeof(lp.name), 7);
+    if(!bench_reach_menu(b)) return "no menu";
+    if(!gen3_club_set_offer(&b->club, z, 0)) return "no offer";
+    if(!run_until_fake_phase(b, FakeRubyReturn, 120)) return "no return";
+    for(int i = 0; i < 40 && fake_ruby_relink_frames(&b->ruby) != UINT32_MAX; i++) step(b);
+    if(fake_ruby_relink_frames(&b->ruby) != UINT32_MAX) return "no open link";
+    bench_raw_relink(b, &lp, 200);
+    return fake_ruby_error(&b->ruby);
+}
+
+TEST(test_trade_relink_identity_checked) {
+    /* §B6.3 sub_800826C: after an EEBB the GBA checks the 0x1111 LinkPlayer against its Part A
+     * copy, trainer id and name */
+    Bench b;
+    const char* error = relink_1111_as(&b, 22223, "FLIPPER");
+    ASSERT_TRUE(error != NULL);
+    ASSERT_STR_EQ(error, "relink mismatch");
+    error = relink_1111_as(&b, 22222, "FLIPPEX");
+    ASSERT_TRUE(error != NULL);
+    ASSERT_STR_EQ(error, "relink mismatch");
+    /* The club's own identity passes: the GBA reaches its room */
+    ASSERT_TRUE(relink_1111_as(&b, 22222, "FLIPPER") == NULL);
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyRoom);
+}
+
+TEST(test_trade_empty_offer_eebb) {
+    /* R8, D4: no offer at round 1, so the GBA's menu shows no Flipper Pokemon. Once round 5 is
+     * done an unsolicited EEBB sends the GBA back to the room; never a DDDD */
+    Bench b;
+    uint16_t codes[8];
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_to_room(&b));
+    fake_ruby_sit(&b.ruby, 1);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyMenu, 400));
+    ASSERT_EQ(club_status(&b).round, 0);
+    ASSERT_TRUE(gen3_club_set_offer(&b.club, NULL, 0));
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 600));
+    ASSERT_EQ(fake_ruby_enemy_count(&b.ruby), 0);
+    ASSERT_EQ(bench_codes(b.f_blocks, b.n_f_blocks, codes, 8), 1);
+    ASSERT_EQ(codes[0], GEN3_TRADE_BOTH_CANCEL);
+    /* 6 idle bursts (and a little) after both round-5 blocks */
+    const int fk = latest_block(b.f_blocks, b.n_f_blocks, 40);
+    const int gk = latest_block(b.g_blocks, b.n_g_blocks, 40);
+    ASSERT_TRUE(fk >= 0 && gk >= 0);
+    const uint32_t done = later_burst(b.f_blocks[fk].last_burst, b.g_blocks[gk].last_burst);
+    const BenchBlock* eebb = trade_block(b.f_blocks, b.n_f_blocks, 0);
+    ASSERT_TRUE(eebb != NULL);
+    ASSERT_TRUE(eebb->first_burst >= done + 7);
+    ASSERT_TRUE(eebb->first_burst <= done + 12);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseRoom);
+    ASSERT_TRUE(st.resit_needed);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_editing_sends_eebb) {
+    /* O1 (G14): the app opens the editor while the GBA browses. One EEBB; the GBA re-sits, but
+     * the Flipper doesn't sit until the edit is done, then joins it (R5) */
+    Bench b;
+    uint8_t offer[GEN3_PARTY_SIZE];
+    tm_make(252, 5, 21, offer); /* bench_init_trade's offer */
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    const uint32_t at = b.bursts;
+    ASSERT_TRUE(gen3_club_set_editing(&b.club, true, 0));
+    ASSERT_TRUE(club_status(&b).editing);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 120));
+    ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+    const BenchBlock* eebb = trade_block(b.f_blocks, b.n_f_blocks, 0);
+    ASSERT_TRUE(trade_block_is(eebb, GEN3_TRADE_BOTH_CANCEL, 0));
+    ASSERT_TRUE(eebb->first_burst <= at + 12);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseRoom);
+    ASSERT_EQ(st.link_type, GEN3_LINKTYPE_TRADE);
+    ASSERT_TRUE(st.resit_needed);
+    ASSERT_TRUE(st.editing); /* app state: survives the relinks */
+
+    const uint32_t sits = b.sent_cafe16;
+    fake_ruby_resit(&b.ruby);
+    for(int i = 0; i < 200 && !club_status(&b).gba_seated; i++) step(&b);
+    st = club_status(&b);
+    ASSERT_TRUE(st.gba_seated);
+    ASSERT_TRUE(!st.resit_needed);
+    run(&b, 300);
+    ASSERT_EQ(b.sent_cafe16, sits); /* no sit while editing */
+    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubySeated);
+
+    ASSERT_TRUE(gen3_club_set_editing(&b.club, false, 0));
+    ASSERT_TRUE(!club_status(&b).editing);
+    for(int i = 0; i < 10 && b.sent_cafe16 == sits; i++) step(&b);
+    ASSERT_EQ(b.sent_cafe16, sits + 1);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyMenu, 200));
+    ASSERT_TRUE(run_until_browsing(&b, 600));
+    ASSERT_MEM_EQ(fake_ruby_enemy(&b.ruby, 0), offer, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(!club_status(&b).offer_stale);
+    ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+}
+
+TEST(test_trade_editing_blocks_ccdd) {
+    /* O1: while editing, the GBA's BBBB gets EEBB, never CCDD; and its AABB, never DDDD */
+    {
+        Bench b;
+        uint16_t codes[8];
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        fake_ruby_offer(&b.ruby, 2);
+        ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+        ASSERT_TRUE(gen3_club_set_editing(&b.club, true, 0));
+        fake_ruby_answer(&b.ruby, true);
+        ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 120));
+        ASSERT_EQ(bench_codes(b.f_blocks, b.n_f_blocks, codes, 8), 2);
+        ASSERT_EQ(codes[0], GEN3_TRADE_SET_MONS);
+        ASSERT_EQ(codes[1], GEN3_TRADE_BOTH_CANCEL);
+        ASSERT_EQ(bench_codes(b.g_blocks, b.n_g_blocks, codes, 8), 2);
+        ASSERT_EQ(codes[1], GEN3_TRADE_CONFIRM);
+        ASSERT_TRUE(!club_status(&b).trade_pending);
+        run(&b, 200);
+        ASSERT_EQ(f_code_count(&b, GEN3_TRADE_START), 0);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+    {
+        Bench b;
+        uint16_t codes[8];
+        bench_init_trade(&b);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        fake_ruby_offer(&b.ruby, 2); /* the same frame */
+        ASSERT_TRUE(gen3_club_set_editing(&b.club, true, 0));
+        ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 120));
+        ASSERT_EQ(bench_codes(b.g_blocks, b.n_g_blocks, codes, 8), 1);
+        ASSERT_EQ(codes[0], GEN3_TRADE_READY);
+        ASSERT_EQ(bench_codes(b.f_blocks, b.n_f_blocks, codes, 8), 1);
+        ASSERT_EQ(codes[0], GEN3_TRADE_BOTH_CANCEL);
+        run(&b, 200);
+        ASSERT_EQ(n_trade_blocks(b.f_blocks, b.n_f_blocks), 1);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+    }
+}
+
+TEST(test_trade_editing_refused_while_pending) {
+    /* O1: editing can't begin once CCDD is queued, nor before the app has seen the trade's
+     * Pokemon; clearing it always works */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+    fake_ruby_answer(&b.ruby, true);
+    for(int i = 0; i < 60 && !club_status(&b).trade_pending; i++) step(&b);
+    ASSERT_TRUE(club_status(&b).trade_pending); /* the frame CCDD is queued */
+    ASSERT_EQ(club_status(&b).menu, Gen3ClubMenuStarting);
+    ASSERT_TRUE(!gen3_club_set_editing(&b.club, true, 0));
+    ASSERT_TRUE(!club_status(&b).editing);
+    for(int i = 0; i < 4000 && club_status(&b).trades_done == 0; i++) {
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        ASSERT_TRUE(!club_status(&b).editing);
+    }
+    ASSERT_EQ(club_status(&b).trades_done, 1);
+    ASSERT_TRUE(!club_status(&b).trade_pending);
+    ASSERT_TRUE(!gen3_club_set_editing(&b.club, true, 0)); /* trade 1 not seen */
+    ASSERT_TRUE(!club_status(&b).editing);
+    ASSERT_TRUE(gen3_club_set_editing(&b.club, true, 1));
+    ASSERT_TRUE(club_status(&b).editing);
+    /* The post-save menu then gets an EEBB */
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 600));
+    ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 1);
+    ASSERT_TRUE(gen3_club_set_editing(&b.club, false, 7)); /* clearing ignores trades_seen */
+    ASSERT_TRUE(!club_status(&b).editing);
+}
+
 TEST(test_club_size) {
     ASSERT_TRUE(sizeof(Gen3Club) <= 2600);
 }
@@ -1768,6 +2325,20 @@ int main(void) {
     RUN(test_trade_close_skipped_trips_fake);
     RUN(test_trade_lost_before_menu_close);
     RUN(test_trade_pending_survives_menu_close);
+    RUN(test_trade_sync2_answer_framing_error);
+    RUN(test_trade_sync2_answer_still_queued);
+    RUN(test_trade_unexpected_1111);
+    RUN(test_trade_edit_in_menu_sends_eebb);
+    RUN(test_trade_edit_after_dddd_never_ccdd);
+    RUN(test_trade_edit_before_reexchange);
+    RUN(test_trade_two_round_trips);
+    RUN(test_trade_eebb_retry_after_summary);
+    RUN(test_trade_checksum_glitch_resits);
+    RUN(test_trade_relink_identity_checked);
+    RUN(test_trade_empty_offer_eebb);
+    RUN(test_trade_editing_sends_eebb);
+    RUN(test_trade_editing_blocks_ccdd);
+    RUN(test_trade_editing_refused_while_pending);
     RUN(test_club_size);
     TEST_EXIT();
 }

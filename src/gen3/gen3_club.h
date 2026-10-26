@@ -12,7 +12,8 @@
 /* Cable Club (Trade Center) state machine, Flipper as multiplayer master: linkup, the room and
  * leaving it (docs/gen3/link-protocol.md §A6-A8, §B7), and in a trade session sitting down, the
  * relink for the trade menu, its party exchange, the trade menu with the Flipper as the arbiter,
- * the trade and the GBA's link save (docs/gen3/link-protocol-trade.md §B1-B6.1). Pure C, no heap;
+ * the trade and the GBA's link save, and the EEBB that sends the GBA back to the room when the
+ * Flipper's Pokemon changes (docs/gen3/link-protocol-trade.md §B1-B7). Pure C, no heap;
  * gen3_club_frame runs in the link frame ISR. */
 
 #define GEN3_CLUB_CARD_DELAY_BURSTS 10 /* idle bursts between both player blocks and 0xCCCC (§A6, U3 margin >= 5) */
@@ -30,6 +31,7 @@
  * >= 2) */
 #define GEN3_CLUB_REPLY_DELAY_BURSTS  6
 #define GEN3_CLUB_SAVE_SYNCS          3 /* the GBA's 2FFEs in one link save (§B5.1) */
+#define GEN3_CLUB_EEBB_RETRY_BURSTS   180 /* resend an EEBB without the GBA's 5FFF (T2: ~3 s) */
 
 /* The values are the phase numbers in the link log: append only. */
 typedef enum {
@@ -106,6 +108,13 @@ typedef struct {
     uint8_t save_syncs; /* GBA 2FFEs answered in this link save, 0..3; zeroed at CCDD */
     bool save_window; /* sync 1 answered, sync 3 not yet seen: don't stop the link (D10) */
     Gen3TradeResult last_result; /* how the latest pending trade ended; None before any */
+    /* Menu: the GBA's view of the Flipper's party is out of date (no offer, offer changed, or a
+     * checksum error in this 0x1122 session) or the app is editing: it gets EEBB */
+    bool offer_stale;
+    /* Room via 0x1111: the GBA's avatar is on its seat; it must step off and back on. Until the
+     * GBA's next CAFE 0016 or a 0x1133 linkup */
+    bool resit_needed;
+    bool editing; /* gen3_club_set_editing (O1) */
 } Gen3ClubStatus;
 
 typedef struct Gen3Club Gen3Club;
@@ -151,6 +160,8 @@ struct Gen3Club {
     /* R8: round 1 showed the GBA a Flipper Pokemon (party_mon had one); else its partner column
      * is empty */
     bool party_shown;
+    bool tainted; /* a checksum error was counted in this link session (D4) */
+    uint8_t eebb_bursts; /* Leaving: bursts since the latest EEBB went out, up to the retry */
     Gen3Pkm scratch; /* the GBA mon of the latest AABB, decrypted (R2) */
     /* Trade context: survives relinks (D3) */
     uint8_t offer[GEN3_PARTY_SIZE]; /* the Flipper's one party Pokemon, game form; zeros if none */
@@ -168,6 +179,11 @@ struct Gen3Club {
     Gen3TradeResult last_result;
     uint8_t received[GEN3_PARTY_SIZE]; /* the latest finalized trade's Pokemon, game form */
     bool national_dex; /* lp_field_2 of the Flipper's 0x1144 block (§B4.5); never reset */
+    /* The Flipper's EEBB sent the GBA toward the room: its next LinkPlayerBlock is 0x1111 (§B6.3,
+     * D2). Consumed by that block, whatever its type */
+    bool return_due;
+    bool resit_needed;
+    bool editing; /* O1: app state, like the offer */
 };
 
 /* The one place that decides which game the Flipper claims to be (D11). Fills the Flipper's
@@ -195,6 +211,11 @@ void gen3_club_status(const Gen3Club* club, Gen3ClubStatus* out);
  * latest trade can't overwrite the received Pokemon. Unchecked (G6): the app offers only a
  * Pokemon that passes gen3_trade_offer_check. */
 bool gen3_club_set_offer(Gen3Club* club, const uint8_t* game, uint32_t trades_seen);
+/* O1: the app is editing the offer. While set, offer_stale is true (EEBB to every GBA block in
+ * Menu, and an unsolicited EEBB), and the club never sits, nor sends DDDD or CCDD. Setting it
+ * fails (false, nothing changed) while trade_pending, or when trades_seen != trades_done (a
+ * received Pokemon the app hasn't seen). Clearing it always succeeds (trades_seen unused). */
+bool gen3_club_set_editing(Gen3Club* club, bool on, uint32_t trades_seen);
 /* National Dex for the GBA (D10, §B4.5): while on, the Flipper's 0x1144 block carries lp_field_2
  * 0x8000. Off after init; the club never changes it. */
 void gen3_club_set_national_dex(Gen3Club* club, bool on);

@@ -9,8 +9,9 @@
 /* Test-only model of Pokemon Ruby as the multiplayer child (slot 1) during the Trade Center
  * linkup, the room and leaving it (docs/gen3/link-protocol.md §A2-A7, §B7), sitting down, the
  * trade menu's relink, its party exchange and the menu itself with the Flipper as the arbiter,
- * the trade's relink, animation and TradeMons, and the link save with its way back to the trade
- * menu (docs/gen3/link-protocol-trade.md §B1-B6.1). It models the child's own link stack and does
+ * the trade's relink, animation and TradeMons, the link save with its way back to the trade
+ * menu, and an EEBB's way back to the room with its 0x1111 relink and the re-sit
+ * (docs/gen3/link-protocol-trade.md §B1-B7). It models the child's own link stack and does
  * not use src/gen3/gen3_link.c: the per-transfer ISR (DoHandshake, DoRecv, DoSend), its own send
  * and receive queues, LinkMain1/LinkMain2 with gSendCmd/gRecvCmds, gLinkCallback, the
  * cable_club.c linkup tasks, and in the room the lockstep game update (CB1_OverworldLink: player
@@ -94,6 +95,9 @@ typedef enum {
     FakeRubyTaskTradeEvolution, /* callback2 sub_804D588 [CB2_TryLinkTradeEvolution] */
     FakeRubyTaskSave, /* callback2 sub_804DC88 [CB2_SaveAndEndTrade] */
     FakeRubyTaskFreeTradeAnim, /* callback2 sub_804E144 [CB2_FreeTradeAnim] */
+    /* callback2 sub_805465C [CB2_ReturnToFieldFromMultiplayer], then CB2_ReturnToFieldLink */
+    FakeRubyTaskReturnField,
+    FakeRubyTaskReestablish, /* sub_8083710 [Task_ReestablishLink] .. sub_80837EC */
 } FakeRubyTask;
 
 /* gUnknown_03000584 [sPlayerKeyInterceptCallback]: picks the key code this GBA sends next. */
@@ -186,6 +190,7 @@ struct FakeRuby {
     uint16_t block_recv_size[FAKE_RUBY_PLAYERS], block_recv_pos[FAKE_RUBY_PLAYERS];
     uint8_t block_recv_buffer[FAKE_RUBY_PLAYERS][FAKE_RUBY_BLOCK_MAX];
     bool link_player_pending[FAKE_RUBY_PLAYERS]; /* gLinkPlayerPending */
+    Gen3LinkPlayer saved_players[FAKE_RUBY_PLAYERS]; /* gSavedLinkPlayers (sub_80081C8, Part A) */
     bool received_link_players; /* gReceivedRemoteLinkPlayers */
     uint8_t block_received; /* gBlockReceived, bit i = slot i */
     Gen3LinkPlayer link_players[FAKE_RUBY_PLAYERS]; /* gLinkPlayers */
@@ -215,6 +220,9 @@ struct FakeRuby {
     /* Part B: the seat (overworld.c, cable_club.c) and the trade menu (trade.c) */
     bool sit_pending; /* fake_ruby_sit: a step onto sit_seat finishes at the next room update */
     uint8_t sit_seat;
+    bool resit_pending; /* fake_ruby_resit, seen by the next room update */
+    uint8_t resit_updates; /* game updates left holding Up, then Down */
+    uint8_t fade_in_updates; /* task_mpl_807DD60: game updates left in the fade-in */
     bool b_press; /* fake_ruby_stand_up: B is new at the next room update */
     bool on_seat; /* the avatar stands on a seat tile */
     uint8_t seat; /* VAR_0x8005 of the seat script */
@@ -259,6 +267,9 @@ struct FakeRuby {
     bool cancel_pending;
     bool press_a_pending;
     bool press_r_pending;
+    bool summary_pending; /* fake_ruby_open_summary */
+    bool summary_close_pending; /* fake_ruby_close_summary */
+    bool in_summary; /* callback2 is the summary screen; callback1 still reads the blocks */
     bool answer_pending; /* kept until the prompt is up */
     bool answer_yes;
 
@@ -300,6 +311,11 @@ void fake_ruby_corrupt_next_checksum(FakeRuby* g);
 void fake_ruby_sit(FakeRuby* g, uint8_t seat);
 /* "Please wait...": the player presses B, seen by the next game update in the room (§B1.2). */
 void fake_ruby_stand_up(FakeRuby* g);
+/* Room, its player IDLE, seen by the next game update: the player steps off its seat (16 game
+ * updates holding Up, 0x13) and back on (16 holding Down, 0x12), with no A press (§B7 step 4).
+ * The steps themselves aren't simulated; then the seat event, as for fake_ruby_sit. No effect in
+ * another phase or while the player isn't IDLE. */
+void fake_ruby_resit(FakeRuby* g);
 /* The avatar stands on a seat tile: a fake_ruby_sit step was taken, whether or not it ran the
  * seat script. */
 bool fake_ruby_on_seat(const FakeRuby* g);
@@ -335,7 +351,9 @@ FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
  * the standby callback: either way the sync passes without the Flipper), "close skipped" (the
  * link save's SetCloseLinkCallback ignored while gLinkCallback was busy: Ruby hangs in
  * sub_804DC88 state 9). Like the hangs, these two need a stray Flipper command that makes this
- * GBA send a block (a 2222, or a CCCC) */
+ * GBA send a block (a 2222, or a CCCC). "relink mismatch" (the 0x1111 relink after an EEBB: the
+ * Flipper's trainer id, or its name up to the first EOS, differs from the Part A linkup's:
+ * sub_800826C closes the link, CB2_LinkError) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as Ruby parsed it */
 const Gen3LinkPlayer* fake_ruby_partner(const FakeRuby* g);
@@ -366,6 +384,12 @@ void fake_ruby_cancel_trade(FakeRuby* g);
 void fake_ruby_answer(FakeRuby* g, bool yes);
 /* Message: A, back to Browsing. */
 void fake_ruby_press_a(FakeRuby* g);
+/* Browsing: SUMMARY of a Pokemon (ShowPokemonSummaryScreen). callback1 still handles the
+ * Flipper's blocks, but a slot-0 EEBB handled while the summary is open is lost: closing it runs
+ * sub_80484F4 [CB2_ReturnToTradeMenu], which resets the menu state (§B3.4, T2). */
+void fake_ruby_open_summary(FakeRuby* g);
+/* Summary: back to Browsing. */
+void fake_ruby_close_summary(FakeRuby* g);
 /* Browsing: R, the debug block: linkData[i] = i, sent at once with no IsLinkTaskFinished guard
  * (§B3.2). It stays Browsing. */
 void fake_ruby_press_r(FakeRuby* g);
