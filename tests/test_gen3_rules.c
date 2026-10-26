@@ -140,6 +140,85 @@ TEST(test_traits_of_golden) {
     ASSERT_EQ(t.ability_slot, 0);
 }
 
+TEST(test_rng) {
+    Gen3Rng r;
+    gen3_rng_seed(&r, 1);
+    ASSERT_EQ(gen3_rng_next(&r), 0x00042021);
+    gen3_rng_seed(&r, 0);
+    ASSERT_EQ(r.state, 0x6D2B79F5);
+}
+
+static void check_find(Gen3Rng* rng, uint16_t nat, uint32_t ot_id, const Gen3Traits* want) {
+    const Gen3SpeciesInfo* info = gen3_species(nat);
+    Gen3Traits n = *want;
+    if(info->gender_ratio == 0) n.gender = Gen3GenderMale;
+    if(info->gender_ratio == 254) n.gender = Gen3GenderFemale;
+    if(info->gender_ratio == 255) n.gender = Gen3GenderNone;
+    if(info->ability[1] == 0) n.ability_slot = 0;
+    if(nat != GEN3_NATIONAL_UNOWN) n.unown_letter = 0;
+    uint32_t pid = 0;
+    ASSERT_TRUE(gen3_pid_find(rng, nat, ot_id, want, &pid));
+    ASSERT_EQ(pid % 25, n.nature);
+    ASSERT_EQ(gen3_gender_of(info->gender_ratio, pid), n.gender);
+    ASSERT_EQ(gen3_is_shiny(ot_id, pid), n.shiny);
+    if(info->ability[1] != 0) ASSERT_EQ(pid & 1, n.ability_slot);
+    if(nat == GEN3_NATIONAL_UNOWN) ASSERT_EQ(gen3_unown_letter(pid), n.unown_letter);
+}
+
+TEST(test_pid_find_matrix) {
+    static const uint16_t species[] = {1, 280, 29, 81, 201};
+    static const uint8_t letters[] = {0, 25, 26, 27};
+    Gen3Rng rng;
+    gen3_rng_seed(&rng, 42);
+    for(unsigned si = 0; si < sizeof(species) / sizeof(species[0]); si++) {
+        bool unown = species[si] == GEN3_NATIONAL_UNOWN;
+        for(uint8_t nature = 0; nature < 25; nature++)
+            for(int shiny = 0; shiny < 2; shiny++)
+                for(int g = 0; g < 2; g++)
+                    for(uint8_t ab = 0; ab < 2; ab++)
+                        for(int li = 0; li < (unown ? 4 : 1); li++) {
+                            Gen3Traits want = {
+                                nature,
+                                g ? Gen3GenderFemale : Gen3GenderMale,
+                                shiny != 0,
+                                ab,
+                                unown ? letters[li] : 0};
+                            check_find(&rng, species[si], 0x1234ABCDu, &want);
+                        }
+    }
+}
+
+TEST(test_pid_find_deterministic) {
+    Gen3Traits want = {7, Gen3GenderFemale, true, 1, 0};
+    Gen3Rng a, b;
+    gen3_rng_seed(&a, 99);
+    gen3_rng_seed(&b, 99);
+    uint32_t p1 = 0, p2 = 0;
+    ASSERT_TRUE(gen3_pid_find(&a, 280, 0xCAFEF00Du, &want, &p1));
+    ASSERT_TRUE(gen3_pid_find(&b, 280, 0xCAFEF00Du, &want, &p2));
+    ASSERT_EQ(p1, p2);
+}
+
+static void check_moves(uint16_t nat, uint8_t lv, uint16_t a, uint16_t b, uint16_t c, uint16_t d) {
+    uint16_t m[4];
+    gen3_default_moves(nat, lv, m);
+    ASSERT_EQ(m[0], a);
+    ASSERT_EQ(m[1], b);
+    ASSERT_EQ(m[2], c);
+    ASSERT_EQ(m[3], d);
+}
+
+TEST(test_default_moves) {
+    check_moves(252, 5, 1, 43, 0, 0);
+    check_moves(252, 6, 1, 43, 71, 0);
+    check_moves(252, 30, 98, 228, 103, 72);
+    check_moves(2, 5, 33, 45, 73, 0);
+    check_moves(2, 22, 22, 77, 79, 75);
+    check_moves(201, 50, 237, 0, 0, 0);
+    check_moves(1, 1, 33, 0, 0, 0);
+    check_moves(0, 50, 0, 0, 0, 0);
+}
+
 int main(void) {
     RUN(test_exp_table);
     RUN(test_level_for_exp);
@@ -152,5 +231,9 @@ int main(void) {
     RUN(test_is_shiny);
     RUN(test_unown_letter);
     RUN(test_traits_of_golden);
+    RUN(test_rng);
+    RUN(test_pid_find_matrix);
+    RUN(test_pid_find_deterministic);
+    RUN(test_default_moves);
     TEST_EXIT();
 }

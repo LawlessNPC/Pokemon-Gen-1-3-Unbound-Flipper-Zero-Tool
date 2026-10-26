@@ -97,7 +97,7 @@ void gen3_calc_stats(const Gen3Pkm* p, uint16_t out[Gen3StatCount]) {
             level,
             nature);
     }
-    if(national == GEN3_SHEDINJA_NATIONAL) out[Gen3StatHp] = 1;
+    if(national == GEN3_NATIONAL_SHEDINJA) out[Gen3StatHp] = 1;
 }
 
 void gen3_recalc_party(Gen3Pkm* p) {
@@ -146,4 +146,75 @@ void gen3_traits_of(const Gen3Pkm* p, Gen3Traits* out) {
     out->shiny = gen3_is_shiny(gen3_pkm_get(p, Gen3FieldOtId), pid);
     out->ability_slot = gen3_pkm_get(p, Gen3FieldAbilityBit);
     out->unown_letter = gen3_unown_letter(pid);
+}
+
+void gen3_rng_seed(Gen3Rng* rng, uint32_t seed) {
+    rng->state = seed ? seed : 0x6D2B79F5u;
+}
+
+uint32_t gen3_rng_next(Gen3Rng* rng) {
+    uint32_t x = rng->state;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    rng->state = x;
+    return x;
+}
+
+bool gen3_pid_find(
+    Gen3Rng* rng,
+    uint16_t national,
+    uint32_t ot_id,
+    const Gen3Traits* want,
+    uint32_t* pid) {
+    const Gen3SpeciesInfo* info = gen3_species(national);
+    if(!info) return false;
+    Gen3Gender gender = want->gender;
+    if(info->gender_ratio == 0)
+        gender = Gen3GenderMale;
+    else if(info->gender_ratio == 254)
+        gender = Gen3GenderFemale;
+    else if(info->gender_ratio == 255)
+        gender = Gen3GenderNone;
+    bool two_abilities = info->ability[1] != 0;
+    bool unown = national == GEN3_NATIONAL_UNOWN;
+    uint32_t tid_sid = (ot_id & 0xFFFF) ^ (ot_id >> 16);
+
+    for(uint32_t i = 0; i < GEN3_PID_MAX_TRIES; i++) {
+        uint32_t r = gen3_rng_next(rng);
+        uint32_t lo = r & 0xFFFF;
+        uint32_t hi = r >> 16;
+        if(want->shiny) hi = tid_sid ^ lo ^ (gen3_rng_next(rng) & 7);
+        uint32_t cand = (hi << 16) | lo;
+        if(cand % 25 != want->nature) continue;
+        if(gen3_gender_of(info->gender_ratio, cand) != gender) continue;
+        if(two_abilities && (cand & 1) != want->ability_slot) continue;
+        if(unown && gen3_unown_letter(cand) != want->unown_letter) continue;
+        if(gen3_is_shiny(ot_id, cand) != want->shiny) continue;
+        *pid = cand;
+        return true;
+    }
+    return false;
+}
+
+void gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]) {
+    for(int i = 0; i < 4; i++) moves[i] = 0;
+    const uint16_t* entries;
+    size_t n = gen3_learnset(national, &entries);
+    for(size_t i = 0; i < n; i++) {
+        if((entries[i] >> 9) > level) break;
+        uint16_t mv = entries[i] & 0x1FF;
+        bool dup = false;
+        for(int s = 0; s < 4; s++)
+            if(moves[s] == mv) dup = true;
+        if(dup) continue;
+        int slot = -1;
+        for(int s = 0; s < 4 && slot < 0; s++)
+            if(moves[s] == 0) slot = s;
+        if(slot < 0) {
+            for(int s = 0; s < 3; s++) moves[s] = moves[s + 1];
+            slot = 3;
+        }
+        moves[slot] = mv;
+    }
 }

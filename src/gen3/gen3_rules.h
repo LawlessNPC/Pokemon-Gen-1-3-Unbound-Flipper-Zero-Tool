@@ -4,8 +4,6 @@
 #include <stdint.h>
 #include "gen3_pkm.h"
 
-#define GEN3_SHEDINJA_NATIONAL 292
-
 /* Total exp for a level, growth is a Gen3Growth. Level is clamped to 100; 0 -> 0, 1 -> 1. */
 uint32_t gen3_exp_for_level(uint8_t growth, uint8_t level);
 /* Largest level L <= 100 with gen3_exp_for_level(growth, L) <= exp (0 for exp 0). */
@@ -47,3 +45,27 @@ typedef struct {
 
 /* Gen3FieldSpecies holds the internal id. Gender is None for an unknown species. */
 void gen3_traits_of(const Gen3Pkm* p, Gen3Traits* out);
+
+typedef struct {
+    uint32_t state;
+} Gen3Rng; /* xorshift32 (13, 17, 5) */
+
+void gen3_rng_seed(Gen3Rng* rng, uint32_t seed); /* seed 0 -> 0x6D2B79F5 */
+uint32_t gen3_rng_next(Gen3Rng* rng);
+
+#define GEN3_PID_MAX_TRIES 1000000u
+/* Finds a PID for species `national` (1..386) and OT ot_id whose traits equal want, after
+ * normalising want: gender is ignored for ratios 0/254/255, ability_slot for one-ability
+ * species, unown_letter unless Unown. false (and *pid untouched) after GEN3_PID_MAX_TRIES
+ * or for an unknown species. */
+bool gen3_pid_find(
+    Gen3Rng* rng,
+    uint16_t national,
+    uint32_t ot_id,
+    const Gen3Traits* want,
+    uint32_t* pid);
+
+/* GiveBoxMonInitialMoveset: walk the learnset entries with level <= `level` in order; skip a
+ * move already in moves[]; else put it in the first empty slot; when all 4 are full, shift
+ * slots 1..3 down and put it in slot 3. */
+void gen3_default_moves(uint16_t national, uint8_t level, uint16_t moves[4]);
