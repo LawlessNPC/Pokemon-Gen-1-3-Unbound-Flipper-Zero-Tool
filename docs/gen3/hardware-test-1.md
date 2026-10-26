@@ -22,7 +22,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 - The log is overwritten each time the Link Test screen is opened. After a failed run, copy `apps_data/pokemon/gen3_link.log` off the SD card BEFORE reopening Link Test. The screen's last line is `Log: on` when logging works, `Log: off` when it does not.
 - Leaving the Link Test while linked shows a `Stop link?` dialog (`Stay` / `Stop`; Back is the same as `Stay`). Its text: "Your GBA may show a link error and need a restart. It saved before linking." After `Stop`, power-cycle the GBA if it shows a link error; Ruby saved before linking, so nothing is lost.
 - Screen layout: `Gen III Link Test`, `Cable: ...`, `Link: ...`, partner line (`name TID nnnnn`), `Frm n Err n T/O n`, `Log: ...`.
-- Other `Link:` texts on failure: `error: bad data`, `GBA chose other room`, `error`. A checksum error does not change the `Link:` line: it counts in `Err`, and if the GBA saw it too, the GBA drops the link and the Flipper goes back to `waiting for GBA`.
+- Other `Link:` texts on failure: `error: bad data`, `GBA chose other room`. A checksum error does not change the `Link:` line: it counts in `Err`, and if the GBA saw it too, the GBA drops the link and the Flipper goes back to `waiting for GBA`.
 
 ## Results
 
@@ -48,6 +48,6 @@ Tunables are `#define`s at the top of `src/gen3/mlink_hw_furi.c`. See `docs/gen3
 |---|---|
 | Received words look bit-reversed (e.g. `059D` instead of `B9A0`) | `MLINK_LSB_FIRST` 1 to 0 |
 | Garbled or missing words, slow rising edges on SD | `MLINK_SD_PUSH_PULL` 1 to 0 (open drain) or back to 1 |
-| Frequent `T/O` (child did not answer) | raise `MLINK_CHILD_TIMEOUT_US` |
+| Frequent `T/O` (child did not answer), unless the cable line showed `plug in/swap ends` (frames the Flipper skips for the cable count as `T/O`) | raise `MLINK_CHILD_TIMEOUT_US` |
 | Link drops after a fixed time, or GBA error | check `MLINK_TICK_DECI_US` / `MLINK_FRAME_DECI_US` (burst timing) and the 751.5 us end-to-start gap. `MLINK_TICK_DECI_US` must change together with `MLINK_TIM_ARR` (a compile-time check fails otherwise) |
 | `Frm` stays 0 | cable (step 4), pin config (step 3), `MLINK_CABLE_SETTLE_US` |
