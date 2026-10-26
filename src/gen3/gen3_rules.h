@@ -56,8 +56,9 @@ uint32_t gen3_rng_next(Gen3Rng* rng);
 #define GEN3_PID_MAX_TRIES 1000000u
 /* Finds a PID for species `national` (1..386) and OT ot_id whose traits equal want, after
  * normalising want: gender is ignored for ratios 0/254/255, ability_slot for one-ability
- * species, unown_letter unless Unown. false (and *pid untouched) after GEN3_PID_MAX_TRIES
- * or for an unknown species. */
+ * species, unown_letter unless Unown. false (and *pid untouched) for an unknown species, an
+ * out-of-range want (nature >= 25, ability_slot > 1, unown_letter >= 28, gender None on a
+ * two-gender species; no iteration), or after GEN3_PID_MAX_TRIES. */
 bool gen3_pid_find(
     Gen3Rng* rng,
     uint16_t national,

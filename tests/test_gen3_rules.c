@@ -166,7 +166,7 @@ static void check_find(Gen3Rng* rng, uint16_t nat, uint32_t ot_id, const Gen3Tra
 }
 
 TEST(test_pid_find_matrix) {
-    static const uint16_t species[] = {1, 280, 29, 81, 201};
+    static const uint16_t species[] = {1, 128, 280, 29, 81, 201};
     static const uint8_t letters[] = {0, 25, 26, 27};
     Gen3Rng rng;
     gen3_rng_seed(&rng, 42);
@@ -186,6 +186,31 @@ TEST(test_pid_find_matrix) {
                             check_find(&rng, species[si], 0x1234ABCDu, &want);
                         }
     }
+}
+
+TEST(test_pid_find_ignores_letter_off_unown) {
+    Gen3Rng rng;
+    gen3_rng_seed(&rng, 7);
+    Gen3Traits want = {12, Gen3GenderMale, false, 0, 5};
+    check_find(&rng, 1, 0x1234ABCDu, &want);
+}
+
+TEST(test_pid_find_rejects_bad_want) {
+    Gen3Rng rng;
+    gen3_rng_seed(&rng, 7);
+    uint32_t state = rng.state;
+    uint32_t pid = 0xDEADBEEF;
+    Gen3Traits bad_nature = {25, Gen3GenderMale, false, 0, 0};
+    ASSERT_TRUE(!gen3_pid_find(&rng, 1, 1, &bad_nature, &pid));
+    Gen3Traits bad_ab = {0, Gen3GenderMale, false, 2, 0};
+    ASSERT_TRUE(!gen3_pid_find(&rng, 280, 1, &bad_ab, &pid));
+    Gen3Traits bad_letter = {0, Gen3GenderNone, false, 0, 28};
+    ASSERT_TRUE(!gen3_pid_find(&rng, 201, 1, &bad_letter, &pid));
+    Gen3Traits none_on_gendered = {0, Gen3GenderNone, false, 0, 0};
+    ASSERT_TRUE(!gen3_pid_find(&rng, 1, 1, &none_on_gendered, &pid));
+    ASSERT_TRUE(!gen3_pid_find(&rng, 0, 1, &none_on_gendered, &pid));
+    ASSERT_EQ(pid, 0xDEADBEEF);
+    ASSERT_EQ(rng.state, state); /* failed fast, no tries */
 }
 
 TEST(test_pid_find_deterministic) {
@@ -233,6 +258,8 @@ int main(void) {
     RUN(test_traits_of_golden);
     RUN(test_rng);
     RUN(test_pid_find_matrix);
+    RUN(test_pid_find_ignores_letter_off_unown);
+    RUN(test_pid_find_rejects_bad_want);
     RUN(test_pid_find_deterministic);
     RUN(test_default_moves);
     TEST_EXIT();
