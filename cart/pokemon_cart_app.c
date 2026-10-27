@@ -4,6 +4,7 @@
 #include <src/include/pokemon_app.h>
 
 #include <src/scenes/include/pokemon_scene.h>
+#include <src/scenes/include/pokemon_gen3_cart.h>
 
 #include <gblink/include/gblink_pinconf.h>
 #include <src/gen3/gen3_bulk_furi.h>
@@ -19,7 +20,7 @@
 /* The two pin files, as gblink_pinconf.c and gen3_pins_furi.c name them in APP_DATA_PATH. Pins are
  * set in the pokemon app (its Pinout screen); this app reads its own data folder, so it takes a
  * copy of them at start. */
-static const char* const pokemon_cart_pin_files[] = {".gblink_pinconf", ".gen3_sd_pin"};
+static const char* const pokemon_cart_pin_files[] = {".gblink_pinconf", GEN3_SD_PIN_FILE_NAME};
 
 static bool pokemon_cart_custom_event_callback(void* context, uint32_t event) {
     furi_assert(context);
@@ -103,13 +104,19 @@ static PokemonFap* pokemon_cart_alloc(void) {
     gblink_pinconf_load(pokemon_fap->gblink_handle);
     gen3_sd_pin_load(pokemon_fap->gblink_handle);
 
-    scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Menu);
+    // The instructions; on the first entry they check the Gen III data file
+    scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3CartConnect, 0);
+    scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartConnect);
 
     return pokemon_fap;
 }
 
 static void pokemon_cart_free(PokemonFap* pokemon_fap) {
     furi_assert(pokemon_fap);
+
+    // The cartridge session stops its driver before gblink goes, and the progress view leaves the
+    // view dispatcher before it is freed
+    gen3_cart_ui_end(pokemon_fap);
 
     gblink_free(pokemon_fap->gblink_handle);
 

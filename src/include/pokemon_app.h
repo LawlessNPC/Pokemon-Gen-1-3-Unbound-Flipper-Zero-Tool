@@ -73,6 +73,13 @@ struct pokemon_fap {
     bool gen3_national_dex;
     /* The trade session has stopped (the GBA left): the tick doesn't start it again */
     bool gen3_trade_ended;
+
+    /* The pokemon_cart app (Cartridge) only; the pokemon app never uses them. Its progress view,
+     * and its scenes' state with the cartridge session (struct Gen3CartUi from
+     * src/scenes/include/pokemon_gen3_cart.h): allocated by the first Connect, kept until the app
+     * exits. */
+    void* gen3_cart_progress;
+    struct Gen3CartUi* gen3_cart_ui;
 };
 
 typedef struct pokemon_fap PokemonFap;
@@ -87,6 +94,7 @@ typedef enum {
     AppViewGen3LinkTest,
     AppViewGen3SpeciesSelect,
     AppViewGen3Trade,
+    AppViewGen3CartProgress,
 } AppView;
 
 /* Gen III trade app tick (every 100 ms, app thread, between UI events): while the trade screen

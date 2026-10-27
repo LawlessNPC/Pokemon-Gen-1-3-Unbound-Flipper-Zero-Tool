@@ -11,6 +11,14 @@
 #else
 #define POKEMON_SCENE_CONFIG <src/scenes/include/pokemon_scene_config.h>
 #endif
+/* The build's dependency scan (SCons) reads #include lines without the preprocessor, so it can't
+ * follow POKEMON_SCENE_CONFIG. The compiler skips these two lines; they name both tables to the
+ * scan, so that a scene added to either rebuilds every file that includes this header, and no
+ * object keeps an old scene table or PokemonSceneNum. */
+#if 0
+#include <src/scenes/include/pokemon_scene_config.h>
+#include <src/scenes/include/pokemon_cart_scene_config.h>
+#endif
 
 // Generate scene id and total number
 #define ADD_SCENE(prefix, name, id) PokemonScene##id,

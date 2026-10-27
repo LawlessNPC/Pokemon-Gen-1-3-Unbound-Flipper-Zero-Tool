@@ -9,7 +9,6 @@
 
 #define GEN3_SD_PIN_FILE_TYPE "Pokemon Gen3 SD Pin"
 #define GEN3_SD_PIN_FILE_VER  1
-#define GEN3_SD_PIN_FILE_NAME ".gen3_sd_pin"
 #define GEN3_SD_PIN_KEY       "SD"
 #define TAG                   "gen3_pins"
 

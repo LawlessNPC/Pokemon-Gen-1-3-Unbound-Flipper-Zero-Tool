@@ -71,6 +71,8 @@ App(
         "src/gen3/gen3_save.c",
         "src/gen3/gen3_cart_id.c",
         "src/gen3/gen3_cart.c",
+        "src/gen3/gen3_cart_screen.c",
+        "src/views/gen3_cart_progress.c",
     ],
     fap_icon="pokemon_10px.png",
     fap_file_assets="files",
