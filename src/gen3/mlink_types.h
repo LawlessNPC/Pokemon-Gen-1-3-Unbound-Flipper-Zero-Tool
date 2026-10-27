@@ -28,10 +28,13 @@ typedef enum { MlinkModeFrame, MlinkModeStream } MlinkMode;
 
 /* One tick, start to start (mlink_hw_furi.c MLINK_TICK_DECI_US / 10). */
 #define MLINK_TICK_US 1073u
-#define MLINK_FRAME_US 16740u /* frame mode: frame start to frame start */
+/* Frame mode: the mean period, frame start to frame start; each real frame is 15 or 16 ticks. */
+#define MLINK_FRAME_US 16740u
 
 /* Time one frame takes, for protocol timeouts. Stream: max(count, 1) ticks.
- * Frame: MLINK_FRAME_US. */
+ * Frame: MLINK_FRAME_US. One exception in stream mode: a frame the cable guard skips lasts one
+ * tick but reports count timed-out words, so with the cable out, timeouts measured this way run
+ * up to MLINK_BURST_LEN times fast. They only ever fail early. */
 static inline uint32_t mlink_frame_us(MlinkMode mode, uint8_t count) {
     if(mode == MlinkModeFrame) return MLINK_FRAME_US;
     return (count ? count : 1u) * MLINK_TICK_US;

@@ -74,7 +74,8 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
  * starts on the first tick after start and on every tick after a frame's callback (no frame-rate
  * gate); transfer t on tick t; count 0 makes an idle tick whose callback gets rx.count 0, masks 0.
  * The cable guard still reads SI at every frame start (there are no idle ticks between frames to
- * latch on). Same failure rules as mlink_hw_start. */
+ * latch on). A frame it skips lasts one tick, but its callback gets rx.count = count, every word
+ * timed out (mlink_frame_us then over-counts its time). Same failure rules as mlink_hw_start. */
 bool mlink_hw_start_mode(
     MlinkHw* hw,
     MlinkMode mode,
@@ -82,10 +83,11 @@ bool mlink_hw_start_mode(
     void* ctx,
     const MlinkTx* first);
 
-/* The cable guard's latest decision: true from mlink_hw_start (its own check passed) until a frame
- * start finds SI high (read then, or latched on an idle tick since the previous frame start), and
- * true again once a frame start finds it low with nothing latched. Keeps its value when stopped;
- * false before the first start. */
+/* The cable guard's latest decision: true from mlink_hw_start or mlink_hw_start_mode (its own
+ * check passed) until a frame start finds SI high (read then, or, in frame mode only, latched on
+ * an idle tick since the previous frame start; in stream mode nothing latches), and true again
+ * once a frame start finds it low with nothing latched. Keeps its value when stopped; false
+ * before the first start. */
 bool mlink_hw_cable_ok(const MlinkHw* hw);
 
 /* Pins back to GpioModeAnalog, TIM2 off, ISR cleared. Does nothing if not running. */
