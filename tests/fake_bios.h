@@ -44,15 +44,15 @@ struct FakeBios {
     FakeBiosPhase phase;
     uint8_t cc; /* its byte in 0x73cc */
     uint8_t rr; /* its byte in 0x73rr */
-    uint16_t palette_busy; /* 0x7202 replies to 0x63pp before 0x73cc */
-    uint16_t final_busy; /* 0x0074 replies to 0x0065 before 0x0075 */
+    uint32_t palette_busy_us; /* 0x7202, not 0x73cc, until this long after the 0x6202 transfer */
+    uint32_t final_busy_us; /* 0x0074, not 0x0075, until this long after the first 0x0065 */
     uint32_t corrupt_at; /* transfer number from power-on (1 = the first), 0 = none */
     bool bad_crc;
     uint8_t step; /* where it is in multiboot-and-save.md §2.2's sequence */
     uint8_t startup; /* transfers that still time out after power-on */
     uint16_t send; /* SIOMULTI_SEND */
     uint16_t prev_reply; /* the previous transfer's reply (FAKE_BIOS_NO_REPLY: none) */
-    uint16_t busy;
+    uint64_t busy_until_us; /* palette or final step: busy before this time */
     bool final_started;
     bool has_last;
     uint8_t pp;
@@ -77,9 +77,11 @@ struct FakeBios {
 void fake_bios_init(FakeBios* b, uint8_t cc, uint8_t rr);
 /* Power on holding Start+Select (or power-cycle): 2 transfers time out, then SEND 0x0000. */
 void fake_bios_power_on(FakeBios* b);
-/* Replies 0x7202 to that many palette words, and 0x0074 to that many 0x0065 words after the first,
- * on every attempt. */
-void fake_bios_set_busy(FakeBios* b, uint16_t palette, uint16_t final);
+/* How long the slave stays busy, in its own time, on every attempt: palette_us from the end of the
+ * 0x6202 transfer (it loads 0x7202, not 0x73cc, after each palette word handled before then), and
+ * final_us from the end of the first 0x0065 transfer (0x0074, not 0x0075). Time, not a count of
+ * replies, so its meaning doesn't depend on how fast the parent polls. */
+void fake_bios_set_busy(FakeBios* b, uint32_t palette_us, uint32_t final_us);
 /* xor 0x0100 into the reply of that transfer (1 = the first after power-on), on the wire only. */
 void fake_bios_corrupt_reply(FakeBios* b, uint32_t transfer);
 /* Its own CRC is off by one: in its reply and in its check. */

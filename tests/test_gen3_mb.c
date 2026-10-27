@@ -13,7 +13,9 @@
 typedef struct {
     MlinkTx tx; /* what the sender asked for */
     uint32_t us; /* that frame's time */
-    Gen3MbPhase phase; /* the sender's phase after the frame */
+    uint16_t reply; /* the first word's reply */
+    bool replied; /* the first word came back unmarked */
+    Gen3MbPhase phase; /* the sender's phase after the frame: the one that made the next tx */
 } BenchFrame;
 
 static BenchFrame bench_log[BENCH_LOG_MAX];
@@ -76,9 +78,36 @@ static void run(Gen3Mb* m, FakeBios* b, uint32_t max_frames) {
         gen3_mb_frame(m, &rx, &bench_pending, us);
         gen3_mb_status(m, &st);
         if(bench_n < BENCH_LOG_MAX) {
-            bench_log[bench_n++] = (BenchFrame){.tx = sent, .us = us, .phase = st.phase};
+            bench_log[bench_n++] = (BenchFrame){
+                .tx = sent,
+                .us = us,
+                .reply = rx.word[0],
+                .replied = rx.count && !((rx.timeout_mask | rx.framing_mask) & 1u),
+                .phase = st.phase};
         }
     }
+}
+
+/* Runs until the sender is in phase; false if it ends (Done, Failed) or max_frames pass first. */
+static bool run_until(Gen3MbPhase phase, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames && status().phase != phase; i++) {
+        if(status().phase == Gen3MbPhaseDone || status().phase == Gen3MbPhaseFailed) break;
+        run(&mb, &bios, 1);
+    }
+    return status().phase == phase;
+}
+
+/* The frame in flight never reaches the fake (lost on the wire); its first word replies reply. */
+static void inject(uint16_t reply) {
+    MlinkRx rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.count = bench_pending.count;
+    rx.word[0] = reply;
+    gen3_mb_frame(&mb, &rx, &bench_pending, mlink_frame_us(MlinkModeStream, rx.count));
+}
+
+static bool is_frame(const BenchFrame* f, uint16_t word) {
+    return f->tx.count == 1 && f->tx.word[0] == word;
 }
 
 /* After Done or Failed the sender only sends idle ticks. */
@@ -227,64 +256,128 @@ TEST(test_mb_length_delay) {
     ASSERT_TRUE(idle_us >= 100000u);
 }
 
-static bool is_poll(const MlinkTx* tx) {
-    return tx->count == 1 && (tx->word[0] == 0x6200 || tx->word[0] == (0x6300 | GEN3_MB_PALETTE) ||
-                              tx->word[0] == 0x0065);
-}
-
-/* Detect, Palette and Final poll at most once per GBA frame, with idle ticks between. */
+/* Detect and Palette poll back to back, one word per tick, as afska's LinkCableMultiboot does;
+ * Final's 0x0065 retries come at most once per GBA frame, with idle ticks between, as afska's
+ * do (once per VBlank). */
 TEST(test_mb_poll_spacing) {
-    ASSERT_TRUE(GEN3_MB_POLL_US >= 16000u);
+    ASSERT_EQ(GEN3_MB_POLL_US, MLINK_FRAME_US);
     bench_init(0x1000, 0x5A, 0xC3);
     run(&mb, &bios, 300);
-    fake_bios_set_busy(&bios, 15, 200);
+    fake_bios_set_busy(&bios, 50000, 3500000);
     fake_bios_power_on(&bios);
     run(&mb, &bios, 100000);
     ASSERT_EQ(status().phase, Gen3MbPhaseDone);
-    uint32_t polls = 0;
+    uint32_t detect = 0;
+    uint32_t palette = 0;
+    uint32_t final = 0;
     uint64_t now = 0;
-    uint64_t last = 0;
+    uint64_t last_final = 0;
     for(uint32_t i = 0; i < bench_n; i++) {
-        if(is_poll(&bench_log[i].tx)) {
-            if(polls) ASSERT_TRUE(now - last >= GEN3_MB_POLL_US);
-            last = now;
-            polls++;
+        const Gen3MbPhase from = i ? bench_log[i - 1].phase : Gen3MbPhaseDetect;
+        const BenchFrame* f = &bench_log[i];
+        if(from == Gen3MbPhaseDetect) {
+            ASSERT_TRUE(is_frame(f, 0x6200));
+            detect++;
+        } else if(from == Gen3MbPhasePalette) {
+            ASSERT_TRUE(is_frame(f, 0x6300 | GEN3_MB_PALETTE));
+            palette++;
+        } else if(from == Gen3MbPhaseFinal && f->tx.count) {
+            ASSERT_TRUE(is_frame(f, 0x0065));
+            if(final) ASSERT_TRUE(now - last_final >= GEN3_MB_POLL_US);
+            last_final = now;
+            final++;
         }
-        now += bench_log[i].us;
+        now += f->us;
     }
-    /* 300 frames off, then 2 timeouts, 0x0000 and 0x7202; 16 palette polls; 202 final polls */
-    ASSERT_TRUE(polls >= 18 + 4 + 16 + 202);
+    /* 300 frames off, then 2 timeouts, 0x0000 and 0x7202; 50 ms busy; 3.5 s busy */
+    ASSERT_TRUE(detect >= 300 + 4);
+    ASSERT_TRUE(palette >= 40);
+    ASSERT_TRUE(final >= 200);
 }
 
+/* A slow slave: at least 40 busy 0x7202 replies to the palette word, and 200 busy 0x0074 replies
+ * to 0x0065. */
 TEST(test_mb_busy_slave) {
-    /* 15 busy replies is the most the palette's 16 polls allow at one poll per GBA frame */
     bench_init(0x1000, 0x5A, 0xC3);
-    fake_bios_set_busy(&bios, 15, 200);
+    fake_bios_set_busy(&bios, 50000, 3500000);
     fake_bios_power_on(&bios);
     run(&mb, &bios, 100000);
     Gen3MbStatus st = status();
     ASSERT_EQ(st.phase, Gen3MbPhaseDone);
     ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailNone);
     ASSERT_EQ(fake_bios_boots(&bios), 1);
     ASSERT_TRUE(fake_bios_error(&bios) == NULL);
     ASSERT_TRUE(image_received(0x1000));
+    uint32_t busy_palette = 0;
+    uint32_t busy_final = 0;
+    for(uint32_t i = 0; i < bench_n; i++) {
+        const BenchFrame* f = &bench_log[i];
+        if(is_frame(f, 0x6300 | GEN3_MB_PALETTE) && f->replied && f->reply == 0x7202) {
+            busy_palette++;
+        }
+        if(is_frame(f, 0x0065) && f->replied && f->reply == 0x0074) busy_final++;
+    }
+    ASSERT_TRUE(busy_palette >= 40);
+    ASSERT_TRUE(busy_final >= 200);
 }
 
+/* The palette budget, one 0x63pp per tick: the last poll it allows is the one whose reply comes
+ * at or past GEN3_MB_PALETTE_US. A slave whose 0x73cc comes on that poll is taken; one busy for
+ * one poll longer times the wait out. That wait saw only valid 0x7202 replies, so it is not
+ * counted: the sender keeps trying, and last_fail says why. */
 TEST(test_mb_palette_timeout) {
+    const uint32_t polls = (GEN3_MB_PALETTE_US + MLINK_TICK_US - 1u) / MLINK_TICK_US;
+    ASSERT_TRUE(GEN3_MB_PALETTE_US >= 3500000u && GEN3_MB_PALETTE_US <= 4500000u);
     bench_init(0x1000, 0x5A, 0xC3);
-    fake_bios_set_busy(&bios, 16, 0);
+    fake_bios_set_busy(&bios, (polls - 1u) * MLINK_TICK_US, 0);
     fake_bios_power_on(&bios);
     run(&mb, &bios, 100000);
     Gen3MbStatus st = status();
-    ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
-    ASSERT_EQ(st.restarts, 4);
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_set_busy(&bios, polls * MLINK_TICK_US, 0);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 3u * (polls + 400u));
+    st = status();
+    ASSERT_TRUE(st.phase != Gen3MbPhaseDone && st.phase != Gen3MbPhaseFailed);
+    ASSERT_EQ(st.restarts, 0);
     ASSERT_EQ(st.last_fail, Gen3MbFailPalette);
     ASSERT_EQ(fake_bios_boots(&bios), 0);
+    uint32_t timeouts = 0;
+    for(uint32_t i = 0; i < bench_n; i++) {
+        const BenchFrame* f = &bench_log[i];
+        if(is_frame(f, 0x6300 | GEN3_MB_PALETTE)) ASSERT_EQ(f->reply, 0x7202);
+        if(i && bench_log[i - 1].phase == Gen3MbPhasePalette && f->phase == Gen3MbPhaseWait) {
+            timeouts++;
+        }
+    }
+    ASSERT_TRUE(timeouts >= 3);
+}
+
+/* A palette wait that saw anything but valid 0x7202 replies counts: here the GBA resets in the
+ * middle of it (two timeouts, then 0x0000). */
+TEST(test_mb_palette_reset_counts) {
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_set_busy(&bios, 1000000, 0);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhasePalette, 1000));
+    run(&mb, &bios, 10);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailPalette);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
 }
 
 TEST(test_mb_final_timeout) {
     bench_init(0x1C0, 0x5A, 0xC3);
-    fake_bios_set_busy(&bios, 0, 300);
+    fake_bios_set_busy(&bios, 0, 6000000);
     fake_bios_power_on(&bios);
     run(&mb, &bios, 100000);
     Gen3MbStatus st = status();
@@ -361,11 +454,7 @@ TEST(test_mb_masked_word) {
     rx.framing_mask = 1;
     gen3_mb_frame(&mb, &rx, &tx, MLINK_TICK_US);
     ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
-    ASSERT_EQ(tx.count, 0);
-    while(tx.count == 0) {
-        memset(&rx, 0, sizeof(rx));
-        gen3_mb_frame(&mb, &rx, &tx, MLINK_TICK_US);
-    }
+    ASSERT_EQ(tx.count, 1);
     ASSERT_EQ(tx.word[0], 0x6200);
     memset(&rx, 0, sizeof(rx));
     rx.count = 1;
@@ -382,6 +471,66 @@ TEST(test_mb_masked_word) {
     ASSERT_EQ(st.restarts, 1);
     ASSERT_EQ(st.last_fail, Gen3MbFailHello);
     ASSERT_EQ(tx.count, 0);
+}
+
+/* A length gen3_mb_image_check refuses starts Failed: idle ticks only, and the image is never
+ * read. */
+TEST(test_mb_bad_len) {
+    static const uint32_t lens[] = {0, 0x100, 0x1B0, 0x1C8, 0x3010};
+    for(size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
+        gen3_mb_init(&mb, NULL, lens[i], BENCH_SEED);
+        Gen3MbStatus st = status();
+        ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
+        ASSERT_EQ(st.restarts, 0);
+        ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+        MlinkTx tx;
+        gen3_mb_frame(&mb, NULL, &tx, 0);
+        ASSERT_EQ(tx.count, 0);
+        MlinkRx rx;
+        memset(&rx, 0, sizeof(rx));
+        gen3_mb_frame(&mb, &rx, &tx, MLINK_TICK_US);
+        ASSERT_EQ(tx.count, 0);
+        ASSERT_EQ(status().phase, Gen3MbPhaseFailed);
+    }
+}
+
+/* A valid reply that isn't 0x73xx to 0x64hh is a counted Handshake failure. The fake never saw
+ * the word, so the restart finds it in its palette step: it refuses that and resyncs. */
+TEST(test_mb_wrong_handshake_reply) {
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhaseHandshake, 1000));
+    ASSERT_TRUE(bench_pending.count == 1 && bench_pending.word[0] == (0x6400 | gen3_mb_hh(0x5A)));
+    inject(0x7202);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseWait);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailHandshake);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+}
+
+/* The same for the length word: a valid reply that isn't 0x73rr is a counted Length failure. The
+ * fake never saw the word and still waits for one, so it is power-cycled, as the user would. */
+TEST(test_mb_wrong_length_reply) {
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhaseLength, 1000));
+    ASSERT_TRUE(bench_pending.count == 1 && bench_pending.word[0] == (0x1000 - 0x190) / 4);
+    inject(0x7202);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseWait);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailLength);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
 }
 
 /* Detection: 16 replies that are neither 0x0000, 0xFFFF nor 0x72x2 start a restart wait, not
@@ -446,8 +595,8 @@ static void idle(FakeBios* b, uint32_t ticks) {
     for(uint32_t i = 0; i < ticks; i++) fake_bios_frame(b, &tx, &rx);
 }
 
-/* Power-on through the 0x64hh transfer; false on the first unexpected reply. */
-static bool fake_handshake(FakeBios* b, const uint8_t* hdr, uint8_t hh) {
+/* Power-on through the 96 header halfwords; false on the first unexpected reply. */
+static bool fake_header(FakeBios* b, const uint8_t* hdr) {
     bool to;
     xfer(b, 0x6200, &to);
     if(!to) return false;
@@ -460,6 +609,12 @@ static bool fake_handshake(FakeBios* b, const uint8_t* hdr, uint8_t hh) {
         const uint16_t w = hdr[2 * k] | (uint16_t)(hdr[2 * k + 1] << 8);
         if(xfer(b, w, NULL) != (((0x60 - k) << 8) | 0x02)) return false;
     }
+    return fake_bios_error(b) == NULL;
+}
+
+/* Power-on through the 0x64hh transfer; false on the first unexpected reply. */
+static bool fake_handshake(FakeBios* b, const uint8_t* hdr, uint8_t hh) {
+    if(!fake_header(b, hdr)) return false;
     if(xfer(b, 0x6200, NULL) != 0x0002) return false;
     if(xfer(b, 0x6202, NULL) != 0x7202) return false;
     if(xfer(b, 0x6393, NULL) != 0x735A) return false;
@@ -467,18 +622,27 @@ static bool fake_handshake(FakeBios* b, const uint8_t* hdr, uint8_t hh) {
     return fake_bios_error(b) == NULL;
 }
 
-TEST(test_fake_bios_doc_vector) {
+/* Power-on through the last payload halfword of the multiboot-and-save.md §2.3 test vector,
+ * which it writes into image; false on the first unexpected reply. */
+static bool fake_doc_vector_payload(FakeBios* b) {
     make_image(image, 0x1C0);
     for(int i = 0; i < 0x100; i++) image[0xC0 + i] = (uint8_t)i;
     uint16_t hw[128];
     uint16_t crc;
     doc_vector_halfwords(hw, &crc);
+    if(!fake_handshake(b, image, 0x69)) return false;
+    idle(b, 94);
+    if(xfer(b, 0x000C, NULL) != 0x73C3) return false;
+    for(uint32_t k = 0; k < 128; k++) {
+        if(xfer(b, hw[k], NULL) != 0xC0 + 2 * k) return false;
+    }
+    return fake_bios_error(b) == NULL;
+}
+
+TEST(test_fake_bios_doc_vector) {
     fake_bios_init(&bios, 0x5A, 0xC3);
     fake_bios_power_on(&bios);
-    ASSERT_TRUE(fake_handshake(&bios, image, 0x69));
-    idle(&bios, 94);
-    ASSERT_EQ(xfer(&bios, 0x000C, NULL), 0x73C3);
-    for(uint32_t k = 0; k < 128; k++) ASSERT_EQ(xfer(&bios, hw[k], NULL), 0xC0 + 2 * k);
+    ASSERT_TRUE(fake_doc_vector_payload(&bios));
     ASSERT_TRUE(xfer(&bios, 0x0065, NULL) != 0x0075);
     ASSERT_EQ(xfer(&bios, 0x0065, NULL), 0x0075);
     ASSERT_EQ(xfer(&bios, 0x0066, NULL), 0x0075);
@@ -522,20 +686,38 @@ TEST(test_fake_bios_checks) {
     /* an undocumented palette byte */
     fake_bios_init(&bios, 0x5A, 0xC3);
     fake_bios_power_on(&bios);
-    bool to;
-    xfer(&bios, 0x6200, &to);
-    xfer(&bios, 0x6200, &to);
-    xfer(&bios, 0x6200, &to);
-    xfer(&bios, 0x6200, NULL);
-    xfer(&bios, 0x6102, NULL);
-    for(uint32_t k = 0; k < 0x60; k++) {
-        xfer(&bios, image[2 * k] | (uint16_t)(image[2 * k + 1] << 8), NULL);
-    }
-    xfer(&bios, 0x6200, NULL);
-    xfer(&bios, 0x6202, NULL);
+    ASSERT_TRUE(fake_header(&bios, image));
+    ASSERT_EQ(xfer(&bios, 0x6200, NULL), 0x0002);
+    ASSERT_EQ(xfer(&bios, 0x6202, NULL), 0x7202);
     ASSERT_TRUE(fake_bios_error(&bios) == NULL);
     xfer(&bios, 0x6380, NULL);
     ASSERT_TRUE(fake_bios_error(&bios) != NULL);
+    /* after the header, 0x6202 where 0x6200 belongs */
+    fake_bios_init(&bios, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(fake_header(&bios, image));
+    ASSERT_EQ(xfer(&bios, 0x6202, NULL), 0x0002);
+    ASSERT_TRUE(fake_bios_error(&bios) != NULL);
+    ASSERT_EQ(xfer(&bios, 0x6200, NULL), 0x0000);
+    /* then 0x6200 where 0x6202 belongs */
+    fake_bios_init(&bios, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(fake_header(&bios, image));
+    ASSERT_EQ(xfer(&bios, 0x6200, NULL), 0x0002);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_EQ(xfer(&bios, 0x6200, NULL), 0x7202);
+    ASSERT_TRUE(fake_bios_error(&bios) != NULL);
+    ASSERT_EQ(xfer(&bios, 0x6200, NULL), 0x0000);
+    /* 0x0066 without a 0x0075 reply: right after the first 0x0065 */
+    fake_bios_init(&bios, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(fake_doc_vector_payload(&bios));
+    ASSERT_TRUE(xfer(&bios, 0x0065, NULL) != 0x0075);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_EQ(xfer(&bios, 0x0066, NULL), 0x0075);
+    ASSERT_TRUE(fake_bios_error(&bios) != NULL);
+    ASSERT_EQ(xfer(&bios, 0x6200, NULL), 0x0000);
+    ASSERT_EQ(fake_bios_boots(&bios), 0);
 }
 
 int main(void) {
@@ -549,11 +731,15 @@ int main(void) {
     RUN(test_mb_poll_spacing);
     RUN(test_mb_busy_slave);
     RUN(test_mb_palette_timeout);
+    RUN(test_mb_palette_reset_counts);
     RUN(test_mb_final_timeout);
     RUN(test_mb_header_glitch);
     RUN(test_mb_data_glitch);
     RUN(test_mb_bad_crc_gives_up);
     RUN(test_mb_masked_word);
+    RUN(test_mb_bad_len);
+    RUN(test_mb_wrong_handshake_reply);
+    RUN(test_mb_wrong_length_reply);
     RUN(test_mb_junk_wait);
     RUN(test_fake_bios_doc_vector);
     RUN(test_fake_bios_checks);

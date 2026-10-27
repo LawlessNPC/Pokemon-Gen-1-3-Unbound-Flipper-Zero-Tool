@@ -32,11 +32,15 @@
 /* Detection replies that are neither 0x0000, 0xFFFF nor 0x72x2 before a restart wait (not
  * counted) */
 #define GEN3_MB_JUNK_LIMIT 16u
-/* Detect, Palette and Final poll at most once per GBA frame (59.73 Hz), as a GBA master does,
- * with idle ticks between: how the BIOS takes faster polling is not documented. */
-#define GEN3_MB_POLL_US 16740u
-/* 16 palette polls at the GBA frame rate (multiboot-and-save.md §2.2 step 7), as time */
-#define GEN3_MB_PALETTE_US 268000u
+/* Detect and Palette poll back to back, one word per tick, as afska's LinkCableMultiboot does
+ * (each try right after the previous reply). Only Final's 0x0065 retries wait one GBA frame
+ * between polls, with idle ticks: afska retries those once per VBlank. */
+#define GEN3_MB_POLL_US MLINK_FRAME_US
+/* Palette: how long the slave may answer 0x7202 (busy) before 0x73cc
+ * (multiboot-and-save.md §2.2 step 7). GBATEK sets no limit; afska gives up after 16
+ * back-to-back tries. A wait that saw only valid 0x7202 replies is a slow slave, not a broken
+ * link: it restarts without counting. */
+#define GEN3_MB_PALETTE_US 4000000u
 /* Silent wait before the length word: at least GBATEK's 1/16 s (multiboot-and-save.md §2.2
  * step 9); why 100 ms: multiboot-and-save.md M20 */
 #define GEN3_MB_LENGTH_DELAY_US 100000u
@@ -103,6 +107,7 @@ typedef enum {
 
 typedef struct {
     Gen3MbPhase phase;
+    /* The latest failure, counted or not: a palette wait that saw only 0x7202 sets Palette */
     Gen3MbFail last_fail;
     uint8_t restarts; /* counted failures (all after detection succeeded) */
     uint32_t sent; /* payload bytes acknowledged */
@@ -123,11 +128,12 @@ typedef struct Gen3Mb {
     uint8_t rr; /* the slave's byte from 0x73rr */
     uint8_t junk; /* Detect: other replies since entering it */
     uint8_t tx_count; /* words in the frame in flight */
+    bool palette_other; /* Palette: a reply other than a valid 0x7202 came back */
     uint16_t pos; /* Header: next word of 98; Data: next payload halfword */
     uint16_t crc; /* Crc: the CRC sent */
     uint32_t e; /* Data: the encrypted word whose high half goes next */
     uint32_t phase_us; /* time in this phase */
-    uint32_t poll_us; /* polling phases: time since the last poll */
+    uint32_t poll_us; /* Final: time since the last 0x0065 */
     uint32_t wait_us; /* Wait: this wait's length */
     uint32_t sent;
     uint32_t waiting_us;

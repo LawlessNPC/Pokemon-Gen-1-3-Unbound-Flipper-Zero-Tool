@@ -1,8 +1,8 @@
 #include <src/gen3/gen3_mb.h>
 #include <string.h>
 
-/* Constants of GBATEK "BIOS Multi Boot (Single Game Pak)", MultiPlay row (multiboot-and-save.md
- * §2.3) */
+/* Constants of GBATEK "BIOS Multi Boot (Single Game Pak)", MultiPlay row
+ * (multiboot-and-save.md §2.3) */
 #define MB_CRC_INIT 0xFFF8u
 #define MB_CRC_POLY 0xA517u
 #define MB_DATA_KEY 0x6465646Fu
@@ -68,9 +68,10 @@ static uint32_t mb_add(uint32_t a, uint32_t b) {
 
 static void mb_enter(Gen3Mb* mb, Gen3MbPhase phase) {
     mb->phase_us = 0;
-    mb->poll_us = GEN3_MB_POLL_US; /* a polling phase polls at once */
+    mb->poll_us = GEN3_MB_POLL_US; /* Final polls at once */
     mb->pos = 0;
     mb->junk = 0;
+    mb->palette_other = false;
     mb->phase = phase;
 }
 
@@ -121,7 +122,7 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
     const uint16_t r = rx->word[0];
     switch(mb->phase) {
     case Gen3MbPhaseDetect:
-        if(!mb_valid(mb, rx, 0)) break; /* polling: an idle tick or a marked word */
+        if(!mb_valid(mb, rx, 0)) break; /* polling: a marked word is ignored */
         if((r & 0xFFF0u) == 0x7200u && (r & 0xFu) == GEN3_MB_CLIENT_BIT) {
             mb->waiting_us = 0;
             mb_enter(mb, Gen3MbPhaseHello);
@@ -150,8 +151,15 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
         if(mb_valid(mb, rx, 0) && (r & 0xFF00u) == 0x7300u) {
             mb->cc = (uint8_t)r;
             mb_enter(mb, Gen3MbPhaseHandshake);
-        } else if(mb->phase_us >= GEN3_MB_PALETTE_US) {
+            break;
+        }
+        if(!mb_valid(mb, rx, 0) || r != MB_DETECT_REPLY) mb->palette_other = true;
+        if(mb->phase_us < GEN3_MB_PALETTE_US) break;
+        if(mb->palette_other) {
             mb_fail(mb, Gen3MbFailPalette);
+        } else {
+            mb->last_fail = Gen3MbFailPalette; /* only busy replies: a slow slave, not counted */
+            mb_wait(mb);
         }
         break;
     case Gen3MbPhaseHandshake:
@@ -226,7 +234,7 @@ static void mb_send(Gen3Mb* mb, MlinkTx* tx) {
     }
     switch(mb->phase) {
     case Gen3MbPhaseDetect:
-        mb_poll(mb, tx, 0x6200u);
+        mb_one(tx, 0x6200u);
         break;
     case Gen3MbPhaseHello:
         mb_one(tx, 0x6100u | GEN3_MB_CLIENT_BIT);
@@ -238,7 +246,7 @@ static void mb_send(Gen3Mb* mb, MlinkTx* tx) {
         }
         break;
     case Gen3MbPhasePalette:
-        mb_poll(mb, tx, 0x6300u | GEN3_MB_PALETTE);
+        mb_one(tx, 0x6300u | GEN3_MB_PALETTE);
         break;
     case Gen3MbPhaseHandshake:
         mb_one(tx, 0x6400u | gen3_mb_hh(mb->cc));

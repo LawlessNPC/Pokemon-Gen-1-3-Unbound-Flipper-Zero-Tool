@@ -104,8 +104,8 @@ static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
         break;
     case StepInfo:
         if(word == (0x6200 | FAKE_BIOS_CHILD_BIT)) {
-            b->busy = b->palette_busy;
-            b->send = b->busy ? FAKE_BIOS_READY : (uint16_t)(0x7300 | b->cc);
+            b->busy_until_us = end_us + b->palette_busy_us;
+            b->send = end_us < b->busy_until_us ? FAKE_BIOS_READY : (uint16_t)(0x7300 | b->cc);
             b->step = StepPalette;
         } else {
             fake_bios_violation(b, "not 0x6202");
@@ -114,8 +114,7 @@ static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
     case StepPalette:
         if((word & 0xFF00) == 0x6300 && fake_bios_palette_ok((uint8_t)word)) {
             b->pp = (uint8_t)word;
-            if(b->busy) b->busy--;
-            b->send = b->busy ? FAKE_BIOS_READY : (uint16_t)(0x7300 | b->cc);
+            b->send = end_us < b->busy_until_us ? FAKE_BIOS_READY : (uint16_t)(0x7300 | b->cc);
         } else if(
             (word & 0xFF00) == 0x6400 && b->prev_reply == (0x7300 | b->cc) &&
             (uint8_t)word == (uint8_t)(0x11u + b->cc + 0xFFu + 0xFFu)) {
@@ -164,11 +163,9 @@ static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
         if(word == 0x0065) {
             if(!b->final_started) {
                 b->final_started = true;
-                b->busy = b->final_busy;
-            } else if(b->busy) {
-                b->busy--;
+                b->busy_until_us = end_us + b->final_busy_us;
             }
-            b->send = b->busy ? 0x0074 : 0x0075;
+            b->send = end_us < b->busy_until_us ? 0x0074 : 0x0075;
         } else if(word == 0x0066 && b->prev_reply == 0x0075) {
             uint32_t c = fake_bios_crc(b->crc, b->hh | (uint32_t)b->rr << 8 | 0xFFFF0000u);
             if(b->bad_crc) c++;
@@ -233,9 +230,9 @@ void fake_bios_power_on(FakeBios* b) {
     b->len = 0;
 }
 
-void fake_bios_set_busy(FakeBios* b, uint16_t palette, uint16_t final) {
-    b->palette_busy = palette;
-    b->final_busy = final;
+void fake_bios_set_busy(FakeBios* b, uint32_t palette_us, uint32_t final_us) {
+    b->palette_busy_us = palette_us;
+    b->final_busy_us = final_us;
 }
 
 void fake_bios_corrupt_reply(FakeBios* b, uint32_t transfer) {
