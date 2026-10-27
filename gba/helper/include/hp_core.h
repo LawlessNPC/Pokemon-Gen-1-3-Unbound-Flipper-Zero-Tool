@@ -73,6 +73,8 @@ struct Hp {
     bool cart_scanned;
     HpProbe probe;
     bool probed;
+    /* The sectors this session erased OK and hasn't programmed since; HELLO starts a new session */
+    HpFlash flash;
 };
 
 void hp_init(Hp* hp);

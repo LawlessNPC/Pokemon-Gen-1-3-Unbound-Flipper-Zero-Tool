@@ -411,7 +411,9 @@ Scan the ROM in 32-bit steps for `0x53414C46` ("FLAS") followed by `0x5F4D3148`
 ("H1M_"), for "SRAM" (`0x4D415253`) followed by a byte `0x5F`, and for "EEPR"
 (`0x52504545`) followed by "OM_" (FIX94 `libSave.c: SaveSize`). A Pokemon ROM
 that contains `SRAM_` or `EEPROM_` and no `FLASH1M_V103` has been patched
-(§3.6). A scan of 16 MiB at WAITCNT 0x4317 takes ~1–3 s **(inferred, M7)**.
+(§3.6). A scan of 16 MiB at WAITCNT 0x4317 takes ~6.7 s: the helper's loop costs ~27 cycles
+per 32-bit word by its disassembly, one HAL ROM read (~12 cycles, 6 of them the cart bus) plus
+the test and the loop **(inferred, M7)**. ~7.2 s at the fallback WAITCNT 0x0003.
 
 Step 2, the SRAM probe. **Run it before any flash command.** A command sequence
 writes 0xAA/0x55/0x90 straight into an SRAM and corrupts it.
@@ -818,10 +820,10 @@ static int wait(volatile uint8_t* a, uint8_t want, uint16_t ms, uint16_t phase) 
     }
 }
 int erase_sector(unsigned n) {                       /* n = 0..31 */
-    bank(n >> 4);
     volatile uint8_t* a = F + ((n & 15) << 12);
     int r;
     for(int t = 0; t < 5; t++) {                     /* EraseFlashSector_MX */
+        bank(n >> 4);  /* every try: pret selects it once, but nothing should depend on F0 keeping it */
         cmd(0x80); F[0x5555] = 0xAA; F[0x2AAA] = 0x55; *a = 0x30;
         if(!((r = wait(a, 0xFF, 2000, 2)) & 0xA000)) break;
     }
@@ -1182,7 +1184,7 @@ the word after the false `SOF`.
 | 0x11 | `READ_FOOTERS` | — | 32 × 8 words: bytes 0xFF4..0xFFF (6 words), full-length checksum (1 word), 0 | ≈ 260 transfers; enough for §5.5 except the exact-size check |
 | 0x12 | `SECTOR_CRC32` | sector | 2 words | read-back verify without re-reading over the link |
 | 0x18 | `ERASE_SECTOR` | sector | status, fail code | armed and in slot T only |
-| 0x19 | `WRITE_SECTOR` | sector, flags (bit 0 `DEFER_COMMIT`), 2048 words image | status, fail code, fail offset | the CRC must pass **before** any flash access. If not blank: erase. Program in ascending order (skipping 0xFF8 if deferred), then verify |
+| 0x19 | `WRITE_SECTOR` | sector, flags (bit 0 `DEFER_COMMIT`), 2048 words image | status, fail code, fail offset | the CRC must pass **before** any flash access. Erase first, unless this session erased the sector OK and nothing has programmed it since (the session's `erased_ok` mask: a successful erase sets the sector's bit; any program or commit to it clears it; so do start-up and `HELLO`). A sector that merely reads all 0xFF is erased again: an erase cut short by a power loss can leave cells that read 0xFF but aren't fully erased. Program in ascending order (skipping 0xFF8 if deferred), then verify. Up to 3 tries; a failed try erases again |
 | 0x1A | `COPY_SECTOR` | src sector, dst sector, flags, new counter (2 words) | status, fail code, fail offset | H reads src into RAM, patches the counter at 0xFFC, then proceeds as `WRITE_SECTOR` |
 | 0x1B | `COMMIT_SECTOR` | sector | status | programs 0xFF8 = `0x25` only if it reads `0xFF` and 0xFF9..0xFFB read `20 01 08`; then verifies 0xFF8..0xFFB = `0x08012025` |
 | 0x20 | `ROM_READ` | address (2), words (≤ 2048) | data | address within 0x08000000..0x09FFFFFF |
@@ -1299,7 +1301,7 @@ Flipper's BLE/USB **(inferred, M18)**.
 | M4 | Slave behaviour after a bad header, logo, `0x96`, complement or CRC (back to waiting, or a power cycle needed) | not documented. Test by sending a corrupted image |
 | M5 | Cart GPIO control reads 0 after power-on, so ROM reads at 0xC4–0xC9 return ROM data | GBATEK describes write-only mode; the power-on value is not stated |
 | M6 | Japanese RSE/FRLG save layouts differ; only English/German layouts are covered | pret covers US and German only |
-| M7 | ROM string scan takes ~1–3 s | estimate from waitstates; measure |
+| M7 | ROM string scan takes ~6.7 s (16 MiB, WAITCNT 0x4317) | cycle count of the helper's loop (~27 per word); measure on hardware |
 | M8 | A single stray write (not 0xAA) to 0x0E005555 is ignored by MX29L010/LE26FV10N1TS | JEDEC-style state machine behaviour; check against the datasheets or test on a genuine cart with a backup |
 | M9 | Part numbers of the 64 KB chips | GBATEK gives maker names only |
 | M10 | Typical sector erase / byte program times (we budget 0.1–0.5 s per sector) | only Nintendo's timeouts (10 ms, 2.04 s) are in the sources; measure on hardware |

@@ -1,10 +1,10 @@
 #include "test.h"
 #include "fake_gba.h"
+#include "helper_cmd.h"
 #include <stdbool.h>
 #include <hp_cart.h>
 #include <hp_core.h>
 #include <hp_flash.h>
-#include <hp_link.h>
 
 /* The helper's cart identification on the fake GBA (multiboot-and-save.md §3.2, §3.3 step 1,
  * §3.7), and the CART_INFO and SAVE_PROBE commands (multiboot-and-save.md §6.3). */
@@ -281,41 +281,15 @@ TEST(test_hp_cart_codes) {
     }
 }
 
-/* Builds the request (SOF .. CRC high) for code with no arguments, steps it through the core,
- * executes it and collects the response's payload; returns its status, or 0xFF if the response
- * is malformed. */
-static uint8_t command(uint8_t code, uint8_t seq, uint16_t* payload, uint16_t* n) {
-    uint16_t req[5] = {HP_SOF, (uint16_t)(seq << 8 | code), 0, 0, 0};
-    const uint32_t crc = ~hp_crc32_word(hp_crc32_word(0xFFFFFFFFu, req[1]), req[2]);
-    req[3] = (uint16_t)crc;
-    req[4] = (uint16_t)(crc >> 16);
-    for(uint32_t i = 0; i < 5; i++) {
-        const uint16_t out = hp_step(&hp, req[i], 0);
-        if(out != (i == 4 ? HP_BUSY : HP_RECV)) return 0xFF;
-    }
-    if(!hp_exec_pending(&hp) || hp_execute(&hp) != HP_SOF) return 0xFF;
-    const uint16_t w1 = hp_step(&hp, 0, 0);
-    *n = hp_step(&hp, 0, 0);
-    uint32_t rcrc = hp_crc32_word(hp_crc32_word(0xFFFFFFFFu, w1), *n);
-    for(uint32_t i = 0; i < *n; i++) {
-        payload[i] = hp_step(&hp, 0, 0);
-        rcrc = hp_crc32_word(rcrc, payload[i]);
-    }
-    rcrc = ~rcrc;
-    const uint16_t lo = hp_step(&hp, 0, 0);
-    const uint16_t hi = hp_step(&hp, 0, 0);
-    if((lo | (uint32_t)hi << 16) != rcrc || (w1 >> 8) != seq) return 0xFF;
-    if(hp_step(&hp, 0, 0) != HP_READY) return 0xFF;
-    return (uint8_t)w1;
-}
+/* A command's response: seq << 8 | status, n, the payload (from resp + 2), the CRC */
+static uint16_t resp[HELPER_CMD_RESP_MAX];
+static const uint16_t* const p = resp + 2;
 
 TEST(test_hp_cart_info_cmd) {
     setup_ruby();
-    static uint16_t p[HP_MAX_PAYLOAD];
-    uint16_t n = 0;
     gba.trace_len = 0;
-    ASSERT_EQ(command(HP_CMD_CART_INFO, 1, p, &n), HP_ST_OK);
-    ASSERT_EQ(n, 102);
+    ASSERT_EQ(helper_cmd_run(&hp, 1, HP_CMD_CART_INFO, NULL, 0, resp), HP_ST_OK);
+    ASSERT_EQ(resp[1], 102);
     for(uint32_t k = 0; k < 96; k++) ASSERT_EQ(p[k], hdr[2 * k] | hdr[2 * k + 1] << 8);
     ASSERT_EQ(p[96], 0x17); /* logo, fixed, complement, write_game */
     ASSERT_EQ(p[97], 0x0000);
@@ -330,8 +304,8 @@ TEST(test_hp_cart_info_cmd) {
     fake_gba_rom(&gba, hdr, 16 * MIB);
     fake_gba_rom_string(&gba, 0x3B0000, "FLASH1M_V103");
     fake_gba_rom_string(&gba, 0x500000, "SRAM_V113");
-    ASSERT_EQ(command(HP_CMD_CART_INFO, 2, p, &n), HP_ST_OK);
-    ASSERT_EQ(n, 102);
+    ASSERT_EQ(helper_cmd_run(&hp, 2, HP_CMD_CART_INFO, NULL, 0, resp), HP_ST_OK);
+    ASSERT_EQ(resp[1], 102);
     ASSERT_EQ(p[0x56], 'A' | 'X' << 8);
     ASSERT_EQ(p[0x57], 'V' | 'D' << 8);
     ASSERT_EQ(p[96], 0x0F); /* logo, fixed, complement, other_lib */
@@ -342,11 +316,9 @@ TEST(test_hp_save_probe_cmd) {
     setup_ruby();
     gba.flash[0] = 0x12;
     gba.flash[1] = 0x34;
-    static uint16_t p[HP_MAX_PAYLOAD];
-    uint16_t n = 0;
     for(uint8_t seq = 1; seq <= 2; seq++) {
-        ASSERT_EQ(command(HP_CMD_SAVE_PROBE, seq, p, &n), HP_ST_OK);
-        ASSERT_EQ(n, 5);
+        ASSERT_EQ(helper_cmd_run(&hp, seq, HP_CMD_SAVE_PROBE, NULL, 0, resp), HP_ST_OK);
+        ASSERT_EQ(resp[1], 5);
         ASSERT_EQ(p[0], 0x09C2);
         ASSERT_EQ(p[1], HpChipFlash128);
         ASSERT_EQ(p[2], 0x3412);
@@ -368,25 +340,22 @@ TEST(test_hp_save_probe_header) {
         uint16_t cls;
     } cases[] = {
         {"AXPD", 0, HpChipFlash128}, {"AXPD", 1, HpChipFlash64}, {"AXPE", 0, HpChipFlash64}};
-    static uint16_t p[HP_MAX_PAYLOAD];
     for(size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         fake_gba_init(&gba);
         make_header("POKEMON SAPP", cases[i].code, cases[i].version);
         fake_gba_rom(&gba, hdr, 16 * MIB);
         fake_gba_save(&gba, FakeSaveFlash, 0xD4BF);
         hp_init(&hp);
-        uint16_t n = 0;
-        ASSERT_EQ(command(HP_CMD_SAVE_PROBE, 1, p, &n), HP_ST_OK);
-        ASSERT_EQ(n, 5);
+        ASSERT_EQ(helper_cmd_run(&hp, 1, HP_CMD_SAVE_PROBE, NULL, 0, resp), HP_ST_OK);
+        ASSERT_EQ(resp[1], 5);
         ASSERT_EQ(p[0], 0xD4BF);
         ASSERT_EQ(p[1], cases[i].cls);
     }
     /* an SRAM: class 2 and the SRAM flag, nothing else */
     setup_ruby();
     fake_gba_save(&gba, FakeSaveSram, 0);
-    uint16_t n = 0;
-    ASSERT_EQ(command(HP_CMD_SAVE_PROBE, 3, p, &n), HP_ST_OK);
-    ASSERT_EQ(n, 5);
+    ASSERT_EQ(helper_cmd_run(&hp, 3, HP_CMD_SAVE_PROBE, NULL, 0, resp), HP_ST_OK);
+    ASSERT_EQ(resp[1], 5);
     ASSERT_EQ(p[1], HpChipSram);
     ASSERT_EQ(p[4], 1);
 }

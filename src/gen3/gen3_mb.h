@@ -30,7 +30,7 @@
  * (multiboot-and-save.md §2.4), at least GBATEK's 1/16 s. */
 #define GEN3_MB_RESTART_MIN_US 70000u
 #define GEN3_MB_RESTART_RAND_US 170000u
-/* Detection replies that are neither 0x0000, 0xFFFF nor 0x72x2 before a restart wait (not
+/* Detection replies that are neither 0x0000, 0xFFFF nor 0x7202 before a restart wait (not
  * counted). After a glitch the slave is still mid-transfer: it answers each 0x6200 with its own
  * header count or data offset until it has had every word it expects. A high limit lets it drain
  * at one word per tick instead of pausing every 16 words. GBATEK ("Repeat 15 times, if failed:
@@ -125,7 +125,7 @@ typedef struct {
     uint8_t restarts; /* counted failures (all after detection succeeded) */
     uint32_t sent; /* payload bytes acknowledged */
     uint32_t total; /* payload bytes to send: len - GEN3_MB_HEADER_LEN */
-    uint32_t waiting_us; /* time in Wait and Detect since the last 0x72x2 (UI hint after 3 s) */
+    uint32_t waiting_us; /* time in Wait and Detect since the last 0x7202 (UI hint after 3 s) */
 } Gen3MbStatus;
 
 /* Holds a pointer to the caller's image; no heap. Fields are private to gen3_mb.c. */

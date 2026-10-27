@@ -1,5 +1,6 @@
 #include "test.h"
 #include "fake_gba.h"
+#include "helper_cmd.h"
 #include <stdbool.h>
 #include <hp_core.h>
 #include <hp_link.h>
@@ -24,42 +25,17 @@ static void setup(void) {
     hp_init(&hp);
 }
 
-/* Steps the core through n words with no flags; returns the last step's word. */
-static uint16_t feed(Hp* h, const uint16_t* words, uint32_t n) {
-    uint16_t out = 0;
-    for(uint32_t i = 0; i < n; i++) out = hp_step(h, words[i], 0);
-    return out;
-}
-
-/* Builds a request around args into out (SOF .. CRC high); returns its length in words. */
-static uint32_t
-    make_req(uint16_t* out, uint8_t seq, uint8_t code, const uint16_t* args, uint16_t n) {
-    out[0] = HP_SOF;
-    out[1] = (uint16_t)(seq << 8 | code);
-    out[2] = n;
-    uint32_t crc = hp_crc32_word(hp_crc32_word(0xFFFFFFFFu, out[1]), out[2]);
-    for(uint16_t i = 0; i < n; i++) {
-        out[3 + i] = args[i];
-        crc = hp_crc32_word(crc, args[i]);
-    }
-    crc = ~crc;
-    out[3 + n] = (uint16_t)crc;
-    out[4 + n] = (uint16_t)(crc >> 16);
-    return 5u + n;
-}
-
-/* Runs the pending command and checks that hp_step then returns resp (n words) and HP_READY. */
+/* Runs the pending command and checks that its response is exactly resp (n words after the SOF),
+ * then HP_READY. */
 static bool served(const uint16_t* resp, uint32_t n) {
-    if(!hp_exec_pending(&hp) || hp_execute(&hp) != HP_SOF || hp_exec_pending(&hp)) return false;
-    for(uint32_t i = 0; i < n; i++) {
-        if(hp_step(&hp, 0x0000, 0) != resp[i]) return false;
-    }
-    return hp_step(&hp, 0x0000, 0) == HP_READY;
+    static uint16_t got[HELPER_CMD_RESP_MAX];
+    return helper_cmd_respond(&hp, got, HELPER_CMD_RESP_MAX) == n &&
+           memcmp(got, resp, n * sizeof(uint16_t)) == 0;
 }
 
 /* A good HELLO after whatever came before it is served in full. */
 static bool hello_served(void) {
-    return feed(&hp, hello1, 5) == HP_BUSY && served(hello1_resp, 8);
+    return helper_cmd_feed(&hp, hello1, 5) == HP_BUSY && served(hello1_resp, 8);
 }
 
 TEST(test_hp_crc32_check) {
@@ -91,7 +67,7 @@ TEST(test_hp_recv_word) {
 
 TEST(test_hp_hello) {
     setup();
-    feed(&hp, hello1, 5);
+    helper_cmd_feed(&hp, hello1, 5);
     ASSERT_TRUE(hp_exec_pending(&hp));
     ASSERT_EQ(hp_execute(&hp), HP_SOF);
     ASSERT_TRUE(!hp_exec_pending(&hp));
@@ -105,7 +81,7 @@ TEST(test_hp_hello) {
 /* While the response goes out, the Flipper's words are ignored, even a SOF. */
 TEST(test_hp_response_ignores_input) {
     setup();
-    feed(&hp, hello1, 5);
+    helper_cmd_feed(&hp, hello1, 5);
     ASSERT_EQ(hp_execute(&hp), HP_SOF);
     for(int i = 0; i < 8; i++) ASSERT_EQ(hp_step(&hp, hello1[i % 5], HP_STEP_ERR), hello1_resp[i]);
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
@@ -116,7 +92,7 @@ TEST(test_hp_response_ignores_input) {
  * HP_READY, sends its request again. */
 TEST(test_hp_tx_timeout) {
     setup();
-    feed(&hp, hello1, 5);
+    helper_cmd_feed(&hp, hello1, 5);
     ASSERT_EQ(hp_execute(&hp), HP_SOF);
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), hello1_resp[0]);
     ASSERT_EQ(hp_step(&hp, 0x0000, HP_STEP_TIMEOUT), HP_READY);
@@ -129,7 +105,7 @@ TEST(test_hp_bad_crc_dropped) {
     uint16_t bad[5];
     memcpy(bad, hello1, sizeof(bad));
     bad[3] ^= 1;
-    ASSERT_EQ(feed(&hp, bad, 5), HP_READY);
+    ASSERT_EQ(helper_cmd_feed(&hp, bad, 5), HP_READY);
     ASSERT_TRUE(!hp_exec_pending(&hp));
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
     ASSERT_TRUE(hello_served());
@@ -138,14 +114,14 @@ TEST(test_hp_bad_crc_dropped) {
 /* n must be the command's fixed request length: checked as w2 arrives. */
 TEST(test_hp_bad_length) {
     setup();
-    ASSERT_EQ(feed(&hp, hello1, 2), HP_RECV);
+    ASSERT_EQ(helper_cmd_feed(&hp, hello1, 2), HP_RECV);
     ASSERT_EQ(hp_step(&hp, 0x0001, 0), HP_READY);
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
     ASSERT_TRUE(!hp_exec_pending(&hp));
     ASSERT_TRUE(hello_served());
     /* a READ_SECTOR (n 1) that says n 0 */
     const uint16_t short_read[2] = {HP_SOF, 0x0210};
-    feed(&hp, short_read, 2);
+    helper_cmd_feed(&hp, short_read, 2);
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
     ASSERT_TRUE(hello_served());
 }
@@ -153,12 +129,12 @@ TEST(test_hp_bad_length) {
 TEST(test_hp_unknown_code) {
     setup();
     const uint16_t unknown[2] = {HP_SOF, 0x017F};
-    ASSERT_EQ(feed(&hp, unknown, 2), HP_RECV);
+    ASSERT_EQ(helper_cmd_feed(&hp, unknown, 2), HP_RECV);
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
     ASSERT_TRUE(!hp_exec_pending(&hp));
     /* ROM_SHA1 (0x21) isn't implemented: unknown too */
     const uint16_t sha1[2] = {HP_SOF, 0x0121};
-    feed(&hp, sha1, 2);
+    helper_cmd_feed(&hp, sha1, 2);
     ASSERT_EQ(hp_step(&hp, 0x0004, 0), HP_READY);
     ASSERT_TRUE(hello_served());
 }
@@ -167,28 +143,28 @@ TEST(test_hp_unknown_code) {
 TEST(test_hp_unknown_code_ffff) {
     setup();
     const uint16_t unknown[3] = {HP_SOF, 0x017F, 0xFFFF};
-    ASSERT_EQ(feed(&hp, unknown, 3), HP_READY);
+    ASSERT_EQ(helper_cmd_feed(&hp, unknown, 3), HP_READY);
     ASSERT_TRUE(hello_served());
 }
 
 TEST(test_hp_rx_timeout) {
     setup();
-    feed(&hp, hello1, 2);
+    helper_cmd_feed(&hp, hello1, 2);
     ASSERT_EQ(hp_step(&hp, 0x0000, HP_STEP_TIMEOUT), HP_READY);
-    ASSERT_EQ(feed(&hp, hello1 + 2, 3), HP_READY);
+    ASSERT_EQ(helper_cmd_feed(&hp, hello1 + 2, 3), HP_READY);
     ASSERT_TRUE(!hp_exec_pending(&hp));
     ASSERT_TRUE(hello_served());
 }
 
 TEST(test_hp_err_word) {
     setup();
-    feed(&hp, hello1, 2);
+    helper_cmd_feed(&hp, hello1, 2);
     ASSERT_EQ(hp_step(&hp, hello1[2], HP_STEP_ERR), HP_READY);
-    ASSERT_EQ(feed(&hp, hello1 + 3, 2), HP_READY);
+    ASSERT_EQ(helper_cmd_feed(&hp, hello1 + 3, 2), HP_READY);
     ASSERT_TRUE(!hp_exec_pending(&hp));
     /* an error word is never taken as a SOF */
     ASSERT_EQ(hp_step(&hp, HP_SOF, HP_STEP_ERR), HP_READY);
-    ASSERT_EQ(feed(&hp, hello1 + 1, 4), HP_READY);
+    ASSERT_EQ(helper_cmd_feed(&hp, hello1 + 1, 4), HP_READY);
     ASSERT_TRUE(!hp_exec_pending(&hp));
     ASSERT_TRUE(hello_served());
 }
@@ -200,7 +176,7 @@ TEST(test_hp_false_sof) {
     ASSERT_EQ(hp_step(&hp, HP_SOF, 0), HP_RECV);
     ASSERT_TRUE(hello_served());
     const uint16_t sof_at_w2[2] = {HP_SOF, 0x0101};
-    ASSERT_EQ(feed(&hp, sof_at_w2, 2), HP_RECV);
+    ASSERT_EQ(helper_cmd_feed(&hp, sof_at_w2, 2), HP_RECV);
     ASSERT_TRUE(hello_served());
 }
 
@@ -210,9 +186,9 @@ TEST(test_hp_unsupported) {
     setup();
     uint16_t req[8];
     const uint16_t sector = 3;
-    const uint32_t len = make_req(req, 2, HP_CMD_READ_SECTOR, &sector, 1);
+    const uint32_t len = helper_cmd_make(req, 2, HP_CMD_READ_SECTOR, &sector, 1);
     ASSERT_EQ(len, 6);
-    ASSERT_EQ(feed(&hp, req, len), HP_BUSY);
+    ASSERT_EQ(helper_cmd_feed(&hp, req, len), HP_BUSY);
     /* seq 2, status 3, n 2, 0, 0, CRC-32 0x31FA68A8 */
     const uint16_t resp[6] = {0x0203, 0x0002, 0x0000, 0x0000, 0x68A8, 0x31FA};
     ASSERT_TRUE(served(resp, 6));
@@ -248,7 +224,7 @@ TEST(test_hp_request_lengths) {
     for(uint32_t i = 0; i < 2050; i++) args[i] = (uint16_t)(i * 0x9E37u);
     setup();
     for(size_t c = 0; c < sizeof(cmds) / sizeof(cmds[0]); c++) {
-        const uint32_t len = make_req(req, (uint8_t)c, cmds[c].code, args, cmds[c].n);
+        const uint32_t len = helper_cmd_make(req, (uint8_t)c, cmds[c].code, args, cmds[c].n);
         for(uint32_t i = 0; i + 1 < len; i++) ASSERT_EQ(hp_step(&hp, req[i], 0), HP_RECV);
         ASSERT_EQ(hp_step(&hp, req[len - 1], 0), HP_BUSY);
         ASSERT_EQ(hp_execute(&hp), HP_SOF);
@@ -258,10 +234,10 @@ TEST(test_hp_request_lengths) {
         ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
         /* one word more or less is dropped at w2 */
         const uint16_t head[3] = {HP_SOF, req[1], (uint16_t)(cmds[c].n + 1)};
-        ASSERT_EQ(feed(&hp, head, 3), HP_READY);
+        ASSERT_EQ(helper_cmd_feed(&hp, head, 3), HP_READY);
         if(cmds[c].n) {
             const uint16_t shorter[3] = {HP_SOF, req[1], (uint16_t)(cmds[c].n - 1)};
-            ASSERT_EQ(feed(&hp, shorter, 3), HP_READY);
+            ASSERT_EQ(helper_cmd_feed(&hp, shorter, 3), HP_READY);
         }
     }
     ASSERT_TRUE(hello_served());
@@ -272,7 +248,7 @@ TEST(test_hp_hello_boot_bytes) {
     setup();
     gba.own[0xC4] = 0x00;
     gba.own[0xC5] = 0x02;
-    feed(&hp, hello1, 5);
+    helper_cmd_feed(&hp, hello1, 5);
     ASSERT_EQ(hp_execute(&hp), HP_SOF);
     for(int i = 0; i < 5; i++) hp_step(&hp, 0x0000, 0);
     ASSERT_EQ(hp_step(&hp, 0x0000, 0), 0x0200);

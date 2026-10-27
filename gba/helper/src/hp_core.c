@@ -171,7 +171,9 @@ static uint16_t hp_save_probe(Hp* hp) {
     return hp_respond(hp, HP_ST_OK, 5);
 }
 
+/* HELLO starts a session: no erase from before it lets a write skip its own. */
 static uint16_t hp_hello(Hp* hp) {
+    hp->flash.erased_ok = 0;
     const uint8_t* own = hp_hal_own_header();
     uint16_t* p = hp->resp + 3;
     p[0] = HP_PROTO_VERSION;

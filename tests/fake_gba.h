@@ -95,9 +95,18 @@ struct FakeGba {
     uint8_t fail_program_sector;
     uint16_t fail_program_off;
     uint8_t fail_program_times;
+    uint8_t weak_sector;
+    uint16_t weak_off;
+    uint8_t weak_times;
+    bool weak_poll; /* the next read at weak_poll_off returns weak_poll_val: the poll sees done */
+    uint8_t weak_poll_bank;
+    uint16_t weak_poll_off;
+    uint8_t weak_poll_val;
     bool cut_armed;
     uint32_t cut_ops; /* erases + byte programs still allowed before the chip freezes */
     bool frozen; /* the power cut came */
+    uint8_t cut_want; /* the data of the operation the cut froze */
+    uint8_t cut_toggle;
     uint8_t late_reads; /* tests set it: the next erase or program to complete shows this many
                          * status reads, DQ5 set, before its data, as if it finished just as DQ5
                          * rose */
@@ -139,11 +148,17 @@ uint8_t* fake_gba_flash(FakeGba* g);
 void fake_gba_fail_erase(FakeGba* g, uint8_t sector, uint8_t times);
 /* The next `times` byte programs at that sector's offset fail. */
 void fake_gba_fail_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t times);
-/* From now, the next `ops` erases + byte programs complete; then the chip freezes: it acts on no
- * later write (they are still counted), and reads return the array as it was. */
+/* The next `times` byte programs at that sector's offset are weak: the poll that follows reads the
+ * byte as written, but one bit the program should have cleared (the lowest) stays set in the
+ * array, so every later read differs. A program that clears no bit can't be weak. */
+void fake_gba_weak_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t times);
+/* From now, the next `ops` erases + byte programs complete; the one after them never does: the
+ * chip freezes in the middle of it, as a power cut leaves it. It then acts on no write (writes are
+ * still counted), every read is that operation's busy status (DQ7 the complement of its data, DQ6
+ * toggling, DQ5 clear), and the array stays as it was before that operation. */
 void fake_gba_power_cut_after(FakeGba* g, uint32_t ops);
 void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out);
 /* Time the GBA spent since the last call, in µs, as the fake models it: 300,000 per erase, 25 per
- * byte program, 1 per flash read (a sector CRC is 4096), and ROM reads at 1,500,000 per 16 MiB
+ * byte program, 1 per flash read (a sector CRC is 4096), and ROM reads at 7,000,000 per 16 MiB
  * (a whole-ROM scan). Resets to 0. */
 uint32_t fake_gba_take_busy_us(FakeGba* g);

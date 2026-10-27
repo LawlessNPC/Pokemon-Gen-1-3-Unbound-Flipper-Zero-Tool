@@ -759,7 +759,7 @@ TEST(test_mb_wrong_length_reply) {
     ASSERT_EQ(fake_bios_boots(&bios), 1);
 }
 
-/* Detection: GEN3_MB_JUNK_LIMIT replies that are neither 0x0000, 0xFFFF nor 0x72x2 start a
+/* Detection: GEN3_MB_JUNK_LIMIT replies that are neither 0x0000, 0xFFFF nor 0x7202 start a
  * restart wait, not counted: 70 ms plus up to 170 ms of idle ticks (multiboot-and-save.md §2.4).
  * waiting_us counts the waits too, and no attempt budget runs before a header word. */
 TEST(test_mb_junk_wait) {

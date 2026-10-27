@@ -21,7 +21,9 @@
 #define FAKE_SECTOR_LEN 4096u
 #define FAKE_BANK_LEN 65536u
 #define FAKE_ROM_MAX 0x02000000u /* hp_hal_rom16/rom32: off < 32 MiB */
-#define FAKE_SCAN_US 1500000u /* a whole 16 MiB ROM read */
+/* A whole 16 MiB ROM scan: the helper's loop is about 27 cycles per 32-bit word at 16.78 MHz,
+ * about 6.7 s; rounded up */
+#define FAKE_SCAN_US 7000000u
 #define FAKE_SCAN_BYTES 0x1000000u
 #define FAKE_ERASE_US 300000u
 #define FAKE_PROGRAM_US 25u
@@ -95,6 +97,15 @@ void fake_gba_fail_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t tim
     g->fail_program_sector = sector;
     g->fail_program_off = off;
     g->fail_program_times = times;
+}
+
+void fake_gba_weak_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t times) {
+    if(sector >= FAKE_GBA_SECTORS || off >= FAKE_SECTOR_LEN) {
+        fake_gba_misuse("fake_gba_weak_program: sector or offset", (uint32_t)sector << 16 | off);
+    }
+    g->weak_sector = sector;
+    g->weak_off = off;
+    g->weak_times = times;
 }
 
 void fake_gba_power_cut_after(FakeGba* g, uint32_t ops) {
@@ -174,14 +185,16 @@ static bool fake_flash_live(const FakeGba* g) {
     return g->save == FakeSaveFlash && !g->frozen;
 }
 
-/* An erase or a byte program was issued (and counted). True if the chip carries it out; false if
- * it isn't a live flash chip, or the power cut comes first and freezes it. */
-static bool fake_flash_op(FakeGba* g) {
+/* An erase or a byte program, writing want, was issued (and counted). True if the chip carries it
+ * out; false if it isn't a live flash chip, or the power cut comes first and freezes it in the
+ * middle of this operation. */
+static bool fake_flash_op(FakeGba* g, uint8_t want) {
     if(g->status != HpStatusWriting) g->ops_not_red++;
     if(!fake_flash_live(g)) return false;
     if(g->cut_armed) {
         if(g->cut_ops == 0) {
             g->frozen = true;
+            g->cut_want = want;
             return false;
         }
         g->cut_ops--;
@@ -205,7 +218,7 @@ static void fake_flash_erase(FakeGba* g, uint16_t off) {
     const uint8_t sector = (uint8_t)(g->bank * 16u + (off >> 12));
     g->counts.erases++;
     g->busy_us += FAKE_ERASE_US;
-    if(!fake_flash_op(g)) return;
+    if(!fake_flash_op(g, 0xFF)) return;
     if(g->fail_erase[sector]) {
         g->fail_erase[sector]--;
         fake_flash_fail(g, 0xFF);
@@ -221,21 +234,31 @@ static void fake_flash_program(FakeGba* g, uint16_t off, uint8_t v) {
     g->counts.programs++;
     if(in_sector == 0xFF8u) g->counts.commits++;
     g->busy_us += FAKE_PROGRAM_US;
-    if(!fake_flash_op(g)) return;
+    if(!fake_flash_op(g, v)) return;
     if(g->fail_program_times && sector == g->fail_program_sector &&
        in_sector == g->fail_program_off) {
         g->fail_program_times--;
         fake_flash_fail(g, v);
         return;
     }
-    g->flash[(uint32_t)g->bank * FAKE_BANK_LEN + off] &= v;
+    uint8_t* cell = &g->flash[(uint32_t)g->bank * FAKE_BANK_LEN + off];
+    const uint8_t to_clear = (uint8_t)(*cell & ~v);
+    *cell &= v;
+    if(g->weak_times && to_clear && sector == g->weak_sector && in_sector == g->weak_off) {
+        g->weak_times--;
+        *cell |= (uint8_t)(to_clear & (0u - to_clear));
+        g->weak_poll = true;
+        g->weak_poll_bank = g->bank;
+        g->weak_poll_off = off;
+        g->weak_poll_val = v;
+    }
     fake_flash_done(g, v);
 }
 
 static void fake_flash_chip_erase(FakeGba* g) {
     g->counts.chip_erases++;
     g->busy_us += FAKE_ERASE_US;
-    if(!fake_flash_op(g)) return;
+    if(!fake_flash_op(g, 0xFF)) return;
     memset(g->flash, 0xFF, sizeof(g->flash));
 }
 
@@ -346,9 +369,18 @@ static uint8_t fake_flash_value(const FakeGba* g, uint16_t off) {
 uint8_t hp_hal_flash_read(uint16_t off) {
     FakeGba* g = fake_gba_now;
     uint8_t v = fake_flash_value(g, off);
-    if(fake_flash_live(g) && g->late_left) {
+    if(g->save == FakeSaveFlash && g->frozen) {
+        /* busy for good: DQ7 the complement of the data, DQ6 toggling, DQ5 never set */
+        g->cut_toggle ^= 0x40u;
+        v = (uint8_t)((~g->cut_want & 0x80u) | g->cut_toggle);
+    } else if(fake_flash_live(g) && g->late_left) {
         g->late_left--;
         v = (uint8_t)((v & 0x5Fu) | 0x20u | (~g->late_want & 0x80u));
+    } else if(
+        fake_flash_live(g) && g->weak_poll && g->bank == g->weak_poll_bank &&
+        off == g->weak_poll_off) {
+        g->weak_poll = false;
+        v = g->weak_poll_val;
     }
     fake_trace(g, FakeGbaOpRead, off, v);
     g->timer_reads++;

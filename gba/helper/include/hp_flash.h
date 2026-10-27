@@ -42,19 +42,30 @@ typedef struct {
     uint16_t off; /* the offset in the sector that failed */
 } HpFlashResult;
 
-/* Sector n (0..31) is bank n >> 4, at window offset (n & 15) << 12. Every routine selects the bank
- * itself, every time. The status backdrop is red while the chip is being changed, then yellow. */
+/* What a session knows about the chip. A sector reading all 0xFF may still be half-erased (an erase
+ * cut short by a power loss), so a write skips its erase only for a sector this session erased OK
+ * and hasn't programmed since. Zero at the start of a session: hp_init and HELLO clear it. */
+typedef struct {
+    uint32_t erased_ok; /* bit n: sector n was erased OK and nothing has been programmed into it */
+} HpFlash;
 
-/* Erases one sector, with up to 5 tries: OK, or ERASE_FAIL with the last try's code. */
-HpFlashResult hp_flash_erase(uint8_t sector);
-/* Writes img into one sector, with up to 3 tries of: erase if any byte isn't 0xFF, program every
- * byte in ascending order (with defer_commit, all but 0xFF8, which stays 0xFF), then verify.
- * OK, or the last try's ERASE_FAIL (code), PROGRAM_FAIL (code, offset) or VERIFY_FAIL (offset). */
-HpFlashResult hp_flash_program(uint8_t sector, const uint8_t img[4096], bool defer_commit);
+/* Sector n (0..31) is bank n >> 4, at window offset (n & 15) << 12. Every routine selects the bank
+ * itself, every time, and the erase before each of its tries. The status backdrop is red while the
+ * chip is being changed, then yellow. */
+
+/* Erases one sector, with up to 5 tries: OK, which sets its erased_ok bit, or ERASE_FAIL with the
+ * last try's code, which leaves the bit clear. */
+HpFlashResult hp_flash_erase(HpFlash* fl, uint8_t sector);
+/* Writes img into one sector, with up to 3 tries of: erase (skipped only if the sector's erased_ok
+ * bit is set, and only on the first try), program every byte in ascending order (with
+ * defer_commit, all but 0xFF8, which stays 0xFF), then verify. Clears the sector's bit. OK, or the
+ * last try's ERASE_FAIL (code), PROGRAM_FAIL (code, offset) or VERIFY_FAIL (offset). */
+HpFlashResult
+    hp_flash_program(HpFlash* fl, uint8_t sector, const uint8_t img[4096], bool defer_commit);
 /* Programs 0x25 at 0xFF8, completing the signature 0x08012025, only if 0xFF8 reads 0xFF
  * (else NOT_ERASED) and 0xFF9..0xFFB read 20 01 08 (else BAD_ARG); then checks 0xFF8..0xFFB:
- * PROGRAM_FAIL or VERIFY_FAIL with the offset. */
-HpFlashResult hp_flash_commit(uint8_t sector);
+ * PROGRAM_FAIL or VERIFY_FAIL with the offset. Clears the sector's erased_ok bit. */
+HpFlashResult hp_flash_commit(HpFlash* fl, uint8_t sector);
 /* Reads len bytes from off in a sector; nothing unless sector < 32 and off + len <= 4096. */
 void hp_flash_read(uint8_t sector, uint16_t off, uint8_t* out, uint16_t len);
 /* The CRC-32 (IEEE) of a sector's 4096 bytes; 0 for a sector over 31. */

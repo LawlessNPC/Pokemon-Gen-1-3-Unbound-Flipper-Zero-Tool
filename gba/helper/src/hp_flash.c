@@ -97,12 +97,14 @@ HP_IWRAM static uint16_t
     }
 }
 
-/* pokeruby: src/libs/agb_flash_mx.c: EraseFlashSector_MX: the bank, then up to 5 tries of the
- * sector erase, polled at the sector's first byte. 0 or the last try's fail code. */
+/* pokeruby: src/libs/agb_flash_mx.c: EraseFlashSector_MX: up to 5 tries of the sector erase,
+ * polled at the sector's first byte. pret selects the bank once, before the tries; here it is
+ * selected before each try, so nothing depends on whether the F0 reset after a failed try keeps
+ * it. 0 or the last try's fail code. */
 HP_IWRAM static uint16_t hp_flash_erase_sector(uint8_t sector) {
-    const uint16_t base = hp_flash_bank(sector);
     uint16_t r = 0;
     for(uint32_t t = 0; t < HP_ERASE_TRIES; t++) {
+        const uint16_t base = hp_flash_bank(sector);
         hp_flash_cmd(HP_FLASH_ERASE);
         hp_hal_flash_write(HP_FLASH_CMD1, 0xAA);
         hp_hal_flash_write(HP_FLASH_CMD2, 0x55);
@@ -129,21 +131,20 @@ HP_IWRAM static HpFlashResult hp_flash_result(uint8_t status, uint16_t code, uin
 }
 
 /* One try of hp_flash_program: ProgramFlashSector_MX (pokeruby: src/libs/agb_flash_mx.c), which
- * erases first and then programs every byte in ascending order, stopping at the first failure;
- * here the erase is skipped when the sector is blank, and with defer the byte at 0xFF8 is left
- * erased, as WriteSingleChunk does for a trade save (pokeruby: src/save.c). Then
- * VerifyFlashSector (pokeruby: src/libs/agb_flash.c), with 0xFF8 expected erased. */
+ * erases first and then programs every byte in ascending order, stopping at the first failure.
+ * The erase is skipped only for a sector this session erased OK and hasn't programmed since; with
+ * defer the byte at 0xFF8 is left erased, as WriteSingleChunk does for a trade save (pokeruby:
+ * src/save.c). Then VerifyFlashSector (pokeruby: src/libs/agb_flash.c), with 0xFF8 expected
+ * erased. */
 HP_IWRAM static HpFlashResult
-    hp_flash_program_try(uint8_t sector, const uint8_t* img, bool defer) {
-    uint16_t base = hp_flash_bank(sector);
-    for(uint32_t i = 0; i < HP_FLASH_SECTOR_LEN; i++) {
-        if(hp_hal_flash_read((uint16_t)(base + i)) != 0xFF) {
-            const uint16_t code = hp_flash_erase_sector(sector);
-            if(code) return hp_flash_result(HP_ST_ERASE_FAIL, code, 0);
-            base = hp_flash_bank(sector);
-            break;
-        }
+    hp_flash_program_try(HpFlash* fl, uint8_t sector, const uint8_t* img, bool defer) {
+    const uint32_t bit = 1u << sector;
+    if(!(fl->erased_ok & bit)) {
+        const uint16_t code = hp_flash_erase_sector(sector);
+        if(code) return hp_flash_result(HP_ST_ERASE_FAIL, code, 0);
     }
+    fl->erased_ok &= ~bit;
+    const uint16_t base = hp_flash_bank(sector);
     for(uint32_t i = 0; i < HP_FLASH_SECTOR_LEN; i++) {
         if(defer && i == HP_SIG_OFF) continue;
         const uint16_t code = hp_flash_program_byte((uint16_t)(base + i), img[i]);
@@ -158,22 +159,27 @@ HP_IWRAM static HpFlashResult
     return hp_flash_result(HP_ST_OK, 0, 0);
 }
 
-HP_IWRAM HpFlashResult hp_flash_erase(uint8_t sector) {
+HP_IWRAM HpFlashResult hp_flash_erase(HpFlash* fl, uint8_t sector) {
     if(sector >= HP_FLASH_SECTORS) return hp_flash_result(HP_ST_BAD_ARG, 0, 0);
+    const uint32_t bit = 1u << sector;
+    fl->erased_ok &= ~bit;
     hp_hal_status(HpStatusWriting);
     const uint16_t code = hp_flash_erase_sector(sector);
     hp_hal_status(HpStatusBusy);
-    return code ? hp_flash_result(HP_ST_ERASE_FAIL, code, 0) : hp_flash_result(HP_ST_OK, 0, 0);
+    if(code) return hp_flash_result(HP_ST_ERASE_FAIL, code, 0);
+    fl->erased_ok |= bit;
+    return hp_flash_result(HP_ST_OK, 0, 0);
 }
 
-/* pokeruby: src/libs/agb_flash.c: ProgramFlashSectorAndVerify: up to 3 tries. */
+/* pokeruby: src/libs/agb_flash.c: ProgramFlashSectorAndVerify: up to 3 tries. A failed try has
+ * programmed the sector, so the next one erases it again. */
 HP_IWRAM HpFlashResult
-    hp_flash_program(uint8_t sector, const uint8_t img[4096], bool defer_commit) {
+    hp_flash_program(HpFlash* fl, uint8_t sector, const uint8_t img[4096], bool defer_commit) {
     if(sector >= HP_FLASH_SECTORS) return hp_flash_result(HP_ST_BAD_ARG, 0, 0);
     hp_hal_status(HpStatusWriting);
     HpFlashResult r = hp_flash_result(HP_ST_OK, 0, 0);
     for(uint32_t t = 0; t < HP_PROGRAM_TRIES; t++) {
-        r = hp_flash_program_try(sector, img, defer_commit);
+        r = hp_flash_program_try(fl, sector, img, defer_commit);
         if(r.status == HP_ST_OK) break;
     }
     hp_hal_status(HpStatusBusy);
@@ -182,9 +188,10 @@ HP_IWRAM HpFlashResult
 
 /* The deferred byte, as WriteSomeFlashByte0x25ToPrevSector programs it (pokeruby: src/save.c),
  * only onto an erased byte that completes the signature. */
-HP_IWRAM HpFlashResult hp_flash_commit(uint8_t sector) {
+HP_IWRAM HpFlashResult hp_flash_commit(HpFlash* fl, uint8_t sector) {
     static const uint8_t sig[4] = {HP_SIG0, HP_SIG1, HP_SIG2, HP_SIG3};
     if(sector >= HP_FLASH_SECTORS) return hp_flash_result(HP_ST_BAD_ARG, 0, 0);
+    fl->erased_ok &= ~(1u << sector);
     const uint16_t at = (uint16_t)(hp_flash_bank(sector) + HP_SIG_OFF);
     if(hp_hal_flash_read(at) != 0xFF) return hp_flash_result(HP_ST_NOT_ERASED, 0, HP_SIG_OFF);
     for(uint16_t i = 1; i < 4; i++) {
