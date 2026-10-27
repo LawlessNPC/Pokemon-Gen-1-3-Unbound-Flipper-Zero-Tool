@@ -941,64 +941,6 @@ static bool traded_is(const uint8_t* mon, uint16_t national, uint8_t level, uint
            memcmp(have.raw, want.raw, GEN3_PARTY_SIZE) == 0;
 }
 
-/* The GBA's saved party is the one bench_init gave it */
-static bool saved_party_untouched(const Bench* b) {
-    for(uint8_t i = 0; i < FAKE_RUBY_PARTY; i++) {
-        if(memcmp(fake_ruby_party(&b->ruby, i, true), b->party[i], GEN3_PARTY_SIZE) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* From Browsing: the GBA offers its slot 2 and says YES once its prompt is up; then until its
- * phase is Trade: it has just closed the CCDD's 0x1122 link (its 0x1144 OpenLink is due) */
-static bool run_until_trade_phase(Bench* b, uint32_t max_frames) {
-    fake_ruby_offer(&b->ruby, 2);
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuPrompt) fake_ruby_answer(&b->ruby, true);
-        if(fake_ruby_phase(&b->ruby) == FakeRubyTrade) return true;
-    }
-    return false;
-}
-
-/* From Browsing: run_until_trade_phase, then until the GBA's trade link has the Flipper's 0x1144
- * LinkPlayer (the trade's relink, before the animation) */
-static bool run_until_trade_link(Bench* b, uint32_t max_frames) {
-    if(!run_until_trade_phase(b, 600)) return false;
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(fake_ruby_partner(&b->ruby)->link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED) return true;
-    }
-    return false;
-}
-
-/* From Browsing: run_until_trade_link, then until the frame in which the club has answered
- * `syncs` of the GBA's link-save 2FFEs */
-static bool run_until_save_syncs(Bench* b, uint8_t syncs, uint32_t max_frames) {
-    if(!run_until_trade_link(b, 600)) return false;
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        const Gen3ClubStatus st = club_status(b);
-        if(st.phase == Gen3ClubPhaseSave && st.save_syncs == syncs) return true;
-    }
-    return false;
-}
-
-/* Until status.left, checking the GBA has no error; false after max_frames */
-static bool run_until_left(Bench* b, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(club_status(b).left) return true;
-    }
-    return false;
-}
-
 /* The GBA's 5FFFs, word 1 of each (fr: link.c: BuildSendCmd, gReadyCloseLinkType), are want */
 static bool close_types_are(const Bench* b, const uint16_t* want, uint8_t count) {
     bool ok = b->n_g_close == count;
@@ -1195,6 +1137,44 @@ TEST(test_frlg_trade_relink_timeout) {
     ASSERT_TRUE(!st.trade_pending);
     ASSERT_EQ(st.trades_done, 0);
     ASSERT_TRUE(saved_party_untouched(&b));
+}
+
+TEST(test_frlg_trade_relink_late_in_time) {
+    /* The deadline's other side (fr: trade_scene.c: CB2_LinkTrade): after its OpenLink, FireRed
+     * runs 61 frames in state 2 and one in state 3, then trips 301 frames into state 4, 363
+     * frames after the OpenLink. A club that stalls 250 frames from FireRed's close, or 330 (its
+     * LinkPlayer then comes more than 300 frames after the OpenLink, which only a deadline
+     * counted from state 4 lets through), then answers the 0x1144 relink, is still in time: the
+     * trade saves */
+    static const uint32_t stalls[] = {250, 330};
+    for(unsigned k = 0; k < sizeof(stalls) / sizeof(stalls[0]); k++) {
+        Bench b;
+        bench_init_frlg(&b, GEN3_VERSION_FIRERED, false);
+        ASSERT_TRUE(bench_reach_menu(&b));
+        ASSERT_TRUE(run_until_trade_phase(&b, 600));
+        bench_mute(&b, true);
+        run(&b, stalls[k]);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        ASSERT_EQ(fake_ruby_relink_frames(&b.ruby), UINT32_MAX);
+        bench_mute(&b, false);
+        for(int i = 0; i < 60 && fake_ruby_relink_frames(&b.ruby) == UINT32_MAX; i++) {
+            step(&b);
+            ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        }
+        const uint32_t relink = fake_ruby_relink_frames(&b.ruby);
+        ASSERT_TRUE(relink > stalls[k] && relink < 363);
+        if(stalls[k] > 300) ASSERT_TRUE(relink > 300);
+        ASSERT_EQ(fake_ruby_partner(&b.ruby)->link_type, GEN3_LINKTYPE_TRADE_DISCONNECTED);
+        for(int i = 0; i < 4000 && club_status(&b).trades_done == 0; i++) {
+            step(&b);
+            ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        }
+        const Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.trades_done, 1);
+        ASSERT_EQ(st.last_result, Gen3TradeResultDone);
+        ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
+        ASSERT_TRUE(!fake_ruby_save_corrupt(&b.ruby));
+    }
 }
 
 TEST(test_ruby_trade_relink_no_timeout) {
@@ -1478,6 +1458,7 @@ int main(void) {
     RUN(test_frlg_save_window);
     RUN(test_frlg_trade_relink_in_time);
     RUN(test_frlg_trade_relink_timeout);
+    RUN(test_frlg_trade_relink_late_in_time);
     RUN(test_ruby_trade_relink_no_timeout);
     RUN(test_frlg_national_dex_ignored);
     RUN(test_frlg_lost_in_window);

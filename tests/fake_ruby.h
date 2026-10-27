@@ -41,7 +41,7 @@
  * - word 1 of its 5FFF, gReadyCloseLinkType (fr: link.c: BuildSendCmd): 32 for the trade's close
  *   after CCDD (fr: trade.c: CB_WaitToStartTrade), 12 for the room's after EEBB
  *   (CB_InitExitCanceledTrade), 0 for every other close (SetCloseLinkCallback) and from each
- *   OpenLink (InitLink); Ruby's is always 0 (§C4);
+ *   OpenLink, which zeroes it (fr: link.c: OpenLink); Ruby's is always 0 (§C4);
  * - the 0x1144 relink's deadline (fr: trade_scene.c: CB2_LinkTrade, CheckLinkTimeout): "link
  *   timeout" below;
  * - TradeMons without the National Dex from the Flipper's lp_field_2 (fr: trade_scene.c:

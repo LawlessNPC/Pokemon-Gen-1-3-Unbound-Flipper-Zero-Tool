@@ -994,45 +994,6 @@ static void traded_offer(Gen3Pkm* out) {
     gen3_pkm_fix_checksum(out);
 }
 
-/* The GBA's saved party is the one bench_init gave it. */
-static bool saved_party_untouched(const Bench* b) {
-    for(uint8_t i = 0; i < 6; i++) {
-        if(memcmp(fake_ruby_party(&b->ruby, i, true), b->party[i], GEN3_PARTY_SIZE) != 0) {
-            return false;
-        }
-    }
-    return true;
-}
-
-/* From Browsing: the GBA offers its slot 2 and says YES; then until the GBA's trade link has the
- * Flipper's 0x1144 LinkPlayer (the trade's relink, before the animation). */
-static bool run_until_trade_link(Bench* b, uint32_t max_frames) {
-    fake_ruby_offer(&b->ruby, 2);
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuPrompt) fake_ruby_answer(&b->ruby, true);
-        if(fake_ruby_phase(&b->ruby) == FakeRubyTrade &&
-           fake_ruby_partner(&b->ruby)->link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED) {
-            return true;
-        }
-    }
-    return false;
-}
-
-/* From Browsing: run_until_trade_link, then until the frame in which the club has answered
- * `syncs` of the GBA's link-save 2FFEs. */
-static bool run_until_save_syncs(Bench* b, uint8_t syncs, uint32_t max_frames) {
-    if(!run_until_trade_link(b, 600)) return false;
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        const Gen3ClubStatus st = club_status(b);
-        if(st.phase == Gen3ClubPhaseSave && st.save_syncs == syncs) return true;
-    }
-    return false;
-}
-
 TEST(test_trade_round_trip) {
     /* §B4-§B6.1: the GBA trades its slot 2 (X) for the Flipper's Y and saves; the club
      * finalizes at sync 3, and the automatic exchange after the save shows X as the Flipper's */
@@ -2456,16 +2417,6 @@ TEST(test_trade_return_due_consumed) {
 }
 
 /* ---- Leaving the Cable Club (D9, §B7) ---- */
-
-/* Until status.left, checking the GBA has no error; false after max_frames. */
-static bool run_until_left(Bench* b, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(club_status(b).left) return true;
-    }
-    return false;
-}
 
 /* Until the GBA has closed the link of its walk out (fake Closed), then left within 3 frames:
  * the exit's close is the end at once, with no relink awaited. */

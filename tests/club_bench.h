@@ -429,6 +429,65 @@ static inline bool bench_trade(Bench* b, uint8_t gba_slot) {
     return false;
 }
 
+/* The GBA's saved party is the one the bench gave it (b->party) */
+static inline bool saved_party_untouched(const Bench* b) {
+    for(uint8_t i = 0; i < FAKE_RUBY_PARTY; i++) {
+        if(memcmp(fake_ruby_party(&b->ruby, i, true), b->party[i], GEN3_PARTY_SIZE) != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* From Browsing: the GBA offers its slot 2 and says YES once its prompt is up; then until its
+ * phase is Trade: it has just closed the CCDD's 0x1122 link (its 0x1144 OpenLink is due). False
+ * on a fake error or after max_frames. */
+static inline bool run_until_trade_phase(Bench* b, uint32_t max_frames) {
+    fake_ruby_offer(&b->ruby, 2);
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuPrompt) fake_ruby_answer(&b->ruby, true);
+        if(fake_ruby_phase(&b->ruby) == FakeRubyTrade) return true;
+    }
+    return false;
+}
+
+/* From Browsing: run_until_trade_phase (<= 600 frames), then until the GBA's trade link has the
+ * Flipper's 0x1144 LinkPlayer (the trade's relink, before the animation) */
+static inline bool run_until_trade_link(Bench* b, uint32_t max_frames) {
+    if(!run_until_trade_phase(b, 600)) return false;
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_partner(&b->ruby)->link_type == GEN3_LINKTYPE_TRADE_DISCONNECTED) return true;
+    }
+    return false;
+}
+
+/* From Browsing: run_until_trade_link, then until the frame in which the club has answered
+ * `syncs` of the GBA's link-save 2FFEs */
+static inline bool run_until_save_syncs(Bench* b, uint8_t syncs, uint32_t max_frames) {
+    if(!run_until_trade_link(b, 600)) return false;
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        const Gen3ClubStatus st = club_status(b);
+        if(st.phase == Gen3ClubPhaseSave && st.save_syncs == syncs) return true;
+    }
+    return false;
+}
+
+/* Until status.left, checking the GBA has no error; false after max_frames */
+static inline bool run_until_left(Bench* b, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(club_status(b).left) return true;
+    }
+    return false;
+}
+
 /* From raw_gba_init on, the fake isn't stepped: raw_gba_run's scripted GBA link layer answers the
  * club instead, on the same checksum chain (transfer #1 carries the previous burst's sum, §A2),
  * for club branches a Ruby-faithful fake never reaches. It sends one 20-byte block

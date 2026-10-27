@@ -991,7 +991,7 @@ static void open_link(FakeRuby* g) {
     memset(g->block_recv_size, 0, sizeof(g->block_recv_size));
     memset(g->block_recv_pos, 0, sizeof(g->block_recv_pos));
     memset(g->ready_close, 0, sizeof(g->ready_close));
-    g->close_type = 0; /* FRLG: fr: link.c: InitLink */
+    g->close_type = 0; /* FRLG: fr: link.c: OpenLink */
     memset(g->ready_standby, 0, sizeof(g->ready_standby));
     for(int i = 0; i < FAKE_RUBY_PLAYERS; i++) g->link_player_pending[i] = true;
     g->trigger_active = true; /* CreateTask(Task_TriggerHandshake) */
