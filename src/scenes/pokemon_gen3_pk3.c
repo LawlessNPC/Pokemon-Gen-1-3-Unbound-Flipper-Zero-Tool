@@ -43,7 +43,7 @@ static void gen3_pk3_show_result(PokemonFap* pokemon_fap, const char* header, co
 /* ---- Load ---- */
 
 /* What the load changed in the file, briefly, for the result text. "" if nothing. */
-static void gen3_load_changes(const Gen3ImportInfo* info, char* out, size_t out_size) {
+void gen3_load_changes(const Gen3ImportInfo* info, char* out, size_t out_size) {
     const Gen3NormaliseInfo* n = &info->normalise;
     bool moves = n->moves_defaulted || n->duplicates_removed || n->gaps_packed;
     /* A held Mail item, or a stale mail index in a 100-byte file */

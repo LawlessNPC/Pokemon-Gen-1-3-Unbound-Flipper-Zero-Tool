@@ -106,7 +106,7 @@ static void gen3_cart_connect_tick(PokemonFap* pokemon_fap) {
 /* Back on the instructions: unwritten edits (a Retry after the link was lost) are asked about */
 static void gen3_cart_connect_back(PokemonFap* pokemon_fap) {
     if(gen3_cart_ui_changes(pokemon_fap) > 0) {
-        scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartLeave);
+        gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartLeave);
     } else {
         gen3_cart_ui_leave(pokemon_fap);
     }

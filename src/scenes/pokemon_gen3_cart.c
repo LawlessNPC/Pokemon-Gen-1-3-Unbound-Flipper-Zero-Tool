@@ -16,9 +16,16 @@
 #define GEN3_CART_ITEM_INFO 0x47330511u
 #define GEN3_CART_ITEM_RECONNECT 0x47330512u
 #define GEN3_CART_ITEM_BACKUP 0x47330513u
+#define GEN3_CART_ITEM_BROWSE 0x47330514u
+#define GEN3_CART_ITEM_WRITE 0x47330515u
+#define GEN3_CART_ITEM_WRITING_OFF 0x47330516u
+#define GEN3_CART_ITEM_DISCARD 0x47330517u
 
 /* gen3_cart_ui_status's buffer */
 static Gen3CartSessionStatus gen3_cart_status;
+/* The two labels made on each entry (the submenu keeps copies) */
+static char gen3_cart_write_label[24]; /* "Write changes (426)" */
+static char gen3_cart_writing_off_label[40]; /* "Writing off: " and a refuse text */
 
 /* Timer thread: hand the tick to the app thread, which reads the session */
 static void gen3_cart_tick_callback(void* context) {
@@ -86,12 +93,41 @@ const Gen3CartSessionStatus* gen3_cart_ui_status(PokemonFap* pokemon_fap) {
 
 Gen3Cart* gen3_cart_ui_cart(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_cart_ui) return NULL;
+    if(gen3_cart_ui_status(pokemon_fap)->busy) return NULL;
     return gen3_cart_session_cart(pokemon_fap->gen3_cart_ui->session);
 }
 
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap) {
     const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     return c ? gen3_cart_changes(c) : 0;
+}
+
+void gen3_cart_ui_confirm(PokemonFap* pokemon_fap, uint32_t scene) {
+    scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3CartLeave, scene);
+    scene_manager_next_scene(pokemon_fap->scene_manager, scene);
+}
+
+void gen3_cart_ui_box_name(PokemonFap* pokemon_fap, uint8_t box, char out[9]) {
+    Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
+
+    if(box == GEN3_SAVE_PARTY) {
+        snprintf(out, 9, "Party");
+    } else if(!c || !gen3_cart_box_name(c, box, out) || out[0] == '\0') {
+        snprintf(out, 9, "Box %u", (unsigned)box + 1u);
+    }
+}
+
+void gen3_cart_ui_mon_result(PokemonFap* pokemon_fap, bool put, Gen3CartMon m) {
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+
+    snprintf(
+        ui->result_header,
+        sizeof(ui->result_header),
+        "%s",
+        put ? GEN3_CART_SCREEN_CANT_PUT : GEN3_CART_SCREEN_CANT_EDIT);
+    ui->result_text = gen3_cart_screen_mon_text(m);
+    ui->retry_mode = Gen3CartRetryNone;
+    ui->result_back = PokemonSceneGen3CartSlots;
 }
 
 static void gen3_cart_dialog_callback(DialogExResult result, void* context) {
@@ -152,9 +188,10 @@ void gen3_cart_ui_set_result(
     bool dropped,
     uint32_t back) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     Gen3CartScreenResult res;
 
-    gen3_cart_screen_result(job, step, r, dropped, &res);
+    gen3_cart_screen_result(job, step, r, dropped, c && gen3_cart_linked(c), &res);
     ui->result = r;
     snprintf(ui->result_header, sizeof(ui->result_header), "%s", res.header);
     ui->result_text = res.text;
@@ -170,32 +207,65 @@ static void gen3_cart_item_callback(void* context, uint32_t index) {
     view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, index);
 }
 
+static void gen3_cart_add(PokemonFap* pokemon_fap, const char* label, uint32_t item) {
+    submenu_add_item(pokemon_fap->submenu, label, item, gen3_cart_item_callback, pokemon_fap);
+}
+
 void pokemon_scene_gen3_cart_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
     Submenu* submenu = pokemon_fap->submenu;
-    Gen3Cart* c = gen3_cart_session_cart(gen3_cart_ui_get(pokemon_fap)->session);
-    const Gen3CartId* id = gen3_cart_id(c);
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    /* NULL while a job runs: then only Cart info, which waits for it too */
+    Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
+    Gen3CartRefuse why = Gen3CartRefuseNone;
+    Gen3CartScreenHubIn in = {.busy = c == NULL};
     Gen3CartScreenHub items;
 
-    gen3_cart_screen_hub(
-        gen3_cart_ui_status(pokemon_fap), gen3_cart_backup_current(c), id->can_read_save, &items);
+    /* Back here, nothing in the editor goes into a slot any more */
+    ui->edit_mode = Gen3CartEditNone;
+    if(c) {
+        in.linked = gen3_cart_linked(c);
+        in.backup_current = gen3_cart_backup_current(c);
+        in.can_read_save = gen3_cart_id(c)->can_read_save;
+        in.browsable = gen3_cart_browsable(c);
+        in.writable = gen3_cart_writable(c, &why);
+        in.changes = gen3_cart_changes(c);
+    }
+    gen3_cart_screen_hub(&in, &items);
 
     submenu_reset(submenu);
-    submenu_set_header(submenu, id->title[0] ? id->title : "Cartridge");
-    submenu_add_item(
-        submenu, "Cart info", GEN3_CART_ITEM_INFO, gen3_cart_item_callback, pokemon_fap);
-    if(items.reconnect) {
-        submenu_add_item(
-            submenu, "Reconnect", GEN3_CART_ITEM_RECONNECT, gen3_cart_item_callback, pokemon_fap);
+    submenu_set_header(
+        submenu, c && gen3_cart_id(c)->title[0] ? gen3_cart_id(c)->title : "Cartridge");
+    if(items.browse) gen3_cart_add(pokemon_fap, "Party and boxes", GEN3_CART_ITEM_BROWSE);
+    if(items.write) {
+        snprintf(
+            gen3_cart_write_label,
+            sizeof(gen3_cart_write_label),
+            "Write changes (%u)",
+            (unsigned)in.changes);
+        gen3_cart_add(pokemon_fap, gen3_cart_write_label, GEN3_CART_ITEM_WRITE);
     }
-    if(items.backup) {
-        submenu_add_item(
-            submenu, "Back up again", GEN3_CART_ITEM_BACKUP, gen3_cart_item_callback, pokemon_fap);
+    if(items.writing_off) {
+        snprintf(
+            gen3_cart_writing_off_label,
+            sizeof(gen3_cart_writing_off_label),
+            "Writing off: %s",
+            gen3_cart_refuse_text(why));
+        gen3_cart_add(pokemon_fap, gen3_cart_writing_off_label, GEN3_CART_ITEM_WRITING_OFF);
     }
+    if(items.discard) gen3_cart_add(pokemon_fap, "Discard changes", GEN3_CART_ITEM_DISCARD);
+    if(items.reconnect) gen3_cart_add(pokemon_fap, "Reconnect", GEN3_CART_ITEM_RECONNECT);
+    if(items.backup) gen3_cart_add(pokemon_fap, "Back up again", GEN3_CART_ITEM_BACKUP);
+    gen3_cart_add(pokemon_fap, "Cart info", GEN3_CART_ITEM_INFO);
     submenu_set_selected_item(
         submenu, scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Cart));
 
     gen3_menu_show_menu(pokemon_fap);
+}
+
+/* An item that reads or changes the cart, chosen while no job runs (the menu was built so) */
+static bool gen3_cart_idle(PokemonFap* pokemon_fap) {
+    return gen3_cart_ui_cart(pokemon_fap) != NULL;
 }
 
 bool pokemon_scene_gen3_cart_on_event(void* context, SceneManagerEvent event) {
@@ -206,8 +276,31 @@ bool pokemon_scene_gen3_cart_on_event(void* context, SceneManagerEvent event) {
     if(event.type == SceneManagerEventTypeCustom) {
         switch(event.event) {
         case GEN3_CART_ITEM_INFO:
+        case GEN3_CART_ITEM_WRITING_OFF:
             scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, event.event);
             scene_manager_next_scene(scene_manager, PokemonSceneGen3CartInfo);
+            consumed = true;
+            break;
+        case GEN3_CART_ITEM_BROWSE:
+            scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, event.event);
+            if(gen3_cart_idle(pokemon_fap)) {
+                scene_manager_set_scene_state(scene_manager, PokemonSceneGen3CartBoxes, 0);
+                scene_manager_next_scene(scene_manager, PokemonSceneGen3CartBoxes);
+            }
+            consumed = true;
+            break;
+        case GEN3_CART_ITEM_WRITE:
+            scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, event.event);
+            if(gen3_cart_idle(pokemon_fap)) {
+                gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartWriteAsk);
+            }
+            consumed = true;
+            break;
+        case GEN3_CART_ITEM_DISCARD:
+            scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, event.event);
+            if(gen3_cart_idle(pokemon_fap)) {
+                gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartDiscardAsk);
+            }
             consumed = true;
             break;
         case GEN3_CART_ITEM_RECONNECT:
@@ -233,8 +326,10 @@ bool pokemon_scene_gen3_cart_on_event(void* context, SceneManagerEvent event) {
         if(gen3_menu_dialog_up()) {
             /* Back on the "Data missing" dialog returns to the hub */
             gen3_menu_show_menu(pokemon_fap);
+        } else if(!gen3_cart_idle(pokemon_fap)) {
+            /* A job runs, whose changes can't be counted now: leaving waits until it has ended */
         } else if(gen3_cart_ui_changes(pokemon_fap) > 0) {
-            scene_manager_next_scene(scene_manager, PokemonSceneGen3CartLeave);
+            gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartLeave);
         } else {
             gen3_cart_ui_leave(pokemon_fap);
         }

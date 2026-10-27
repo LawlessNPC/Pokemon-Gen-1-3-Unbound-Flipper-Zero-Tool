@@ -41,6 +41,35 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GB
 2. **The backup file.** In `apps_data/pokemon/gen3/backups/` there is `AXVE_<tid>_<date>-<time>.sav`, 131,072 bytes, whose date and time match Cart info's last line.
 3. **Optional:** it loads in mGBA (as the save of a Ruby ROM) or in PKHeX and shows your party.
 
+**The hub's items** from here on, each only when it applies: `Party and boxes`; `Write changes (<n>)` (n Pokemon changed and not yet written) or, when the cart can't be written, `Writing off: <why>`, which opens Cart info; `Discard changes`; `Reconnect`; `Back up again`; `Cart info`.
+
+## C. Browse (Ruby)
+
+1. **Party.** Choose `Party and boxes`. The first row is `Party (<n>/6)`, n being your party's size. Choose it: one row per Pokemon, `01 <SPECIES> Lv<level>` and so on, with the levels the game shows, and `-- empty --` after the last one when the party has fewer than six.
+2. **Boxes.** Back. The next 14 rows are your box names as the game shows them (`BOX 1`, ... or the names you gave them).
+3. **A box.** Choose a box holding Pokemon. It lists its 30 slots: `<slot> <SPECIES> Lv<level>`, `EGG` for an egg, and `-- empty --` for an empty slot. The header is the box name.
+4. **Timing.** Time how long the first box screen takes to open after you choose it, and write it down below. It reads about 60 small pieces of the SD card.
+
+## D. Edit and write (Ruby)
+
+1. **Open.** Open party slot 1. The editor shows its species, level, nickname and OT as the game does.
+2. **Edit.** Set the level to 50, then Back. The row shows `*` after it, and the hub shows `Write changes (1)` and `Discard changes`.
+3. **Write.** Choose `Write changes (1)`. `Write changes?` asks `1 change. The save` / `is backed up. Keep` / `the GBA on.`; choose `Write`. The Flipper shows `Writing` with `Do not power off` (about 10 s), then `Verifying` and `Saving backup`, then `Written`: `Written and verified.` / `Power-cycle the GBA` / `to play.`
+4. **Play.** Switch the GBA off and on without the keys, and choose Continue. There is no "save corrupt" message, and party slot 1 is Lv 50. Save in the game, switch off and on, and load again: still fine.
+5. **Reconnect.** Connect again as in A.3. The hub shows the save as it is now, and its connect backup is a new `.sav` in `backups/`.
+6. **Link drop.** Edit any Pokemon, choose `Write changes`, then `Write`, and pull the cable while `Writing` shows. The Flipper shows `Write failed` with `Link lost. ...` and `Retry`. Plug the cable back in and press `Retry`: the Flipper reconnects (`Reconnected`). Choose `Write changes` again: `Written and verified.` The game loads the edit, with no corrupt-save message. If the GBA lost power instead, the game may say `The save file is corrupt. The previous save file will be loaded.` and loads the old save. That is expected; Retry the write.
+7. **Mail.** Give a party Pokemon a Mail in the game and save, then connect again. Open that Pokemon: `Can't edit` / `Take the Mail off` / `in the game first.` shows, OK returns to the list, and nothing is marked `*`.
+8. **Unchanged.** Open any Pokemon and Back without changing anything: its row has no `*`, and the hub has no `Write changes`.
+
+## E. Put Pokemon (Ruby)
+
+1. **New.** In box 2's first empty slot, choose `New Pokemon`, set the species to TREECKO and the level to 10, then Back. `Put TREECKO Lv10` asks `in <box name>` / `slot <k>?`; choose `Put`. The slot shows `TREECKO Lv10*`.
+2. **Load .pk3.** The `.pk3` file is one saved with Pokemon Trade Tool's `Save .pk3`, which goes to `apps_data/pokemon/gen3/`. Do this before E.1, since closing Cartridge drops the edits not written: close Cartridge, `Save .pk3` in Gen III, then open Cartridge again. In another empty box slot choose `Load .pk3` and pick that file. If the load fixed something in it, `Loaded` says what first; OK. The editor shows it; Back, then `Put`.
+3. **Party.** In the party's `-- empty --` row, choose `New Pokemon`, then Back and `Put`. The party is one longer.
+4. **Write.** Write the changes as in D.3. In the game the boxes show the new Pokemon; their OT is your name and ID, and they obey you in battle. The party has the new member.
+5. **Discard.** Change a Pokemon, then choose `Discard changes`: `Discard changes?` / `1 change.`; choose `Discard`. `Discarded` shows, the `*` is gone, and the hub has no `Write changes`.
+6. **Cancel and Back.** In an empty slot choose `New Pokemon`, then Back: on `Put ...?` press Back to return to the editor, Back again, then `Cancel`. The slot stays `-- empty --`.
+
 ## Results
 
 | Step | Pass / fail | What each screen showed (Flipper, GBA) |
@@ -55,3 +84,21 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GB
 | B.1 Cart info (flash ____, save ____, trainer ____) | | |
 | B.2 Backup file, 131,072 bytes | | |
 | B.3 Backup in mGBA or PKHeX (optional) | | |
+| C.1 Party with the right levels | | |
+| C.2 Box names | | |
+| C.3 A box's slots, `-- empty --` | | |
+| C.4 First box screen opened in ___ s | | |
+| D.1 Party slot 1 in the editor | | |
+| D.2 Level 50: `*`, `Write changes (1)` | | |
+| D.3 `Written and verified` (`Writing` took ___ s) | | |
+| D.4 The game loads Lv 50, no corrupt-save message | | |
+| D.5 Reconnect: new backup | | |
+| D.6 Link drop, Retry, written | | |
+| D.7 Mail: `Can't edit` | | |
+| D.8 Unchanged: no `*` | | |
+| E.1 New TREECKO Lv10 put | | |
+| E.2 `.pk3` loaded and put | | |
+| E.3 New party member put | | |
+| E.4 Written: in the game, OT yours, obeys | | |
+| E.5 Discard | | |
+| E.6 Put: Back to the editor, Cancel | | |

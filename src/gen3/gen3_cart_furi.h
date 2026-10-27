@@ -12,35 +12,8 @@
  * (gen3_store_furi.h); and a log, apps_data/pokemon/gen3_cart.log, which only the worker writes.
  *
  * The frame callback inside runs in the TIM2 interrupt and is ISR-safe: it calls the two cores
- * and nothing else. Every function declared here is app-side. */
-
-typedef enum {
-    Gen3CartJobConnect, /* send the helper (again), then gen3_cart_connect and gen3_cart_attach */
-    Gen3CartJobBackup,
-    Gen3CartJobWrite,
-    Gen3CartJobDiscard,
-    Gen3CartJobRestoreCheck,
-    Gen3CartJobRestore,
-    Gen3CartJobRom,
-    Gen3CartJobReconnect,
-} Gen3CartJob;
-
-/* About 100 B: never a stack local in a scene; copy it into a static buffer. */
-typedef struct {
-    bool busy; /* from gen3_cart_session_run until the job's result is in */
-    Gen3CartJob job;
-    Gen3CartResult result; /* the last job's, valid when !busy */
-    Gen3CartStep step;
-    uint32_t done, total;
-    /* false while Connect waits for the cable (no cable, or the wrong end in the Flipper); while
-     * the driver runs, its cable guard's latest decision */
-    bool cable_ok;
-    Gen3MbStatus mb; /* Connect: the multiboot sender's, during MbWait and MbSend */
-    bool link_up; /* the helper answered the last command */
-    bool dropped; /* Connect: edits that were pending were dropped (gen3_cart_attach) */
-    Gen3SaveTrainer restore_trainer; /* RestoreCheck: the backup's trainer */
-    bool restore_has_trainer;
-} Gen3CartSessionStatus;
+ * and nothing else. Every function declared here is app-side. Its jobs (Gen3CartJob) and status
+ * (Gen3CartSessionStatus) are in gen3_cart.h. */
 
 typedef struct Gen3CartSession Gen3CartSession;
 

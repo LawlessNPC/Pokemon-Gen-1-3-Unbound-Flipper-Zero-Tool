@@ -1,15 +1,16 @@
 #include "test.h"
 #include <stdbool.h>
+#include <stdio.h>
 #include <src/gen3/gen3_cart.h>
-#include <src/gen3/gen3_cart_furi.h>
 #include <src/gen3/gen3_cart_id.h>
 #include <src/gen3/gen3_cart_screen.h>
 #include <src/gen3/gen3_mb.h>
+#include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_save.h>
 
 /* The Cartridge app's screen texts and choices: what the progress screen shows for each job and
- * step, the power-on hint, the hub's items, the results and their Retry, Cart info and the leave
- * warning; and that every text fits the screen. */
+ * step, the power-on hint, the hub's items, the results and their Retry, Cart info, the leave
+ * warning, and the party and box screens; and that every text fits the screen. */
 
 #define ASSERT_FALSE(x) ASSERT_TRUE(!(x))
 #define CABLE_TEXT "Cable: plug in/swap ends"
@@ -327,58 +328,92 @@ TEST(test_progress_texts_fit) {
     }
 }
 
+/* A linked cart, backed up, browsable and writable, with no change */
+static Gen3CartScreenHubIn hub_in(void) {
+    return (Gen3CartScreenHubIn){
+        .busy = false,
+        .linked = true,
+        .backup_current = true,
+        .can_read_save = true,
+        .browsable = true,
+        .writable = true,
+        .changes = 0,
+    };
+}
+
+static void hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* h) {
+    memset(h, 0xA5, sizeof(*h));
+    gen3_cart_screen_hub(in, h);
+}
+
 TEST(test_hub) {
     Gen3CartScreenHub h;
-    memset(&st, 0, sizeof(st));
+    Gen3CartScreenHubIn in = hub_in();
 
-    st.link_up = true;
-    gen3_cart_screen_hub(&st, true, true, &h);
+    hub(&in, &h);
+    ASSERT_TRUE(h.browse);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.writing_off);
+    ASSERT_FALSE(h.discard);
     ASSERT_FALSE(h.reconnect);
     ASSERT_FALSE(h.backup);
 
-    st.link_up = false;
-    gen3_cart_screen_hub(&st, true, true, &h);
+    /* Changes: write them, or discard them */
+    in.changes = 2;
+    hub(&in, &h);
+    ASSERT_TRUE(h.write);
+    ASSERT_TRUE(h.discard);
+    ASSERT_FALSE(h.writing_off);
+
+    /* Not writable: why not, instead of Write, and Discard still */
+    in.writable = false;
+    hub(&in, &h);
+    ASSERT_FALSE(h.write);
+    ASSERT_TRUE(h.writing_off);
+    ASSERT_TRUE(h.discard);
+    in.changes = 0;
+    hub(&in, &h);
+    ASSERT_TRUE(h.writing_off);
+    ASSERT_FALSE(h.discard);
+
+    /* Not browsable (no working copy, or no layout): no list */
+    in = hub_in();
+    in.browsable = false;
+    hub(&in, &h);
+    ASSERT_FALSE(h.browse);
+
+    /* Not linked (a command lost, or a Reconnect stopped before its end): Reconnect */
+    in = hub_in();
+    in.linked = false;
+    hub(&in, &h);
     ASSERT_TRUE(h.reconnect);
-    ASSERT_FALSE(h.backup);
+    ASSERT_TRUE(h.browse);
 
-    st.link_up = true;
-    gen3_cart_screen_hub(&st, false, true, &h);
-    ASSERT_FALSE(h.reconnect);
+    /* No current backup of a save the helper can read: Back up again */
+    in = hub_in();
+    in.backup_current = false;
+    in.browsable = false;
+    in.writable = false;
+    hub(&in, &h);
     ASSERT_TRUE(h.backup);
-
+    ASSERT_FALSE(h.reconnect);
     /* A cart whose save can't be read reaches the hub with no backup: nothing to back up */
-    gen3_cart_screen_hub(&st, false, false, &h);
+    in.can_read_save = false;
+    hub(&in, &h);
     ASSERT_FALSE(h.backup);
+    ASSERT_TRUE(h.writing_off);
 
-    /* A Reconnect that didn't run to its end leaves the cart unlinked, even when the helper
-     * answered its last command (stopped after HELLO): offer it again */
-    st.job = Gen3CartJobReconnect;
-    st.result = Gen3CartCancelled;
-    st.link_up = true;
-    gen3_cart_screen_hub(&st, true, true, &h);
-    ASSERT_TRUE(h.reconnect);
-    st.result = Gen3CartBusyTimeout;
-    gen3_cart_screen_hub(&st, true, true, &h);
-    ASSERT_TRUE(h.reconnect);
-    /* One that ran to its end is linked, whatever it found */
-    st.result = Gen3CartChanged;
-    gen3_cart_screen_hub(&st, false, true, &h);
-    ASSERT_FALSE(h.reconnect);
-    st.result = Gen3CartOk;
-    gen3_cart_screen_hub(&st, true, true, &h);
-    ASSERT_FALSE(h.reconnect);
-    /* Another job stopped by Back leaves the link as it was */
-    st.job = Gen3CartJobBackup;
-    st.result = Gen3CartCancelled;
-    gen3_cart_screen_hub(&st, false, true, &h);
-    ASSERT_FALSE(h.reconnect);
-    ASSERT_TRUE(h.backup);
-
-    /* While a job runs (a Connect not yet taken, say), link_up isn't read */
-    st.busy = true;
-    st.job = Gen3CartJobConnect;
-    st.link_up = false;
-    gen3_cart_screen_hub(&st, false, true, &h);
+    /* While a job runs, the cart isn't read: none of them */
+    in = hub_in();
+    in.busy = true;
+    in.linked = false;
+    in.backup_current = false;
+    in.changes = 3;
+    hub(&in, &h);
+    ASSERT_FALSE(h.browse);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.writing_off);
+    ASSERT_FALSE(h.discard);
     ASSERT_FALSE(h.reconnect);
     ASSERT_FALSE(h.backup);
 }
@@ -389,57 +424,62 @@ TEST(test_result_retry) {
     /* Connect: every failure goes back to the instructions */
     for(int res = Gen3CartLinkLost; res <= Gen3CartLinkBusy; res++) {
         gen3_cart_screen_result(
-            Gen3CartJobConnect, Gen3CartStepMbWait, (Gen3CartResult)res, false, &r);
+            Gen3CartJobConnect, Gen3CartStepMbWait, (Gen3CartResult)res, false, true, &r);
         ASSERT_EQ(r.retry, Gen3CartRetryConnect);
         ASSERT_STR_EQ(r.header, "Connect failed");
         ASSERT_STR_EQ(r.text, gen3_cart_result_text((Gen3CartResult)res));
     }
-    gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepAnalyze, Gen3CartOk, false, &r);
+    gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepAnalyze, Gen3CartOk, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
 
     /* A lost link: Reconnect, and a Reconnect that fails sends the helper again */
     gen3_cart_screen_result(
-        Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartLinkLost, false, &r);
+        Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartLinkLost, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryReconnect);
     ASSERT_STR_EQ(r.header, "Backup failed");
-    gen3_cart_screen_result(Gen3CartJobWrite, Gen3CartStepErase, Gen3CartBusyTimeout, false, &r);
+    gen3_cart_screen_result(
+        Gen3CartJobWrite, Gen3CartStepErase, Gen3CartBusyTimeout, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryReconnect);
     ASSERT_STR_EQ(r.header, "Write failed");
-    gen3_cart_screen_result(Gen3CartJobRom, Gen3CartStepRomRead, Gen3CartLinkLost, false, &r);
+    gen3_cart_screen_result(
+        Gen3CartJobRom, Gen3CartStepRomRead, Gen3CartLinkLost, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryReconnect);
     gen3_cart_screen_result(
-        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartLinkLost, false, &r);
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartLinkLost, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryConnect);
     ASSERT_STR_EQ(r.header, "Reconnect failed");
     gen3_cart_screen_result(
-        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartBusyTimeout, false, &r);
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartBusyTimeout, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryConnect);
     gen3_cart_screen_result(
-        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartHelperError, false, &r);
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartHelperError, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryConnect);
 
     /* A Reconnect that ran to its end and found another save, or was stopped: no Retry */
     gen3_cart_screen_result(
-        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartChanged, false, &r);
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartChanged, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
     gen3_cart_screen_result(
-        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartCancelled, false, &r);
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartCancelled, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
-    gen3_cart_screen_result(Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartOk, false, &r);
+    gen3_cart_screen_result(
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartOk, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
     ASSERT_STR_EQ(r.header, "Reconnected");
     ASSERT_STR_EQ(r.text, "Done.");
 
     /* Any other result: OK only */
-    gen3_cart_screen_result(Gen3CartJobWrite, Gen3CartStepVerify, Gen3CartVerifyFailed, false, &r);
-    ASSERT_EQ(r.retry, Gen3CartRetryNone);
-    gen3_cart_screen_result(Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartSdFull, false, &r);
+    gen3_cart_screen_result(
+        Gen3CartJobWrite, Gen3CartStepVerify, Gen3CartVerifyFailed, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
     gen3_cart_screen_result(
-        Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartCancelled, false, &r);
+        Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartSdFull, false, true, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    gen3_cart_screen_result(
+        Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartCancelled, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
     ASSERT_STR_EQ(r.text, "Stopped.");
-    gen3_cart_screen_result(Gen3CartJobBackup, Gen3CartStepAnalyze, Gen3CartOk, false, &r);
+    gen3_cart_screen_result(Gen3CartJobBackup, Gen3CartStepAnalyze, Gen3CartOk, false, true, &r);
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
     ASSERT_STR_EQ(r.header, "Backed up");
 }
@@ -452,40 +492,41 @@ TEST(test_result_after_commit) {
     for(size_t j = 0; j < 2; j++) {
         /* Before any commit the game still loads the old slot: the job layer's own text */
         for(size_t k = 0; k < 3; k++) {
-            gen3_cart_screen_result(jobs[j], early[k], Gen3CartLinkLost, false, &r);
+            gen3_cart_screen_result(jobs[j], early[k], Gen3CartLinkLost, false, true, &r);
             ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartLinkLost));
-            gen3_cart_screen_result(jobs[j], early[k], Gen3CartBusyTimeout, false, &r);
+            gen3_cart_screen_result(jobs[j], early[k], Gen3CartBusyTimeout, false, true, &r);
             ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartBusyTimeout));
         }
         /* After a commit it may load the new one: never claim the old one */
         for(size_t k = 0; k < 3; k++) {
-            gen3_cart_screen_result(jobs[j], late[k], Gen3CartLinkLost, false, &r);
+            gen3_cart_screen_result(jobs[j], late[k], Gen3CartLinkLost, false, true, &r);
             ASSERT_STR_EQ(
                 r.text, "Link lost. The cart\nmay load either save.\nRetry, then redo it.");
             ASSERT_EQ(r.retry, Gen3CartRetryReconnect);
             ASSERT_TRUE(strstr(r.text, "still") == NULL);
-            gen3_cart_screen_result(jobs[j], late[k], Gen3CartBusyTimeout, false, &r);
+            gen3_cart_screen_result(jobs[j], late[k], Gen3CartBusyTimeout, false, true, &r);
             ASSERT_STR_EQ(
                 r.text, "No answer. The cart\nmay load either save.\nRetry, then redo it.");
             ASSERT_EQ(r.retry, Gen3CartRetryReconnect);
             /* Other results keep their own text */
-            gen3_cart_screen_result(jobs[j], late[k], Gen3CartVerifyFailed, false, &r);
+            gen3_cart_screen_result(jobs[j], late[k], Gen3CartVerifyFailed, false, true, &r);
             ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartVerifyFailed));
         }
     }
     /* Only a write can have committed */
-    gen3_cart_screen_result(Gen3CartJobBackup, Gen3CartStepVerify, Gen3CartLinkLost, false, &r);
+    gen3_cart_screen_result(
+        Gen3CartJobBackup, Gen3CartStepVerify, Gen3CartLinkLost, false, true, &r);
     ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartLinkLost));
 }
 
 TEST(test_result_dropped) {
     Gen3CartScreenResult r;
-    gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepAnalyze, Gen3CartOk, true, &r);
+    gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepAnalyze, Gen3CartOk, true, true, &r);
     ASSERT_STR_EQ(r.header, "Edits dropped");
     ASSERT_STR_EQ(r.text, "The save on the cart\nchanged.");
     ASSERT_EQ(r.retry, Gen3CartRetryNone);
     /* dropped is Connect's only */
-    gen3_cart_screen_result(Gen3CartJobBackup, Gen3CartStepAnalyze, Gen3CartOk, true, &r);
+    gen3_cart_screen_result(Gen3CartJobBackup, Gen3CartStepAnalyze, Gen3CartOk, true, true, &r);
     ASSERT_STR_EQ(r.header, "Backed up");
 }
 
@@ -493,10 +534,15 @@ TEST(test_result_texts_fit) {
     for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
         for(int res = Gen3CartOk; res <= Gen3CartLinkBusy; res++) {
             for(int step = Gen3CartStepNone; step <= Gen3CartStepRomVerify; step++) {
-                for(int dropped = 0; dropped < 2; dropped++) {
+                for(int flags = 0; flags < 4; flags++) {
                     Gen3CartScreenResult r;
                     gen3_cart_screen_result(
-                        all_jobs[j], (Gen3CartStep)step, (Gen3CartResult)res, dropped, &r);
+                        all_jobs[j],
+                        (Gen3CartStep)step,
+                        (Gen3CartResult)res,
+                        flags & 1,
+                        flags & 2,
+                        &r);
                     ASSERT_TRUE(r.header && r.header[0] != '\0');
                     ASSERT_TRUE(fits(r.header, 1, GEN3_CART_SCREEN_TITLE_LEN));
                     ASSERT_TRUE(r.text && r.text[0] != '\0');
@@ -505,6 +551,220 @@ TEST(test_result_texts_fit) {
             }
         }
     }
+}
+
+/* A job that left the cart unlinked (a write-class response the client couldn't take, say) offers
+ * Reconnect, whatever its result; one stopped by Back offers nothing, and the hub has Reconnect */
+TEST(test_result_retry_unlinked) {
+    Gen3CartScreenResult r;
+    gen3_cart_screen_result(
+        Gen3CartJobWrite, Gen3CartStepProgram, Gen3CartHelperError, false, false, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryReconnect);
+    ASSERT_STR_EQ(r.header, "Write failed");
+    gen3_cart_screen_result(
+        Gen3CartJobWrite, Gen3CartStepProgram, Gen3CartHelperError, false, true, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    gen3_cart_screen_result(
+        Gen3CartJobBackup, Gen3CartStepBackupRead, Gen3CartCancelled, false, false, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    gen3_cart_screen_result(Gen3CartJobDiscard, Gen3CartStepNone, Gen3CartOk, false, false, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    /* Connect and Reconnect keep their own */
+    gen3_cart_screen_result(
+        Gen3CartJobReconnect, Gen3CartStepIdentify, Gen3CartChanged, false, false, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    gen3_cart_screen_result(
+        Gen3CartJobConnect, Gen3CartStepMbWait, Gen3CartMultibootFailed, false, false, &r);
+    ASSERT_EQ(r.retry, Gen3CartRetryConnect);
+}
+
+/* Back stopped it: a neutral header, not "failed" */
+TEST(test_result_stopped) {
+    static const struct {
+        Gen3CartJob job;
+        const char* header;
+    } want[] = {
+        {Gen3CartJobConnect, "Connect stopped"},
+        {Gen3CartJobBackup, "Backup stopped"},
+        {Gen3CartJobRestoreCheck, "Check stopped"},
+        {Gen3CartJobRom, "ROM copy stopped"},
+        {Gen3CartJobReconnect, "Reconnect halted"},
+    };
+    Gen3CartScreenResult r;
+    for(size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        gen3_cart_screen_result(
+            want[k].job, Gen3CartStepIdentify, Gen3CartCancelled, false, true, &r);
+        ASSERT_STR_EQ(r.header, want[k].header);
+        ASSERT_STR_EQ(r.text, "Stopped.");
+        ASSERT_TRUE(strstr(r.header, "failed") == NULL);
+    }
+}
+
+TEST(test_result_written) {
+    Gen3CartScreenResult r;
+    gen3_cart_screen_result(Gen3CartJobWrite, Gen3CartStepPostBackup, Gen3CartOk, false, true, &r);
+    ASSERT_STR_EQ(r.header, "Written");
+    ASSERT_STR_EQ(r.text, "Written and verified.\nPower-cycle the GBA\nto play.");
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    gen3_cart_screen_result(
+        Gen3CartJobWrite, Gen3CartStepPostBackup, Gen3CartWrittenNoBackup, false, true, &r);
+    ASSERT_STR_EQ(r.header, "Written");
+    ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartWrittenNoBackup));
+    gen3_cart_screen_result(
+        Gen3CartJobWrite, Gen3CartStepPrepare, Gen3CartChanged, false, true, &r);
+    ASSERT_STR_EQ(r.header, "Write failed");
+    ASSERT_STR_EQ(r.text, "The cart changed\nsince the backup.\nBack up again.");
+    /* A discard that found the cart changed dropped the edits all the same */
+    gen3_cart_screen_result(Gen3CartJobDiscard, Gen3CartStepNone, Gen3CartOk, false, true, &r);
+    ASSERT_STR_EQ(r.header, "Discarded");
+    gen3_cart_screen_result(
+        Gen3CartJobDiscard, Gen3CartStepNone, Gen3CartChanged, false, true, &r);
+    ASSERT_STR_EQ(r.header, "Discarded");
+    ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartChanged));
+    gen3_cart_screen_result(
+        Gen3CartJobDiscard, Gen3CartStepNone, Gen3CartSdError, false, true, &r);
+    ASSERT_STR_EQ(r.header, "Discard failed");
+}
+
+/* ---- The party and box screens ---- */
+
+/* Why a Pokemon isn't opened or put, under "Can't edit" or "Can't put" */
+TEST(test_mon_texts) {
+    static const struct {
+        Gen3CartMon m;
+        const char* text;
+    } want[] = {
+        {Gen3CartMonMail, "Take the Mail off\nin the game first."},
+        {Gen3CartMonItem, "It holds an item\nthe Flipper can't\nwrite back."},
+        {Gen3CartMonBadData, "Unusual data:\nleft as is."},
+        {Gen3CartMonEgg, "Eggs can't be\nedited."},
+        {Gen3CartMonBadEgg, "Bad Egg: left as is."},
+        {Gen3CartMonTaken, "That slot isn't\nfree."},
+        {Gen3CartMonSdError, "SD card error."},
+        {Gen3CartMonBadArg, "Invalid request."},
+        {Gen3CartMonNoData, "Gen III data\nunreadable."},
+    };
+    for(size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        ASSERT_STR_EQ(gen3_cart_screen_mon_text(want[k].m), want[k].text);
+        ASSERT_TRUE(fits(want[k].text, 3, GEN3_CART_SCREEN_LINE_LEN));
+    }
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonOk), "");
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonEmpty), "");
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text((Gen3CartMon)(Gen3CartMonNoData + 1)), "");
+    ASSERT_TRUE(fits(GEN3_CART_SCREEN_CANT_EDIT, 1, GEN3_CART_SCREEN_TITLE_LEN));
+    ASSERT_TRUE(fits(GEN3_CART_SCREEN_CANT_PUT, 1, GEN3_CART_SCREEN_TITLE_LEN));
+}
+
+static Gen3MonSummary summary(Gen3MonKind kind, uint16_t national, uint8_t level) {
+    Gen3MonSummary s;
+    memset(&s, 0, sizeof(s));
+    s.kind = kind;
+    s.national = national;
+    s.level = level;
+    return s;
+}
+
+TEST(test_rows) {
+    char row[GEN3_CART_SCREEN_ROW_SIZE];
+    Gen3MonSummary s = summary(Gen3MonOk, 252, 5);
+    gen3_cart_screen_row(0, &s, "TREECKO", false, row);
+    ASSERT_STR_EQ(row, "01 TREECKO Lv5");
+    gen3_cart_screen_row(29, &s, "TREECKO", true, row);
+    ASSERT_STR_EQ(row, "30 TREECKO Lv5*");
+    s = summary(Gen3MonOk, 6, 100);
+    gen3_cart_screen_row(9, &s, "CHARMANDER", true, row);
+    ASSERT_STR_EQ(row, "10 CHARMANDER Lv100*");
+    s = summary(Gen3MonEmpty, 0, 0);
+    gen3_cart_screen_row(3, &s, "", false, row);
+    ASSERT_STR_EQ(row, "04 -- empty --");
+    s = summary(Gen3MonEgg, 252, 5);
+    gen3_cart_screen_row(4, &s, "TREECKO", false, row);
+    ASSERT_STR_EQ(row, "05 EGG");
+    s = summary(Gen3MonBad, 0, 0);
+    gen3_cart_screen_row(5, &s, "", false, row);
+    ASSERT_STR_EQ(row, "06 BAD EGG");
+    /* a slot the working copy couldn't give */
+    gen3_cart_screen_row(6, NULL, "", false, row);
+    ASSERT_STR_EQ(row, "07 ?");
+}
+
+/* Put <SPECIES> Lv<n> / in <box>\nslot <k>?, the level in the text when the header would be over
+ * 16 characters */
+TEST(test_put_text) {
+    char h[GEN3_CART_SCREEN_HEADER_SIZE];
+    char t[GEN3_CART_SCREEN_PUT_SIZE];
+    gen3_cart_screen_put("TREECKO", 10, "BOX 2", 0, h, t);
+    ASSERT_STR_EQ(h, "Put TREECKO Lv10");
+    ASSERT_STR_EQ(t, "in BOX 2\nslot 1?");
+    gen3_cart_screen_put("CHARMANDER", 100, "BOX 14", 29, h, t);
+    ASSERT_STR_EQ(h, "Put CHARMANDER");
+    ASSERT_STR_EQ(t, "Lv100 in BOX 14\nslot 30?");
+    gen3_cart_screen_put("MEW", 5, "Party", 3, h, t);
+    ASSERT_STR_EQ(h, "Put MEW Lv5");
+    ASSERT_STR_EQ(t, "in Party\nslot 4?");
+    /* every length fits */
+    static const char* const names[] = {"A", "ABCDEFG", "ABCDEFGH", "ABCDEFGHI", "ABCDEFGHIJ"};
+    static const char* const boxes[] = {"", "B", "ABCDEFGH"};
+    static const uint8_t levels[] = {1, 9, 10, 99, 100};
+    for(size_t a = 0; a < 5; a++) {
+        for(size_t b = 0; b < 3; b++) {
+            for(size_t c = 0; c < 5; c++) {
+                for(uint8_t slot = 0; slot < 30; slot += 9) {
+                    gen3_cart_screen_put(names[a], levels[c], boxes[b], slot, h, t);
+                    ASSERT_TRUE(fits(h, 1, GEN3_CART_SCREEN_TITLE_LEN));
+                    ASSERT_TRUE(fits(t, 2, GEN3_CART_SCREEN_LINE_LEN));
+                    ASSERT_TRUE(strstr(h, names[a]) != NULL);
+                }
+            }
+        }
+    }
+}
+
+TEST(test_ask_texts) {
+    char t[GEN3_CART_SCREEN_ASK_SIZE];
+    gen3_cart_screen_write_ask(1, t);
+    ASSERT_STR_EQ(t, "1 change. The save\nis backed up. Keep\nthe GBA on.");
+    gen3_cart_screen_write_ask(3, t);
+    ASSERT_STR_EQ(t, "3 changes. The save\nis backed up. Keep\nthe GBA on.");
+    gen3_cart_screen_write_ask(GEN3_CART_MON_SLOTS, t);
+    ASSERT_TRUE(fits(t, 4, GEN3_CART_SCREEN_LINE_LEN));
+    gen3_cart_screen_discard_ask(1, t);
+    ASSERT_STR_EQ(t, "1 change.");
+    gen3_cart_screen_discard_ask(GEN3_CART_MON_SLOTS, t);
+    ASSERT_STR_EQ(t, "426 changes.");
+    ASSERT_TRUE(fits(t, 4, GEN3_CART_SCREEN_LINE_LEN));
+    ASSERT_TRUE(fits("Write changes?", 1, GEN3_CART_SCREEN_TITLE_LEN));
+    ASSERT_TRUE(fits("Discard changes?", 1, GEN3_CART_SCREEN_TITLE_LEN));
+}
+
+/* A .pk3's check, as Load failed shows it */
+TEST(test_check_texts) {
+    for(int c = Gen3CheckOk; c <= Gen3CheckNoData; c++) {
+        const char* t = gen3_cart_screen_check_text((Gen3Check)c);
+        ASSERT_TRUE(t[0] != '\0');
+        ASSERT_TRUE(fits(t, 3, GEN3_CART_SCREEN_LINE_LEN));
+    }
+    ASSERT_STR_EQ(gen3_cart_screen_check_text(Gen3CheckNoData), "Gen III data\nunreadable");
+    ASSERT_STR_EQ(
+        gen3_cart_screen_check_text(Gen3CheckBadSize), gen3_check_text(Gen3CheckBadSize));
+}
+
+/* What a loaded .pk3 had fixed, broken into lines that fit */
+TEST(test_wrap) {
+    char t[40];
+    snprintf(t, sizeof(t), "%s", "\nFixed: mail moves level ability");
+    gen3_cart_screen_wrap(t);
+    ASSERT_STR_EQ(t, "Fixed: mail moves\nlevel ability");
+    snprintf(t, sizeof(t), "%s", "\nFixed: level");
+    gen3_cart_screen_wrap(t);
+    ASSERT_STR_EQ(t, "Fixed: level");
+    snprintf(t, sizeof(t), "%s", "");
+    gen3_cart_screen_wrap(t);
+    ASSERT_STR_EQ(t, "");
+    snprintf(t, sizeof(t), "%s", "aaaaaaaaaa bbbbbbbbbb cccc dd");
+    gen3_cart_screen_wrap(t);
+    ASSERT_STR_EQ(t, "aaaaaaaaaa bbbbbbbbbb\ncccc dd");
+    ASSERT_TRUE(fits(t, 2, GEN3_CART_SCREEN_LINE_LEN));
 }
 
 /* Cart info */
@@ -713,6 +973,15 @@ int main(void) {
     RUN(test_result_after_commit);
     RUN(test_result_dropped);
     RUN(test_result_texts_fit);
+    RUN(test_result_retry_unlinked);
+    RUN(test_result_stopped);
+    RUN(test_result_written);
+    RUN(test_mon_texts);
+    RUN(test_rows);
+    RUN(test_put_text);
+    RUN(test_ask_texts);
+    RUN(test_check_texts);
+    RUN(test_wrap);
     RUN(test_info_ruby);
     RUN(test_info_saves);
     RUN(test_info_no_backup);

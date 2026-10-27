@@ -8,11 +8,13 @@
 #include "helper_cmd.h"
 #include <stdbool.h>
 #include <src/gen3/gen3_cart.h>
+#include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_hcli.h>
 #include <src/gen3/gen3_hlink.h>
 #include <src/gen3/gen3_pkm.h>
 #include <src/gen3/gen3_save.h>
+#include <src/gen3/gen3_trade_block.h>
 
 /* The cart jobs through the client and the real packet pump against the helper's real core on the
  * fake GBA (fake_helper), with a RAM store. The default cart: English Ruby (AXVE version 0), 1 MiB
@@ -164,10 +166,10 @@ static uint8_t phys(uint8_t slot, uint8_t id) {
     return (uint8_t)fake_save_phys(&spec, slot, id);
 }
 
-/* The default save in img; the party edits go through the editor */
-static bool default_save(void) {
+/* The default save in img, in game's layout; the party edits go through the editor */
+static bool default_save_for(FakeGame game) {
     spec = (FakeSaveSpec){
-        .game = FakeGameRS,
+        .game = game,
         .slot_present = {true, false},
         .counter = {4, 0},
         .first = {0, 0},
@@ -188,6 +190,10 @@ static bool default_save(void) {
     fake_save_put_box_name(img, &spec, 0, 0, "BOX 1");
     fake_save_put_box_mon(img, &spec, 0, 1, 19, party[0]);
     return true;
+}
+
+static bool default_save(void) {
+    return default_save_for(FakeGameRS);
 }
 
 /* Inserts a cart with img on its save chip; a fresh helper, transport, client, store and cart. */
@@ -1397,6 +1403,351 @@ TEST(test_job_rom_link_lost) {
     ASSERT_TRUE(is_rom(rom, MIB));
 }
 
+/* ---- The link ---- */
+
+/* Linked once a connect ran to its end, until a command is lost */
+TEST(test_job_linked) {
+    ASSERT_TRUE(setup());
+    ASSERT_FALSE(gen3_cart_linked(&cart));
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_linked(&cart));
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_linked(&cart));
+    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh) + 3000, FOREVER);
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartLinkLost);
+    ASSERT_FALSE(gen3_cart_linked(&cart));
+    fake_helper_replug(&fh);
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_linked(&cart));
+}
+
+/* ---- Opening a save's Pokemon in the editor, and putting one back ---- */
+
+/* The app's buffers for it, which it keeps in its heap state */
+static uint8_t orig[GEN3_PARTY_SIZE];
+static size_t orig_len;
+static Gen3Pkm scratch;
+static uint8_t rmon[GEN3_PARTY_SIZE];
+static uint8_t crafted_party[6][100];
+static uint8_t crafted_box[5][100];
+static Gen3Editor keep;
+
+static void mod_mail_item(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldHeldItem, GEN3_ITEM_MAIL_FIRST);
+    gen3_pkm_set(p, Gen3FieldMail, 0);
+}
+static void mod_mail_index(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldMail, 2);
+}
+/* A party stat that isn't what level, IVs, EVs and nature give: the editor recalculates it */
+static void mod_odd_stat(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldAtk, gen3_pkm_get(p, Gen3FieldAtk) + 7u);
+}
+static void mod_egg(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldIsEgg, 1);
+}
+static void mod_bad_egg(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldBadEgg, 1);
+}
+static void mod_enigma(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldHeldItem, GEN3_ITEM_ENIGMA_BERRY);
+}
+/* An item FireRed has and Ruby hasn't */
+static void mod_frlg_item(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldHeldItem, GEN3_RUBY_ITEMS_COUNT);
+}
+static void mod_bad_move(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldMove2, GEN3_MOVE_COUNT + 45u);
+}
+/* An empty first move slot before a used one: the editor packs the moves */
+static void mod_move_gap(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldMove1, 0);
+    gen3_pkm_set(p, Gen3FieldMove2, 43);
+    gen3_pkm_set(p, Gen3FieldPp2, 30);
+}
+/* No move at all: the editor gives the default moveset, from the bulk file */
+static void mod_no_moves(Gen3Pkm* p) {
+    for(int i = 0; i < 4; i++) gen3_pkm_set(p, Gen3FieldMove1 + i, 0);
+}
+
+/* The golden Treecko changed by f (NULL: as it is), in game form */
+static bool crafted(void (*f)(Gen3Pkm*), uint8_t out[100]) {
+    uint8_t g[100];
+    Gen3Pkm p;
+    golden_game(g);
+    if(!gen3_save_mon_to_pkm(g, 100, &p)) return false;
+    if(f) f(&p);
+    gen3_save_pkm_to_mon(&p, 100, out);
+    return true;
+}
+
+/* The default save, with a party of six crafted Pokemon: the golden Treecko, a Mail item, a mail
+ * index, an odd stat, an egg and a Bad Egg; and box 2's slots 0..4: the Enigma Berry, a FireRed
+ * item, a move out of range, a gap in the moves and no moves. Backed up. */
+static bool crafted_backed_up(void) {
+    if(!default_save()) return false;
+    void (*const party_mods[6])(
+        Gen3Pkm*) = {NULL, mod_mail_item, mod_mail_index, mod_odd_stat, mod_egg, mod_bad_egg};
+    void (*const box_mods[5])(
+        Gen3Pkm*) = {mod_enigma, mod_frlg_item, mod_bad_move, mod_move_gap, mod_no_moves};
+    for(uint8_t k = 0; k < 6; k++) {
+        if(!crafted(party_mods[k], crafted_party[k])) return false;
+    }
+    for(uint8_t k = 0; k < 5; k++) {
+        if(!crafted(box_mods[k], crafted_box[k])) return false;
+        fake_save_put_box_mon(img, &spec, 0, 2, k, crafted_box[k]);
+    }
+    fake_save_put_party(img, &spec, 0, 6, (const uint8_t(*)[100])crafted_party);
+    insert("AXVE", MIB, FakeSaveFlash);
+    return gen3_cart_connect(&cart) == Gen3CartOk && gen3_cart_backup(&cart, STAMP) == Gen3CartOk;
+}
+
+static Gen3CartMon open_at(uint8_t box, uint8_t slot) {
+    return gen3_cart_mon_open(&cart, &ed, box, slot, orig, &orig_len, &scratch);
+}
+
+static Gen3CartMon close_at(uint8_t box, uint8_t slot, bool* put) {
+    return gen3_cart_mon_close(&cart, &ed, box, slot, orig, orig_len, rmon, put);
+}
+
+/* The slot's bytes in the working copy equal want's first len */
+static bool slot_is(uint8_t box, uint8_t slot, const uint8_t* want, size_t len) {
+    uint8_t m[100];
+    size_t n = 0;
+    return gen3_cart_mon_get(&cart, box, slot, m, &n) == Gen3CartOk && n == len &&
+           memcmp(m, want, len) == 0;
+}
+
+/* Opened and closed with no edit, nothing is put: the bytes compared are the editor's, after it
+ * normalised them (stats recalculated, moves packed, the default moveset), not the save's */
+TEST(test_mon_open_close_unchanged) {
+    ASSERT_TRUE(crafted_backed_up());
+    static const struct {
+        uint8_t box, slot;
+        size_t len;
+        bool normalised; /* the editor's bytes differ from the save's */
+    } at[] = {
+        {GEN3_SAVE_PARTY, 0, 100, false},
+        {GEN3_SAVE_PARTY, 3, 100, true},
+        {1, 19, 80, false},
+        {2, 3, 80, true},
+        {2, 4, 80, true},
+    };
+    for(size_t i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+        uint8_t saved[100];
+        size_t n = 0;
+        ASSERT_EQ(gen3_cart_mon_get(&cart, at[i].box, at[i].slot, saved, &n), Gen3CartOk);
+        ASSERT_EQ(open_at(at[i].box, at[i].slot), Gen3CartMonOk);
+        ASSERT_EQ(orig_len, at[i].len);
+        /* the editor holds it, and orig is the editor's bytes */
+        gen3_save_pkm_to_mon(&ed.pkm, orig_len, rmon);
+        ASSERT_MEM_EQ(rmon, orig, orig_len);
+        ASSERT_EQ(memcmp(orig, saved, orig_len) != 0, at[i].normalised);
+        bool put = true;
+        ASSERT_EQ(close_at(at[i].box, at[i].slot, &put), Gen3CartMonOk);
+        ASSERT_FALSE(put);
+        ASSERT_TRUE(slot_is(at[i].box, at[i].slot, saved, at[i].len));
+    }
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(cart.dirty, 0);
+    ASSERT_TRUE(work_is(flash(), &spec, 0));
+}
+
+/* What the game can't take back, or the Flipper can't write back, isn't opened: Mail (its letter
+ * is a separate record), an item Ruby has no entry for, a move out of range, eggs. The editor is
+ * left as it was. */
+TEST(test_mon_open_refused) {
+    ASSERT_TRUE(crafted_backed_up());
+    static const struct {
+        uint8_t box, slot;
+        Gen3CartMon want;
+    } at[] = {
+        {GEN3_SAVE_PARTY, 1, Gen3CartMonMail},
+        {GEN3_SAVE_PARTY, 2, Gen3CartMonMail},
+        {GEN3_SAVE_PARTY, 4, Gen3CartMonEgg},
+        {GEN3_SAVE_PARTY, 5, Gen3CartMonBadEgg},
+        {2, 0, Gen3CartMonItem},
+        {2, 1, Gen3CartMonItem},
+        {2, 2, Gen3CartMonBadData},
+        /* not a Pokemon to open */
+        {2, 5, Gen3CartMonEmpty},
+        {GEN3_SAVE_PARTY, 6, Gen3CartMonBadArg},
+        {14, 0, Gen3CartMonBadArg},
+        {2, 30, Gen3CartMonBadArg},
+    };
+    for(size_t i = 0; i < sizeof(at) / sizeof(at[0]); i++) {
+        keep = ed;
+        ASSERT_EQ(open_at(at[i].box, at[i].slot), at[i].want);
+        ASSERT_MEM_EQ(&ed, &keep, sizeof(ed));
+    }
+    /* a checksum that fails is a Bad Egg to the game */
+    ASSERT_TRUE(default_save());
+    uint8_t broken[100];
+    ASSERT_TRUE(crafted(NULL, broken));
+    broken[0x20] ^= 0x01;
+    fake_save_put_box_mon(img, &spec, 0, 3, 0, broken);
+    insert("AXVE", MIB, FakeSaveFlash);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
+    keep = ed;
+    ASSERT_EQ(open_at(3, 0), Gen3CartMonBadEgg);
+    ASSERT_MEM_EQ(&ed, &keep, sizeof(ed));
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+}
+
+/* The party: its slots up to the count hold Pokemon, the one after is free, and past that nothing */
+TEST(test_mon_open_party_slots) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 2), Gen3CartMonOk);
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 3), Gen3CartMonEmpty);
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 4), Gen3CartMonBadArg);
+    ASSERT_EQ(open_at(0, 0), Gen3CartMonEmpty);
+    /* nothing to open while not browsable */
+    fake_store_fail_write_after(&store, 0);
+    Gen3Pkm p;
+    ASSERT_TRUE(level50(&p));
+    ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartSdError);
+    ASSERT_EQ(open_at(1, 18), Gen3CartMonBadArg);
+}
+
+/* The editor can't load it (the bulk file unreadable, for the default moveset): nothing is opened,
+ * the editor keeps what it held, and a close can't put that into the slot */
+TEST(test_mon_open_needs_bulk) {
+    ASSERT_TRUE(crafted_backed_up());
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 0), Gen3CartMonOk);
+    gen3_edit_set_level(&ed, 60);
+    keep = ed;
+    bulk_file_failing = true;
+    ASSERT_EQ(open_at(2, 4), Gen3CartMonNoData);
+    ASSERT_MEM_EQ(&ed, &keep, sizeof(ed));
+    ASSERT_TRUE(bulk_file_open());
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(open_at(2, 4), Gen3CartMonOk);
+}
+
+/* An edit is put back where it came from, in the slot's form */
+TEST(test_mon_close_puts_edit) {
+    ASSERT_TRUE(backed_up());
+    bool put = false;
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 0), Gen3CartMonOk);
+    gen3_edit_set_level(&ed, 50);
+    ASSERT_EQ(close_at(GEN3_SAVE_PARTY, 0, &put), Gen3CartMonOk);
+    ASSERT_TRUE(put);
+    gen3_save_pkm_to_mon(&ed.pkm, 100, rmon);
+    ASSERT_TRUE(slot_is(GEN3_SAVE_PARTY, 0, rmon, 100));
+    ASSERT_EQ(gen3_cart_changes(&cart), 1);
+    ASSERT_TRUE(gen3_cart_mon_changed(&cart, GEN3_SAVE_PARTY, 0));
+    ASSERT_EQ(open_at(1, 19), Gen3CartMonOk);
+    gen3_edit_set_level(&ed, 40);
+    put = false;
+    ASSERT_EQ(close_at(1, 19, &put), Gen3CartMonOk);
+    ASSERT_TRUE(put);
+    gen3_save_pkm_to_mon(&ed.pkm, 80, rmon);
+    ASSERT_TRUE(slot_is(1, 19, rmon, 80));
+    ASSERT_EQ(gen3_cart_changes(&cart), 2);
+    ASSERT_EQ(gen3_cart_party_count(&cart), 3);
+}
+
+/* An edited Pokemon the offer rules refuse, or gen3_pkm_check, isn't put; the slot keeps its own */
+TEST(test_mon_close_refused) {
+    ASSERT_TRUE(backed_up());
+    void (*const mods[])(
+        Gen3Pkm*) = {mod_enigma, mod_frlg_item, mod_mail_item, mod_bad_move, mod_egg, mod_bad_egg};
+    const Gen3CartMon want[] = {
+        Gen3CartMonItem,
+        Gen3CartMonItem,
+        Gen3CartMonMail,
+        Gen3CartMonBadData,
+        Gen3CartMonEgg,
+        Gen3CartMonBadEgg};
+    uint8_t saved[100];
+    size_t n = 0;
+    ASSERT_EQ(gen3_cart_mon_get(&cart, 1, 19, saved, &n), Gen3CartOk);
+    for(size_t i = 0; i < sizeof(mods) / sizeof(mods[0]); i++) {
+        ASSERT_EQ(open_at(1, 19), Gen3CartMonOk);
+        mods[i](&ed.pkm);
+        gen3_pkm_fix_checksum(&ed.pkm);
+        bool put = true;
+        ASSERT_EQ(close_at(1, 19, &put), want[i]);
+        ASSERT_FALSE(put);
+        ASSERT_TRUE(slot_is(1, 19, saved, 80));
+    }
+    /* a party Pokemon given a mail index */
+    ASSERT_EQ(gen3_cart_mon_get(&cart, GEN3_SAVE_PARTY, 1, saved, &n), Gen3CartOk);
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 1), Gen3CartMonOk);
+    mod_mail_index(&ed.pkm);
+    bool put = true;
+    ASSERT_EQ(close_at(GEN3_SAVE_PARTY, 1, &put), Gen3CartMonMail);
+    ASSERT_FALSE(put);
+    ASSERT_TRUE(slot_is(GEN3_SAVE_PARTY, 1, saved, 100));
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(cart.dirty, 0);
+}
+
+/* A new Pokemon or a .pk3 goes only into a free slot: an empty box slot, or the party slot after
+ * the last. A new one's MetGame is this cart's game, whatever a species change set; a .pk3 keeps
+ * its own. */
+TEST(test_mon_place) {
+    ASSERT_TRUE(backed_up());
+    Gen3SaveTrainer t;
+    ASSERT_TRUE(gen3_cart_trainer(&cart, &t));
+    ASSERT_TRUE(gen3_cart_new_mon(&ed, &t, gen3_cart_id(&cart)->met_game, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 252));
+    gen3_edit_set_level(&ed, 10);
+    /* taken: a Pokemon there, or a party slot that isn't the next one; nothing is put */
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 1, 19, true, rmon), Gen3CartMonTaken);
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, GEN3_SAVE_PARTY, 1, true, rmon), Gen3CartMonTaken);
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, GEN3_SAVE_PARTY, 4, true, rmon), Gen3CartMonTaken);
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 14, 0, true, rmon), Gen3CartMonBadArg);
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(gen3_cart_party_count(&cart), 3);
+    /* refused by the offer rules: nothing is put */
+    keep = ed;
+    mod_enigma(&ed.pkm);
+    gen3_pkm_fix_checksum(&ed.pkm);
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 2, 0, true, rmon), Gen3CartMonItem);
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ed = keep;
+    /* a box slot */
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 2, 0, true, rmon), Gen3CartMonOk);
+    gen3_save_pkm_to_mon(&ed.pkm, 80, rmon);
+    ASSERT_TRUE(slot_is(2, 0, rmon, 80));
+    ASSERT_TRUE(gen3_cart_mon_changed(&cart, 2, 0));
+    /* the next party slot */
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, GEN3_SAVE_PARTY, 3, true, rmon), Gen3CartMonOk);
+    ASSERT_EQ(gen3_cart_party_count(&cart), 4);
+    gen3_save_pkm_to_mon(&ed.pkm, 100, rmon);
+    ASSERT_TRUE(slot_is(GEN3_SAVE_PARTY, 3, rmon, 100));
+    ASSERT_EQ(gen3_cart_changes(&cart), 2);
+    /* now taken */
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 2, 0, true, rmon), Gen3CartMonTaken);
+
+    /* FireRed: a species change sets MetGame to Ruby; the put sets it to FireRed again */
+    ASSERT_TRUE(default_save_for(FakeGameFRLG));
+    insert("BPRE", MIB, FakeSaveFlash);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_id(&cart)->met_game, 4);
+    ASSERT_TRUE(gen3_cart_trainer(&cart, &t));
+    ASSERT_TRUE(gen3_cart_new_mon(&ed, &t, gen3_cart_id(&cart)->met_game, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 252));
+    ASSERT_EQ(gen3_pkm_get(&ed.pkm, Gen3FieldMetGame), GEN3_EDIT_MET_GAME);
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 0, 4, true, rmon), Gen3CartMonOk);
+    size_t n = 0;
+    ASSERT_EQ(gen3_cart_mon_get(&cart, 0, 4, rmon, &n), Gen3CartOk);
+    Gen3Pkm back;
+    ASSERT_TRUE(gen3_save_mon_to_pkm(rmon, n, &back));
+    ASSERT_EQ(gen3_pkm_get(&back, Gen3FieldMetGame), 4);
+    ASSERT_EQ(gen3_pkm_get(&back, Gen3FieldSpecies), gen3_pkm_get(&ed.pkm, Gen3FieldSpecies));
+    /* a .pk3 keeps where it came from */
+    gen3_pkm_set(&ed.pkm, Gen3FieldMetGame, 3);
+    gen3_pkm_fix_checksum(&ed.pkm);
+    ASSERT_EQ(gen3_cart_mon_place(&cart, &ed, 0, 5, false, rmon), Gen3CartMonOk);
+    ASSERT_EQ(gen3_cart_mon_get(&cart, 0, 5, rmon, &n), Gen3CartOk);
+    ASSERT_TRUE(gen3_save_mon_to_pkm(rmon, n, &back));
+    ASSERT_EQ(gen3_pkm_get(&back, Gen3FieldMetGame), 3);
+}
+
 /* ---- Results ---- */
 
 TEST(test_result_texts) {
@@ -1410,7 +1761,7 @@ TEST(test_result_texts) {
         [Gen3CartBusyTimeout] = "The GBA stopped\nanswering. Cart keeps\nits last good save.",
         [Gen3CartHelperError] = "The helper reported\nan error. See\ngen3_cart.log.",
         [Gen3CartRefused] = "Not allowed for this\ncartridge or save.",
-        [Gen3CartChanged] = "The cart changed\nsince the backup.\nReconnect to back up.",
+        [Gen3CartChanged] = "The cart changed\nsince the backup.\nBack up again.",
         [Gen3CartSdFull] = "SD card full.",
         [Gen3CartSdError] = "SD card error.",
         [Gen3CartVerifyFailed] = "Check failed: the\ndata read back\ndiffers.",
@@ -1493,6 +1844,14 @@ int main(void) {
     RUN(test_job_rom_region_fails_twice);
     RUN(test_job_rom_sd_full);
     RUN(test_job_rom_link_lost);
+    RUN(test_job_linked);
+    RUN(test_mon_open_close_unchanged);
+    RUN(test_mon_open_refused);
+    RUN(test_mon_open_party_slots);
+    RUN(test_mon_open_needs_bulk);
+    RUN(test_mon_close_puts_edit);
+    RUN(test_mon_close_refused);
+    RUN(test_mon_place);
     RUN(test_result_texts);
     TEST_EXIT();
 }

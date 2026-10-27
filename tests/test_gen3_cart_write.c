@@ -237,6 +237,9 @@ typedef struct {
     uint8_t act_code; /* when the act_nth run of act_code is done, act() */
     uint32_t act_nth;
     void (*act)(void);
+    /* When the first ERASE_SECTOR ran: the Erase reports so far, and the last one's done */
+    uint32_t erase_reports;
+    uint32_t erase_first_done;
 } Hook;
 
 static Hook hook;
@@ -244,6 +247,10 @@ static Hook hook;
 static void hook_cb(void* ctx, uint8_t code, uint16_t arg0) {
     Hook* k = ctx;
     k->calls[code]++;
+    if(code == GEN3_HCMD_ERASE_SECTOR && k->calls[code] == 1) {
+        k->erase_reports = prog.calls[Gen3CartStepErase];
+        k->erase_first_done = prog.last_done[Gen3CartStepErase];
+    }
     if(code == GEN3_HCMD_SECTOR_CRC32 && arg0 < 32) k->crc_sectors |= 1u << arg0;
     if(code == GEN3_HCMD_COPY_SECTOR && fh.hp.req[1] < 32) k->copy_dst |= 1u << fh.hp.req[1];
     if(code == GEN3_HCMD_ERASE_SECTOR || code == GEN3_HCMD_COMMIT_SECTOR) ref_point(false);
@@ -1319,16 +1326,18 @@ TEST(test_write_commit_link_lost) {
     ASSERT_TRUE(written_and_backed_up());
 }
 
-/* A write whose slot the game loads, not yet backed up, then Discard: the edits go, and with them
- * the write's claim on its slot. After a power cycle, attach compares that slot and backs up the
- * cart as it is, the edited save the game loads; a new edit then writes over the old slot. Cut
- * right after the 14th commit, or a check that failed with every commit done. */
+/* A write whose slot the game loads, not yet backed up, then Discard while the cart is linked:
+ * the edits go, and the write's claim on its slot. The footers, read again with no slot skipped,
+ * show that slot changed, so the backup goes too: the Flipper never shows the old save while the
+ * game loads the new one. A whole connect then backs up the cart as it is, the edited save the game
+ * loads; a new edit writes over the old slot. Cut right after the 14th commit (the power, then a
+ * whole connect; or the cable, then a reconnect), or a check that failed with every commit done. */
 TEST(test_discard_after_write) {
     ASSERT_TRUE(backed_up());
     ASSERT_TRUE(edit_party());
     watch_write();
     snap_take();
-    for(uint32_t i = 0; i < 2; i++) {
+    for(uint32_t i = 0; i < 3; i++) {
         snap_restore();
         hook.act_code = GEN3_HCMD_COMMIT_SECTOR;
         hook.act_nth = 14;
@@ -1336,15 +1345,32 @@ TEST(test_discard_after_write) {
             hook.act = power_off;
             ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
             power_back_on();
+        } else if(i == 1) {
+            hook.act_code = 0;
+            hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+            hook.unplug_nth = 14;
+            hook.unplug_len = FOREVER;
+            ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+            fake_helper_replug(&fh);
+            ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+            ASSERT_TRUE(gen3_cart_backup_current(&cart));
         } else {
             act_k = 5;
             hook.act = new_sector_differs;
             ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartVerifyFailed);
         }
         ASSERT_EQ(cart.wslot, 1);
-        ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartOk);
+        ASSERT_TRUE(gen3_cart_linked(&cart));
+        const uint32_t footers = calls(GEN3_HCMD_READ_FOOTERS);
+        ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartChanged);
+        ASSERT_EQ(calls(GEN3_HCMD_READ_FOOTERS), footers + 1);
         ASSERT_EQ(gen3_cart_changes(&cart), 0);
+        ASSERT_EQ(cart.dirty, 0);
         ASSERT_EQ(cart.wslot, NONE);
+        ASSERT_FALSE(gen3_cart_backup_current(&cart));
+        ASSERT_FALSE(gen3_cart_browsable(&cart));
+        ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartRefused);
         /* the game loads the new slot */
         Gen3SaveSectorInfo info[28];
         for(uint32_t s = 0; s < 28; s++) {
@@ -1373,6 +1399,128 @@ TEST(test_discard_after_write) {
         ASSERT_EQ(gen3_cart_slots(&cart)->save_counter, 6);
         ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
     }
+}
+
+/* Discard while linked after a write that changed nothing on the cart (the cable out right after
+ * the arming): its slot is as backed up, so the backup stays, and the working copy is the backup's
+ * again. Not linked after a write that committed: no footers to read, so Discard ends the write's
+ * claim on its slot, and the next reconnect compares that slot and finds the cart Changed. */
+TEST(test_discard_after_arming) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    hook.unplug_code = GEN3_HCMD_ARM_WRITE;
+    hook.unplug_nth = 1;
+    hook.unplug_len = FOREVER;
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(cart.wslot, 1);
+    ASSERT_TRUE(no_flash_ops());
+    fake_helper_replug(&fh);
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+    const uint32_t footers = calls(GEN3_HCMD_READ_FOOTERS);
+    ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartOk);
+    ASSERT_EQ(calls(GEN3_HCMD_READ_FOOTERS), footers + 1);
+    ASSERT_EQ(cart.wslot, NONE);
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_TRUE(gen3_cart_backup_current(&cart));
+    ASSERT_TRUE(gen3_cart_writable(&cart, NULL));
+    uint8_t at[14];
+    slot_at(0, 0, at);
+    ASSERT_TRUE(work_is_flash(at));
+
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+    hook.unplug_nth = 14;
+    hook.unplug_len = FOREVER;
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_FALSE(gen3_cart_linked(&cart));
+    const uint32_t exchanges = tap.exchanges;
+    ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartOk);
+    ASSERT_EQ(tap.exchanges, exchanges);
+    ASSERT_EQ(cart.wslot, NONE);
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    fake_helper_replug(&fh);
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartChanged);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+}
+
+/* The first of slot B's sectors that the write committed, with its counter 5 */
+static uint8_t committed_sector(void) {
+    for(uint8_t s = 14; s < 28; s++) {
+        Gen3SaveSectorInfo i;
+        gen3_save_sector_info(Gen3LinkGameRS, flash() + s * SECTOR_LEN, &i);
+        if(i.valid && i.f.counter == 5) return s;
+    }
+    return NONE;
+}
+
+/* What test_reconnect_slot_rules changes on the cart before the reconnect */
+typedef enum {
+    SlotRuleNone,
+    SlotRuleNotValid, /* a sector of the write's slot: the signature, not valid, counter 3 */
+    SlotRuleCounterN, /* a sector of the write's slot: the backup's counter N (4) */
+    SlotRuleKeptSlot, /* a sector of the slot kept: the write's counter N + 1 (5) */
+} SlotRule;
+
+/* A write cut after its 7th commit (slot B, counter 5), the change, then a reconnect. ok: the
+ * backup is still current afterwards. */
+static Gen3CartResult reconnect_after(SlotRule rule, bool* ok) {
+    *ok = false;
+    if(!backed_up() || !edit_party()) return Gen3CartBadArg;
+    hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+    hook.unplug_nth = 7;
+    hook.unplug_len = FOREVER;
+    if(gen3_cart_write(&cart, STAMP2) != Gen3CartLinkLost) return Gen3CartBadArg;
+    if(cart.wslot != 1 || cart.wcounter != 5) return Gen3CartBadArg;
+    const uint8_t s = committed_sector();
+    if(s == NONE) return Gen3CartBadArg;
+    switch(rule) {
+    case SlotRuleNone:
+        break;
+    case SlotRuleNotValid:
+        fake_save_set_counter(flash(), s, 3);
+        fake_save_break_checksum(flash(), s);
+        break;
+    case SlotRuleCounterN:
+        fake_save_set_counter(flash(), s, 4);
+        break;
+    case SlotRuleKeptSlot:
+        fake_save_set_counter(flash(), phys(0, 3), 5);
+        break;
+    }
+    fake_helper_replug(&fh);
+    const Gen3CartResult r = gen3_cart_reconnect(&cart);
+    *ok = gen3_cart_backup_current(&cart);
+    return r;
+}
+
+/* While a write's slot is skipped, a sector there stands only if it is the backup's, has no
+ * signature, or has the write's counter N + 1; the slot kept must be the backup's exactly. So the
+ * signature on a sector that isn't valid (not "no signature"), the backup's own counter N in the
+ * write's slot (not N + 1), and the write's counter in the slot kept (the rule is the write's slot
+ * only) are each another save: Changed, the backup dropped. */
+TEST(test_reconnect_slot_rules) {
+    bool current = false;
+    ASSERT_EQ(reconnect_after(SlotRuleNone, &current), Gen3CartOk);
+    ASSERT_TRUE(current);
+    ASSERT_EQ(reconnect_after(SlotRuleNotValid, &current), Gen3CartChanged);
+    ASSERT_FALSE(current);
+    ASSERT_EQ(reconnect_after(SlotRuleCounterN, &current), Gen3CartChanged);
+    ASSERT_FALSE(current);
+    ASSERT_EQ(reconnect_after(SlotRuleKeptSlot, &current), Gen3CartChanged);
+    ASSERT_FALSE(current);
+}
+
+/* Erase 0 of 14 is reported before the first erase runs, so the screen says not to power off for
+ * that one as well */
+TEST(test_write_reports_erase_first) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartOk);
+    ASSERT_EQ(hook.erase_reports, 1);
+    ASSERT_EQ(hook.erase_first_done, 0);
+    ASSERT_EQ(prog.calls[Gen3CartStepErase], 15);
+    ASSERT_EQ(prog.last_done[Gen3CartStepErase], 14);
 }
 
 /* A write cut in its 8th commit, then the GBA off and another cart in: the same game and header,
@@ -2157,6 +2305,9 @@ int main(void) {
     RUN(test_attach_after_power_cut);
     RUN(test_write_commit_link_lost);
     RUN(test_discard_after_write);
+    RUN(test_discard_after_arming);
+    RUN(test_reconnect_slot_rules);
+    RUN(test_write_reports_erase_first);
     RUN(test_attach_other_cart_same_save);
     RUN(test_kept_slot_compared);
     RUN(test_post_write_backup_cart_differs);

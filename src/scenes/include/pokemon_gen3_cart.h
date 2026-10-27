@@ -21,13 +21,21 @@
 #define PokemonSceneGen3Cart PokemonSceneGen3Menu
 
 /* Custom events of the Cartridge scenes, clear of scene ids and the other Gen III events. A tick
- * still queued when a scene is left reaches the next one, which ignores it. */
+ * still queued when a scene is left reaches the next one, which ignores it. The scenes' own
+ * submenu items and events are 0x473305xx too, each file's in a range of its own: the hub
+ * 0x11-0x1F, the boxes 0x20-0x2E, the slots 0x40-0x5D, the slot router 0x60-0x6F. */
 #define GEN3_CART_EVENT_TICK 0x47330501u /* the progress view's 250 ms timer */
 #define GEN3_CART_EVENT_BACK 0x47330502u /* Back on the progress view */
 #define GEN3_CART_EVENT_LEFT 0x47330503u /* a dialog's buttons (gen3_cart_ui_dialog) */
 #define GEN3_CART_EVENT_CENTER 0x47330504u
 #define GEN3_CART_EVENT_RIGHT 0x47330505u
+/* The party and box scenes, to themselves: nothing to browse, back to the hub */
+#define GEN3_CART_EVENT_HUB 0x47330506u
 
+/* What the Pokemon in the editor is to the slot router (Gen3CartSlot), and what coming back from
+ * the editor does with it: Existing goes back into its slot if it was edited; New (made for this
+ * save) and Loaded (a .pk3) are put into the free slot once Put is confirmed. None: the editor
+ * holds nothing that may go into a slot. */
 typedef enum {
     Gen3CartEditNone,
     Gen3CartEditExisting,
@@ -37,7 +45,8 @@ typedef enum {
 
 typedef struct Gen3CartUi {
     Gen3CartSession* session;
-    /* The Pokemon slot being edited, and its bytes as they were opened */
+    /* The box the slots list (GEN3_SAVE_PARTY for the party), the slot chosen in it, and the bytes
+     * the Pokemon opened from it had in the editor (gen3_cart_mon_open) */
     uint8_t box, slot;
     Gen3CartEditMode edit_mode;
     uint8_t orig[GEN3_PARTY_SIZE];
@@ -76,11 +85,29 @@ void gen3_cart_ui_leave(PokemonFap* pokemon_fap);
  * exists). The status is never a stack local (no app stack local is over 128 bytes). App thread
  * only; the next call overwrites it. */
 const Gen3CartSessionStatus* gen3_cart_ui_status(PokemonFap* pokemon_fap);
-/* The cart's state: for the app thread, and only while no job runs; NULL before the session
- * exists */
+/* The cart's state, for the app thread: NULL before the session exists, and while a job runs (the
+ * cart is the job's then). It reads the status, so it refreshes gen3_cart_ui_status's buffer. Only
+ * the app starts jobs, so the cart stays the app's until it starts one. */
 Gen3Cart* gen3_cart_ui_cart(PokemonFap* pokemon_fap);
-/* Pokemon slots changed and not written; 0 before the session exists */
+/* Pokemon slots changed and not written; 0 before the session exists, and while a job runs */
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap);
+
+/* Opens the confirm scene (pokemon_gen3_cart_confirm.c) as scene: Gen3CartLeave, Gen3CartPut,
+ * Gen3CartWriteAsk or Gen3CartDiscardAsk. Which one is kept in Gen3CartLeave's scene state, set
+ * here before scene_manager_next_scene. */
+void gen3_cart_ui_confirm(PokemonFap* pokemon_fap, uint32_t scene);
+
+/* The name a box shows: "Party" for GEN3_SAVE_PARTY, else the save's (gen3_cart_box_name), or
+ * "Box <n>" if it can't be read or is blank */
+void gen3_cart_ui_box_name(PokemonFap* pokemon_fap, uint8_t box, char out[9]);
+
+/* Sets Gen3CartResult for a Pokemon not opened ("Can't edit") or not put ("Can't put"): the
+ * reason's text, no Retry, and OK back to the list (Gen3CartSlots) */
+void gen3_cart_ui_mon_result(PokemonFap* pokemon_fap, bool put, Gen3CartMon m);
+
+/* From the Put question, which is over the slot router: back to the router, which opens the
+ * editor again on the Pokemon made or loaded. Defined in pokemon_gen3_cart_slot.c. */
+void gen3_cart_slot_reedit(PokemonFap* pokemon_fap);
 
 /* Resets the DialogEx and sends its Left, Center and Right as GEN3_CART_EVENT_LEFT, _CENTER and
  * _RIGHT to the current scene */
@@ -94,7 +121,8 @@ void gen3_cart_ui_progress(PokemonFap* pokemon_fap, Gen3CartScreenState state);
 void gen3_cart_ui_run_job(PokemonFap* pokemon_fap, Gen3CartJob job, const char* arg);
 
 /* Sets Gen3CartResult's header, text, Retry and the scene its OK returns to, from a job's end
- * (gen3_cart_screen_result); call before scene_manager_next_scene(..., Gen3CartResult) */
+ * (gen3_cart_screen_result, with the cart's link as the job left it); call once the job has ended,
+ * before scene_manager_next_scene(..., Gen3CartResult) */
 void gen3_cart_ui_set_result(
     PokemonFap* pokemon_fap,
     Gen3CartJob job,

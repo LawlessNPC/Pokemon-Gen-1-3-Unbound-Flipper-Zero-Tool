@@ -125,23 +125,44 @@ bool gen3_cart_screen_power_hint(const Gen3CartSessionStatus* st) {
            st->mb.last_fail == Gen3MbFailNone;
 }
 
-void gen3_cart_screen_hub(
-    const Gen3CartSessionStatus* st,
-    bool backup_current,
-    bool can_read_save,
-    Gen3CartScreenHub* out) {
-    const bool idle = !st->busy;
-    /* Only a reconnect that ran to its end (Ok, or Changed for another save) links the cart. One
-     * stopped or failed after the helper answered its HELLO leaves link_up set. */
-    const bool unlinked = st->job == Gen3CartJobReconnect && st->result != Gen3CartOk &&
-                          st->result != Gen3CartChanged;
-    out->reconnect = idle && (!st->link_up || unlinked);
-    out->backup = idle && !backup_current && can_read_save;
+void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out) {
+    memset(out, 0, sizeof(*out));
+    if(in->busy) return;
+    out->browse = in->browsable;
+    out->write = in->writable && in->changes > 0;
+    out->writing_off = !in->writable;
+    out->discard = in->changes > 0;
+    out->reconnect = !in->linked;
+    out->backup = !in->backup_current && in->can_read_save;
+}
+
+/* A job Back stopped: what it was, not that it failed */
+static const char* cart_screen_stopped(Gen3CartJob job) {
+    switch(job) {
+    case Gen3CartJobConnect:
+        return "Connect stopped";
+    case Gen3CartJobBackup:
+        return "Backup stopped";
+    case Gen3CartJobWrite:
+        return "Write stopped";
+    case Gen3CartJobDiscard:
+        return "Discard stopped";
+    case Gen3CartJobRestoreCheck:
+        return "Check stopped";
+    case Gen3CartJobRestore:
+        return "Restore stopped";
+    case Gen3CartJobRom:
+        return "ROM copy stopped";
+    case Gen3CartJobReconnect:
+        return "Reconnect halted"; /* "Reconnect stopped" is over 16 characters */
+    }
+    return "Stopped";
 }
 
 static const char* cart_screen_header(Gen3CartJob job, Gen3CartResult r) {
     const bool ok = r == Gen3CartOk;
     const bool written = ok || r == Gen3CartWrittenNoBackup;
+    if(r == Gen3CartCancelled) return cart_screen_stopped(job);
     switch(job) {
     case Gen3CartJobConnect:
         return ok ? "Connected" : "Connect failed";
@@ -150,7 +171,8 @@ static const char* cart_screen_header(Gen3CartJob job, Gen3CartResult r) {
     case Gen3CartJobWrite:
         return written ? "Written" : "Write failed";
     case Gen3CartJobDiscard:
-        return ok ? "Discarded" : "Discard failed";
+        /* Changed: the cart wasn't as backed up, and the edits went with the backup */
+        return ok || r == Gen3CartChanged ? "Discarded" : "Discard failed";
     case Gen3CartJobRestoreCheck:
         return ok ? "Backup checked" : "Can't restore";
     case Gen3CartJobRestore:
@@ -163,7 +185,7 @@ static const char* cart_screen_header(Gen3CartJob job, Gen3CartResult r) {
     return "Cartridge";
 }
 
-static Gen3CartRetry cart_screen_retry(Gen3CartJob job, Gen3CartResult r) {
+static Gen3CartRetry cart_screen_retry(Gen3CartJob job, Gen3CartResult r, bool linked) {
     switch(r) {
     case Gen3CartOk:
     case Gen3CartWrittenNoBackup:
@@ -179,8 +201,11 @@ static Gen3CartRetry cart_screen_retry(Gen3CartJob job, Gen3CartResult r) {
     if(job == Gen3CartJobReconnect) {
         return r == Gen3CartChanged ? Gen3CartRetryNone : Gen3CartRetryConnect;
     }
-    /* The helper may still be busy with the lost command: a Reconnect waits for it */
-    if(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout) return Gen3CartRetryReconnect;
+    /* The helper may still be busy with the lost command, or did something the client couldn't
+     * take in: a Reconnect waits for it, and the job's next run reads the cart */
+    if(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout || !linked) {
+        return Gen3CartRetryReconnect;
+    }
     return Gen3CartRetryNone;
 }
 
@@ -189,13 +214,17 @@ void gen3_cart_screen_result(
     Gen3CartStep step,
     Gen3CartResult r,
     bool dropped,
+    bool linked,
     Gen3CartScreenResult* out) {
     out->header = cart_screen_header(job, r);
     out->text = gen3_cart_result_text(r);
-    out->retry = cart_screen_retry(job, r);
+    out->retry = cart_screen_retry(job, r, linked);
     if(job == Gen3CartJobConnect && r == Gen3CartOk && dropped) {
         out->header = "Edits dropped";
         out->text = "The save on the cart\nchanged.";
+    }
+    if(job == Gen3CartJobWrite && r == Gen3CartOk) {
+        out->text = "Written and verified.\nPower-cycle the GBA\nto play.";
     }
     /* Each commit makes one more sector of the new slot valid, and after the last the game loads
      * that slot: once a commit may have gone out, the cart may load either save, and the write's
@@ -316,11 +345,142 @@ void gen3_cart_screen_info(
     cart_screen_line(text, pos, line, true);
 }
 
+static const char* cart_screen_changes(uint16_t changes) {
+    return changes == 1 ? "change" : "changes";
+}
+
 void gen3_cart_screen_leave(uint16_t changes, char out[GEN3_CART_SCREEN_LEAVE_SIZE]) {
     snprintf(
         out,
         GEN3_CART_SCREEN_LEAVE_SIZE,
         "%u %s not\nwritten.",
         (unsigned)changes,
-        changes == 1 ? "change" : "changes");
+        cart_screen_changes(changes));
+}
+
+/* ---- The party and box screens ---- */
+
+const char* gen3_cart_screen_mon_text(Gen3CartMon m) {
+    switch(m) {
+    case Gen3CartMonOk:
+    case Gen3CartMonEmpty:
+        return "";
+    case Gen3CartMonBadArg:
+        return gen3_cart_result_text(Gen3CartBadArg);
+    case Gen3CartMonSdError:
+        return gen3_cart_result_text(Gen3CartSdError);
+    case Gen3CartMonTaken:
+        return "That slot isn't\nfree.";
+    case Gen3CartMonMail:
+        return "Take the Mail off\nin the game first.";
+    case Gen3CartMonItem:
+        return "It holds an item\nthe Flipper can't\nwrite back.";
+    case Gen3CartMonEgg:
+        return "Eggs can't be\nedited.";
+    case Gen3CartMonBadEgg:
+        return "Bad Egg: left as is.";
+    case Gen3CartMonBadData:
+        return "Unusual data:\nleft as is.";
+    case Gen3CartMonNoData:
+        return "Gen III data\nunreadable.";
+    }
+    return "";
+}
+
+void gen3_cart_screen_row(
+    uint8_t slot,
+    const Gen3MonSummary* s,
+    const char* species,
+    bool changed,
+    char out[GEN3_CART_SCREEN_ROW_SIZE]) {
+    const unsigned k = (unsigned)slot + 1u;
+    const char* mark = changed ? "*" : "";
+    if(!s) {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u ?%s", k, mark);
+        return;
+    }
+    switch(s->kind) {
+    case Gen3MonOk:
+        snprintf(
+            out,
+            GEN3_CART_SCREEN_ROW_SIZE,
+            "%02u %.10s Lv%u%s",
+            k,
+            species,
+            (unsigned)s->level,
+            mark);
+        return;
+    case Gen3MonEmpty:
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u -- empty --%s", k, mark);
+        return;
+    case Gen3MonEgg:
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u EGG%s", k, mark);
+        return;
+    case Gen3MonBad:
+        break;
+    }
+    snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u BAD EGG%s", k, mark);
+}
+
+void gen3_cart_screen_put(
+    const char* species,
+    uint8_t level,
+    const char* box,
+    uint8_t slot,
+    char header[GEN3_CART_SCREEN_HEADER_SIZE],
+    char text[GEN3_CART_SCREEN_PUT_SIZE]) {
+    const unsigned k = (unsigned)slot + 1u;
+    char lv[8];
+    char whole[24]; /* "Put CHARMANDER Lv100": the header with the level, if it fits */
+    snprintf(lv, sizeof(lv), "Lv%u", (unsigned)level);
+    const int n = snprintf(whole, sizeof(whole), "Put %.10s %s", species, lv);
+    if(n > 0 && (size_t)n <= GEN3_CART_SCREEN_TITLE_LEN) {
+        memcpy(header, whole, (size_t)n + 1u);
+        snprintf(text, GEN3_CART_SCREEN_PUT_SIZE, "in %.8s\nslot %u?", box, k);
+    } else {
+        snprintf(header, GEN3_CART_SCREEN_HEADER_SIZE, "Put %.10s", species);
+        snprintf(text, GEN3_CART_SCREEN_PUT_SIZE, "%s in %.8s\nslot %u?", lv, box, k);
+    }
+}
+
+void gen3_cart_screen_write_ask(uint16_t changes, char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    snprintf(
+        out,
+        GEN3_CART_SCREEN_ASK_SIZE,
+        "%u %s. The save\nis backed up. Keep\nthe GBA on.",
+        (unsigned)changes,
+        cart_screen_changes(changes));
+}
+
+void gen3_cart_screen_discard_ask(uint16_t changes, char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    snprintf(
+        out, GEN3_CART_SCREEN_ASK_SIZE, "%u %s.", (unsigned)changes, cart_screen_changes(changes));
+}
+
+const char* gen3_cart_screen_check_text(Gen3Check c) {
+    /* the one check text over a line: "Gen III data unreadable" */
+    if(c == Gen3CheckNoData) return "Gen III data\nunreadable";
+    return gen3_check_text(c);
+}
+
+void gen3_cart_screen_wrap(char* text) {
+    size_t skip = 0;
+    while(text[skip] == '\n') skip++;
+    if(skip) memmove(text, text + skip, strlen(text + skip) + 1u);
+    /* the last space seen on this line, where it may break */
+    size_t line = 0;
+    char* space = NULL;
+    for(char* p = text; *p; p++) {
+        if(*p == '\n') {
+            line = 0;
+            space = NULL;
+            continue;
+        }
+        if(*p == ' ') space = p;
+        if(++line > GEN3_CART_SCREEN_LINE_LEN && space) {
+            *space = '\n';
+            line = (size_t)(p - space);
+            space = NULL;
+        }
+    }
 }

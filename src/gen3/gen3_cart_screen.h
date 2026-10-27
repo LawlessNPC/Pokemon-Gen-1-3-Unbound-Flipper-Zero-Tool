@@ -1,19 +1,19 @@
 #pragma once
 
 #include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <src/gen3/gen3_cart.h>
-#include <src/gen3/gen3_cart_furi.h>
 #include <src/gen3/gen3_cart_id.h>
 #include <src/gen3/gen3_mb.h>
+#include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_save.h>
 
 /* What the Cartridge app's screens show and offer, decided from the session's status and the
- * cart: the progress screen, the hub's items, Cart info, the result after a job, and the leave
- * warning. Pure C, no heap, no file-scope state, so the host tests check every text fits the
- * 128-pixel screen, which breaks lines only at '\n': a line of at most 21 characters, a title or
- * header of at most 16. gen3_cart_furi.h is included for the session's job and status types only;
- * it includes no furi header. */
+ * cart: the progress screen, the hub's items, Cart info, the result after a job, the leave
+ * warning, and the party and box screens. Pure C, no heap, no file-scope state, so the host tests
+ * check every text fits the 128-pixel screen, which breaks lines only at '\n': a line of at most
+ * 21 characters, a title or header of at most 16. */
 
 #define GEN3_CART_SCREEN_LINE_LEN 21u
 #define GEN3_CART_SCREEN_TITLE_LEN 16u
@@ -66,20 +66,28 @@ void gen3_cart_screen_progress(
  * while it recovers from a glitch with the GBA on. */
 bool gen3_cart_screen_power_hint(const Gen3CartSessionStatus* st);
 
+/* The cart as the hub reads it, once no job runs */
+typedef struct {
+    bool busy; /* a job runs: the rest isn't read (the cart is the job's) */
+    bool linked; /* gen3_cart_linked */
+    bool backup_current;
+    bool can_read_save;
+    bool browsable; /* gen3_cart_browsable */
+    bool writable; /* gen3_cart_writable */
+    uint16_t changes; /* gen3_cart_changes */
+} Gen3CartScreenHubIn;
 /* The hub's items beyond Cart info, which is always there */
 typedef struct {
-    /* the helper didn't answer the last command, or the last job was a Reconnect that didn't run
-     * to its end */
+    bool browse; /* "Party and boxes" */
+    bool write; /* "Write changes (<n>)": writable, with changes */
+    bool writing_off; /* "Writing off: <why>", which opens Cart info: not writable */
+    bool discard; /* "Discard changes": changes */
+    /* not linked: a command was lost, or a connect (a Reconnect) didn't run to its end */
     bool reconnect;
     bool backup; /* "Back up again": no current backup of a save the helper can read */
 } Gen3CartScreenHub;
-/* st: the status now, with the last job and its result. While a job runs (busy) neither shows,
- * and link_up isn't read. */
-void gen3_cart_screen_hub(
-    const Gen3CartSessionStatus* st,
-    bool backup_current,
-    bool can_read_save,
-    Gen3CartScreenHub* out);
+/* While a job runs, none of them */
+void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out);
 
 /* The result screen after job ended with r */
 typedef struct {
@@ -88,14 +96,17 @@ typedef struct {
     Gen3CartRetry retry;
 } Gen3CartScreenResult;
 /* step: the job's last step (the status's, once it ended). dropped: Connect's, the edits pending
- * from before were dropped. A Write or Restore that lost the link once it may have committed
- * (Commit, Verify or PostBackup) says the cart may load either save: after the last commit the
- * game loads the new one. */
+ * from before were dropped. linked: gen3_cart_linked once it ended; a job other than Connect or
+ * Reconnect that failed and left the cart unlinked offers Reconnect. A job Back stopped gets a
+ * neutral header. A Write or Restore that lost the link once it may have committed (Commit, Verify
+ * or PostBackup) says the cart may load either save: after the last commit the game loads the new
+ * one. */
 void gen3_cart_screen_result(
     Gen3CartJob job,
     Gen3CartStep step,
     Gen3CartResult r,
     bool dropped,
+    bool linked,
     Gen3CartScreenResult* out);
 
 /* Cart info: a header and 5 lines */
@@ -120,3 +131,48 @@ void gen3_cart_screen_info(
 /* The leave warning: "<n> changes not\nwritten." ("1 change" for one) */
 #define GEN3_CART_SCREEN_LEAVE_SIZE 32u
 void gen3_cart_screen_leave(uint16_t changes, char out[GEN3_CART_SCREEN_LEAVE_SIZE]);
+
+/* ---- The party and box screens ---- */
+
+/* The headers when a Pokemon isn't opened in the editor, or isn't put into a slot */
+#define GEN3_CART_SCREEN_CANT_EDIT "Can't edit"
+#define GEN3_CART_SCREEN_CANT_PUT "Can't put"
+/* Why, in at most 3 lines; "" for Ok, Empty, and a value outside the enum */
+const char* gen3_cart_screen_mon_text(Gen3CartMon m);
+
+/* A slot's row, numbered from 1 (slot 6 is "07"): "07 TREECKO Lv5", "07 EGG", "07 BAD EGG" or
+ * "07 -- empty --", with '*' after it when changed. s NULL: the working copy couldn't give it
+ * ("07 ?"). species: the Ok kind's name (gen3_species_name_get). */
+#define GEN3_CART_SCREEN_ROW_SIZE 24u
+void gen3_cart_screen_row(
+    uint8_t slot,
+    const Gen3MonSummary* s,
+    const char* species,
+    bool changed,
+    char out[GEN3_CART_SCREEN_ROW_SIZE]);
+
+/* The Put dialog: header "Put <SPECIES> Lv<n>", text "in <box>\nslot <k>?" (slot numbered from
+ * 1). A header over 16 characters drops the level, which the text then starts with:
+ * "Put CHARMANDER", "Lv100 in BOX 14\nslot 30?". box: at most 8 characters. */
+#define GEN3_CART_SCREEN_PUT_SIZE 32u
+void gen3_cart_screen_put(
+    const char* species,
+    uint8_t level,
+    const char* box,
+    uint8_t slot,
+    char header[GEN3_CART_SCREEN_HEADER_SIZE],
+    char text[GEN3_CART_SCREEN_PUT_SIZE]);
+
+/* Under "Write changes?": "<n> changes. The save\nis backed up. Keep\nthe GBA on."; under
+ * "Discard changes?": "<n> changes." ("1 change" for one) */
+#define GEN3_CART_SCREEN_ASK_SIZE 64u
+void gen3_cart_screen_write_ask(uint16_t changes, char out[GEN3_CART_SCREEN_ASK_SIZE]);
+void gen3_cart_screen_discard_ask(uint16_t changes, char out[GEN3_CART_SCREEN_ASK_SIZE]);
+
+/* gen3_check_text, its one long line broken to fit: Load failed's text */
+const char* gen3_cart_screen_check_text(Gen3Check c);
+
+/* Breaks text in place to lines of at most 21 characters, a space at a time ('\n' for ' '), after
+ * dropping any leading '\n': "\nFixed: mail moves level ability" (gen3_load_changes) becomes
+ * "Fixed: mail moves\nlevel ability". A word over 21 characters stays whole. */
+void gen3_cart_screen_wrap(char* text);

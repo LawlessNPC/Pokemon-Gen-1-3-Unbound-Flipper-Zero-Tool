@@ -1,8 +1,11 @@
 #include <stdio.h>
 #include <string.h>
 #include <src/gen3/gen3_cart.h>
+#include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_hlink.h>
+#include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_text.h>
+#include <src/gen3/gen3_trade_block.h>
 
 #define CART_ROM_BASE 0x08000000u /* the cart ROM on the GBA's bus (multiboot-and-save.md §3.1) */
 #define CART_HEADER_LEN sizeof(((Gen3Cart*)0)->header)
@@ -34,7 +37,7 @@ const char* gen3_cart_result_text(Gen3CartResult r) {
         [Gen3CartBusyTimeout] = "The GBA stopped\nanswering. Cart keeps\nits last good save.",
         [Gen3CartHelperError] = "The helper reported\nan error. See\ngen3_cart.log.",
         [Gen3CartRefused] = "Not allowed for this\ncartridge or save.",
-        [Gen3CartChanged] = "The cart changed\nsince the backup.\nReconnect to back up.",
+        [Gen3CartChanged] = "The cart changed\nsince the backup.\nBack up again.",
         [Gen3CartSdFull] = "SD card full.",
         [Gen3CartSdError] = "SD card error.",
         [Gen3CartVerifyFailed] = "Check failed: the\ndata read back\ndiffers.",
@@ -489,13 +492,30 @@ Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
 
 Gen3CartResult gen3_cart_discard(Gen3Cart* c) {
     if(!c->backup_current || !c->id.can_browse || !cart_loads(c)) return Gen3CartBadArg;
-    /* The edits go, and with them the write of them not yet backed up: if it finished, the game
-     * loads it now, and the next attach or reconnect must see that slot, not skip it */
+    /* The edits go, and with them the claim of a write of them not yet backed up on its slot. If
+     * that write finished, the game loads it now: so the slot is compared now, with nothing
+     * skipped, while the link lets it, else by the next attach or reconnect. A cart that isn't as
+     * backed up keeps neither the backup nor the working copy built from it. */
+    if(c->wslot != GEN3_SAVE_NO_SECTOR && c->linked) {
+        const Gen3CartResult r = cart_footer_view(c);
+        if(r != Gen3CartOk) return r;
+        if(!cart_footers_same(c, GEN3_SAVE_NO_SECTOR, 0)) {
+            cart_drop_backup(c);
+            c->dirty = 0;
+            memset(c->changed, 0, sizeof(c->changed));
+            c->work_ok = false;
+            return Gen3CartChanged;
+        }
+    }
     c->wslot = GEN3_SAVE_NO_SECTOR;
     return cart_build_work(c);
 }
 
 /* ---- What the backup says ---- */
+
+bool gen3_cart_linked(const Gen3Cart* c) {
+    return c->linked;
+}
 
 const Gen3CartId* gen3_cart_id(const Gen3Cart* c) {
     return &c->id;
@@ -643,6 +663,158 @@ uint16_t gen3_cart_changes(const Gen3Cart* c) {
         for(uint8_t b = c->changed[i]; b; b &= (uint8_t)(b - 1u)) n++;
     }
     return n;
+}
+
+/* ---- Opening and putting a save's Pokemon ---- */
+
+/* The working copy's answer as the editor's side sees it */
+static Gen3CartMon cart_mon_result(Gen3CartResult r) {
+    switch(r) {
+    case Gen3CartOk:
+        return Gen3CartMonOk;
+    case Gen3CartSdError:
+        return Gen3CartMonSdError;
+    default:
+        return Gen3CartMonBadArg;
+    }
+}
+
+/* gen3_pkm_check, then the offer rules of a trade to Ruby: what the game takes back as it is */
+static Gen3CartMon cart_mon_rules(const Gen3Pkm* p) {
+    switch(gen3_pkm_check(p)) {
+    case Gen3CheckOk:
+        break;
+    case Gen3CheckBadEgg:
+        return Gen3CartMonBadEgg;
+    case Gen3CheckEgg:
+        return Gen3CartMonEgg;
+    default:
+        return Gen3CartMonBadData;
+    }
+    switch(gen3_trade_offer_check(p)) {
+    case Gen3RefuseNone:
+        return Gen3CartMonOk;
+    case Gen3RefuseMail:
+        return Gen3CartMonMail;
+    case Gen3RefuseItem:
+        return Gen3CartMonItem;
+    case Gen3RefuseEgg:
+        return Gen3CartMonEgg;
+    case Gen3RefuseBadEgg:
+        return Gen3CartMonBadEgg;
+    default:
+        return Gen3CartMonBadData;
+    }
+}
+
+/* The only way a Pokemon from the editor goes into the working copy: the rules first */
+static Gen3CartMon
+    cart_mon_put(Gen3Cart* c, const Gen3Pkm* p, uint8_t box, uint8_t slot, bool* put) {
+    *put = false;
+    const Gen3CartMon m = cart_mon_rules(p);
+    if(m != Gen3CartMonOk) return m;
+    const Gen3CartResult r = gen3_cart_mon_put(c, box, slot, p);
+    *put = r == Gen3CartOk;
+    return cart_mon_result(r);
+}
+
+/* A slot of this save's layout, while browsable */
+static bool cart_mon_slot(const Gen3Cart* c, uint8_t box, uint8_t slot) {
+    Gen3SaveSpan sp[2];
+    return gen3_cart_browsable(c) && gen3_save_mon_spans(c->id.game, box, slot, sp) > 0;
+}
+
+Gen3CartMon gen3_cart_mon_open(
+    Gen3Cart* c,
+    Gen3Editor* ed,
+    uint8_t box,
+    uint8_t slot,
+    uint8_t orig[GEN3_PARTY_SIZE],
+    size_t* orig_len,
+    Gen3Pkm* scratch) {
+    if(!cart_mon_slot(c, box, slot)) return Gen3CartMonBadArg;
+    if(box == GEN3_SAVE_PARTY) {
+        uint8_t count = 0;
+        const Gen3CartResult r = cart_party_count(c, &count);
+        if(r != Gen3CartOk) return cart_mon_result(r);
+        if(slot == count) return Gen3CartMonEmpty;
+        if(slot > count) return Gen3CartMonBadArg;
+    }
+    size_t len = 0;
+    const Gen3CartResult r = gen3_cart_mon_get(c, box, slot, orig, &len);
+    if(r != Gen3CartOk) return cart_mon_result(r);
+    Gen3MonSummary s;
+    gen3_save_mon_summary(orig, len, &s);
+    switch(s.kind) {
+    case Gen3MonOk:
+        break;
+    case Gen3MonEmpty:
+        /* a party slot below the count holds a Pokemon in the game */
+        return box == GEN3_SAVE_PARTY ? Gen3CartMonBadData : Gen3CartMonEmpty;
+    case Gen3MonEgg:
+        return Gen3CartMonEgg;
+    case Gen3MonBad:
+        return Gen3CartMonBadEgg;
+    }
+    if(!gen3_save_mon_to_pkm(orig, len, scratch)) return Gen3CartMonBadEgg;
+    const Gen3CartMon m = cart_mon_rules(scratch);
+    if(m != Gen3CartMonOk) return m;
+    /* false leaves the editor as it was: nothing of it may reach a slot */
+    if(!gen3_edit_load(ed, scratch)) {
+        return gen3_bulk_ready() ? Gen3CartMonBadData : Gen3CartMonNoData;
+    }
+    /* The editor's bytes, not the save's: loading normalised them, and only an edit may change the
+     * slot */
+    *orig_len = len;
+    gen3_save_pkm_to_mon(&ed->pkm, len, orig);
+    return Gen3CartMonOk;
+}
+
+Gen3CartMon gen3_cart_mon_close(
+    Gen3Cart* c,
+    const Gen3Editor* ed,
+    uint8_t box,
+    uint8_t slot,
+    const uint8_t* orig,
+    size_t orig_len,
+    uint8_t mon[GEN3_PARTY_SIZE],
+    bool* put) {
+    *put = false;
+    const size_t len = box == GEN3_SAVE_PARTY ? GEN3_PARTY_SIZE : GEN3_BOX_SIZE;
+    if(!cart_mon_slot(c, box, slot) || orig_len != len) return Gen3CartMonBadArg;
+    gen3_save_pkm_to_mon(&ed->pkm, len, mon);
+    if(memcmp(mon, orig, len) == 0) return Gen3CartMonOk;
+    return cart_mon_put(c, &ed->pkm, box, slot, put);
+}
+
+Gen3CartMon gen3_cart_mon_place(
+    Gen3Cart* c,
+    Gen3Editor* ed,
+    uint8_t box,
+    uint8_t slot,
+    bool new_mon,
+    uint8_t mon[GEN3_PARTY_SIZE]) {
+    if(!cart_mon_slot(c, box, slot)) return Gen3CartMonBadArg;
+    /* Only a free slot: never over a Pokemon */
+    if(box == GEN3_SAVE_PARTY) {
+        uint8_t count = 0;
+        const Gen3CartResult r = cart_party_count(c, &count);
+        if(r != Gen3CartOk) return cart_mon_result(r);
+        if(slot != count) return Gen3CartMonTaken;
+    } else {
+        size_t len = 0;
+        const Gen3CartResult r = gen3_cart_mon_get(c, box, slot, mon, &len);
+        if(r != Gen3CartOk) return cart_mon_result(r);
+        Gen3MonSummary s;
+        gen3_save_mon_summary(mon, len, &s);
+        if(s.kind != Gen3MonEmpty) return Gen3CartMonTaken;
+    }
+    if(new_mon) {
+        gen3_pkm_set(&ed->pkm, Gen3FieldMetGame, c->id.met_game);
+        gen3_pkm_fix_checksum(&ed->pkm);
+    }
+    bool put = false;
+    return cart_mon_put(c, &ed->pkm, box, slot, &put);
 }
 
 /* ---- Write and restore ---- */
@@ -845,6 +1017,8 @@ static Gen3CartResult cart_flash(Gen3Cart* c, const CartWrite* w) {
         gen3_hcli_arm_write(c->cli, c->flash_id, p->target, w->mode, c->slots.save_counter),
         GEN3_HLINK_BUSY_US,
         false);
+    /* Before the first erase, so the screen says not to power off while it runs too */
+    if(r == Gen3CartOk) cart_step(c, Gen3CartStepErase, 0, GEN3_SAVE_SLOT_SECTORS);
     for(uint8_t k = 0; k < GEN3_SAVE_SLOT_SECTORS && r == Gen3CartOk; k++) {
         r = cart_wlink(
             c, gen3_hcli_erase_sector(c->cli, p->dst[k]), GEN3_HCLI_BUSY_FLASH_US, true);

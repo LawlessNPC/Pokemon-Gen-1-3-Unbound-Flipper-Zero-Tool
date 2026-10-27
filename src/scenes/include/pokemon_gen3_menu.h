@@ -2,6 +2,7 @@
 
 #include <src/include/pokemon_app.h>
 #include <src/gen3/gen3_club.h>
+#include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_trade_sync.h>
 
 /* The Gen III scenes' shared header. The scene files have no header each, so what one of them
@@ -67,6 +68,10 @@ void gen3_menu_show_notice(PokemonFap* pokemon_fap, const char* header, const ch
  * before scene_manager_next_scene(..., PokemonSceneGen3Result). Defined in pokemon_gen3_pk3.c,
  * with the scene. */
 void gen3_result_set(const char* header, const char* text);
+
+/* What loading a .pk3 changed in it, briefly: "\nFixed:" and "mail", "moves", "level" or
+ * "ability" (at most 32 characters); "" if nothing. Defined in pokemon_gen3_pk3.c. */
+void gen3_load_changes(const Gen3ImportInfo* info, char* out, size_t out_size);
 
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
  * file, so it is created only once the file reads, and Trade, Edit, Load and Save need the file:
