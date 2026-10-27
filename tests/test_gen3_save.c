@@ -2,7 +2,9 @@
 #include "fake_gba.h"
 #include "fake_save.h"
 #include "gen3_golden.h"
+#include "helper_cmd.h"
 #include <stdbool.h>
+#include <hp_core.h>
 #include <hp_save.h>
 #include <src/gen3/gen3_pkm.h>
 #include <src/gen3/gen3_save.h>
@@ -20,6 +22,9 @@ static Gen3SaveSectorInfo info[28];
 static Gen3SaveSlots slots;
 static FakeSaveSpec spec;
 static FakeGba gba;
+static Hp hp;
+static uint8_t hdr[0xC0];
+static uint16_t resp[HELPER_CMD_RESP_MAX];
 
 static uint8_t* sector(uint32_t n) {
     return img + n * SECTOR_LEN;
@@ -37,7 +42,7 @@ static Gen3LinkGame link_game(FakeGame g) {
     return Gen3LinkGameUnknown;
 }
 
-/* img = a save in `game`, each slot present or not, with its counter and first */
+/* img = a save in `game` with no Pokemon, each slot present or not, with its counter and first */
 static void
     build(FakeGame game, bool a, uint32_t ca, uint8_t fa, bool b, uint32_t cb, uint8_t fb) {
     spec = (FakeSaveSpec){
@@ -46,6 +51,7 @@ static void
         .counter = {ca, cb},
         .first = {fa, fb},
         .seed = 0x5EED0008u,
+        .no_mons = true,
     };
     fake_save_build(img, &spec);
 }
@@ -351,6 +357,7 @@ TEST(test_slots_bad_id) {
         ASSERT_EQ(slots.slot[0], Gen3SlotError);
         ASSERT_EQ(slots.result, Gen3SaveCorrupt);
         ASSERT_FALSE(slots.strict_ok);
+        ASSERT_FALSE(slots.padded);
     }
     /* infos made by hand, valid with an id over 13, in the slot the game loads (B: slot A's
      * counter 5 is odd): never taken, and nothing is written past phys (ASan, UBSan) */
@@ -379,6 +386,7 @@ TEST(test_slots_sig_only) {
     ASSERT_EQ(slots.slot[0], Gen3SlotError);
     ASSERT_EQ(slots.counter[0], 0);
     ASSERT_EQ(slots.result, Gen3SaveCorrupt);
+    ASSERT_FALSE(slots.padded);
     /* one erased sector with only its signature written */
     memset(img, 0xFF, sizeof(img));
     static const uint8_t sig[4] = {0x25, 0x20, 0x01, 0x08};
@@ -388,6 +396,7 @@ TEST(test_slots_sig_only) {
     ASSERT_EQ(slots.slot[1], Gen3SlotError);
     ASSERT_EQ(slots.result, Gen3SaveCorrupt);
     ASSERT_FALSE(slots.strict_ok);
+    ASSERT_FALSE(slots.padded);
 }
 
 /* The game writes even counters to slot A: a slot A with an odd one sends the game to slot B */
@@ -485,8 +494,8 @@ TEST(test_save_layout_mismatch) {
 }
 
 /* The helper on the fake GBA picks the same slot over the same image, with the same full-length
- * checksums, and would arm a write over the other slot exactly when the Flipper would plan one
- * (strict and not padded). */
+ * checksums, and its ARM_WRITE accepts a write over the other slot exactly when the Flipper would
+ * plan one (strict and not padded). */
 typedef struct {
     FakeGame game; /* the image's */
     FakeGame as; /* the layout both sides read it with */
@@ -547,13 +556,35 @@ TEST(test_slots_match_helper) {
         {FakeGameRS, FakeGameFRLG, true, true, 8, 9, 0},
         {FakeGameE, FakeGameFRLG, true, false, 8, 0, 0},
     };
+    uint32_t armed = 0;
     for(size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         const SlotCase* c = &cases[i];
         slot_case_build(c);
         analyze_as(link_game(c->as));
+        /* An English cart of the layout's game, which the helper writes */
         fake_gba_init(&gba);
+        helper_cmd_header(hdr, gba.own, "POKEMON", c->as == FakeGameRS ? "AXVE" : "BPRE", 0);
+        fake_gba_rom(&gba, hdr, 0x100000);
+        fake_gba_rom_string(&gba, 0xB0000, "FLASH1M_V103");
         fake_gba_save(&gba, FakeSaveFlash, MX);
         memcpy(fake_gba_flash(&gba), img, sizeof(img));
+        /* The real ARM_WRITE, as the Flipper would send it for its plan: over the slot the game
+         * doesn't load, with the loaded slot's counter */
+        hp_init(&hp);
+        ASSERT_EQ(helper_cmd_run(&hp, 1, HP_CMD_CART_INFO, NULL, 0, resp), HP_ST_OK);
+        ASSERT_EQ(helper_cmd_run(&hp, 2, HP_CMD_SAVE_PROBE, NULL, 0, resp), HP_ST_OK);
+        const uint16_t arm[6] = {
+            HP_ARM_MAGIC,
+            MX,
+            (uint16_t)(1u - slots.active),
+            0,
+            (uint16_t)slots.save_counter,
+            (uint16_t)(slots.save_counter >> 16),
+        };
+        const uint16_t st = helper_cmd_run(&hp, 3, HP_CMD_ARM_WRITE, arm, 6, resp);
+        ASSERT_EQ(st == HP_ST_OK, slots.strict_ok && !slots.padded);
+        if(st != HP_ST_OK) ASSERT_EQ(st, HP_ST_REFUSED);
+        armed += st == HP_ST_OK;
         const HpSaveGame hg = c->as == FakeGameRS ? HpSaveGameRS : HpSaveGameFRLG;
         const bool loads = slots.result == Gen3SaveOk || slots.result == Gen3SaveError;
         const int active = hp_save_active_slot(hg);
@@ -571,6 +602,9 @@ TEST(test_slots_match_helper) {
             ASSERT_EQ(info[s].full_ok, f.full_checksum == f.checksum);
         }
     }
+    /* both answers occur: 9 of the cases are strict and not padded (an RS save read as FRLG
+     * among them, its zero padding counting in FRLG's longer sums) */
+    ASSERT_EQ(armed, 9);
 }
 
 /* ---- Write plans ---- */

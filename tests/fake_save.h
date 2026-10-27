@@ -11,9 +11,9 @@
  * sector: data bytes [0, size[id]) from an LCG on the seed, zero up to 0xFF4 (the game clears the
  * whole sector before it fills it: pokeruby: src/save.c: WriteSingleChunk), then the footer: id at
  * 0xFF4, the checksum over size[id] bytes at 0xFF6, the signature 0x08012025 at 0xFF8 and the
- * counter at 0xFFC, all little-endian. The party (its count and 6 Pokemon, in id 1) and the boxes
- * (the current box and all 420 Pokemon, ids 5..13) are zero: no Pokemon anywhere. Box names and
- * the rest keep the LCG's bytes. */
+ * counter at 0xFFC, all little-endian. With no_mons, the party (its count and 6 Pokemon, in id 1)
+ * and the boxes (the current box and all 420 Pokemon, ids 5..13) are zero: no Pokemon anywhere;
+ * box names and the rest keep the LCG's bytes. Without it, every data byte is the LCG's. */
 
 #define FAKE_SAVE_LEN 131072u
 #define FAKE_SAVE_SECTOR_LEN 4096u
@@ -31,6 +31,7 @@ typedef struct {
     uint32_t counter[2];
     uint8_t first[2]; /* physical index of id 0 */
     uint32_t seed; /* data bytes within size[id] from an LCG; past size[id] zero */
+    bool no_mons; /* the party and the boxes zero, as a save with no Pokemon */
 } FakeSaveSpec;
 
 /* Absent slots and sectors 28..31 all 0xFF */

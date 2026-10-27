@@ -23,6 +23,17 @@ static const struct {
     {{'B', 'P', 'E'}, Gen3LinkGameE, GEN3_VERSION_EMERALD},
 };
 
+/* German Sapphire version 0's MX29L010 entry carries this ID (pokeruby: src/libs/agb_flash_mx.c:
+ * MX29L010, for GERMAN, SAPPHIRE and REVISION 0); on any other cart it is SST's 64 KB part. */
+#define CART_ID_SAPPHIRE_DE0 0xD4BFu
+
+/* One of the chips the cart's own game accepts */
+static bool cart_chip_known(const uint8_t* h, uint16_t flash_id) {
+    if(flash_id == GEN3_FLASH_ID_MX || flash_id == GEN3_FLASH_ID_SANYO) return true;
+    return flash_id == CART_ID_SAPPHIRE_DE0 && memcmp(h + CART_CODE, "AXPD", 4) == 0 &&
+           h[CART_VERSION] == 0;
+}
+
 static char cart_code_char(uint8_t c) {
     return (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ? (char)c : '_';
 }
@@ -60,9 +71,7 @@ void gen3_cart_identify(const Gen3HCartInfo* info, const Gen3HProbe* probe, Gen3
         why = Gen3CartRefuseJapanese;
     } else if(probe->sram || probe->cls == GEN3_HCHIP_SRAM) {
         why = Gen3CartRefuseSram;
-    } else if(
-        probe->cls != GEN3_HCHIP_FLASH128 ||
-        (probe->flash_id != GEN3_FLASH_ID_MX && probe->flash_id != GEN3_FLASH_ID_SANYO)) {
+    } else if(probe->cls != GEN3_HCHIP_FLASH128 || !cart_chip_known(h, probe->flash_id)) {
         why = Gen3CartRefuseChip;
     } else if(info->lib != GEN3_HLIB_FLASH1M || info->other_lib) {
         why = Gen3CartRefuseLibrary;

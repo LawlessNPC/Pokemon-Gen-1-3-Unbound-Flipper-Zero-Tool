@@ -381,13 +381,26 @@ TEST(test_hlink_too_long) {
     gen3_hlink_result(&h, &status, &n, &fail);
     ASSERT_EQ(status, 0x04);
     ASSERT_EQ(n, 2);
-    /* Past the protocol's limit, whatever resp_max_words says: at w2 at once, since there is no
-     * length to read out to */
+    /* Past the protocol's limit, whatever resp_max_words says: no sound packet has it, so it is a
+     * wire fault (multiboot-and-save.md §6.2: drop and hunt again), at w2 at once, since there is
+     * no length to read out to; the client resends */
     req.resp_max_words = 0xFFFF;
     send(&req);
     const uint16_t huge[] = {SOF, 0x0100, GEN3_HLINK_MAX_PAYLOAD + 1u};
-    reply(skip, huge, 3, -1);
-    ASSERT_EQ(fail_of(), Gen3HlinkFailTooLong);
+    MlinkTx last = reply(skip, huge, 3, -1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailWire);
+    ASSERT_EQ(last.count, 0);
+    send(&req);
+    const uint16_t top[] = {SOF, 0x0100, 0xFFFF};
+    reply(skip, top, 3, -1);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailWire);
+    /* The limit itself is a length: the packet is read out, then TooLong for this resp_max */
+    req.resp_max_words = 2;
+    send(&req);
+    const uint16_t at_max[] = {SOF, 0x0100, GEN3_HLINK_MAX_PAYLOAD};
+    reply(skip, at_max, 3, -1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkReceiving);
 }
 
 TEST(test_hlink_wire_error) {

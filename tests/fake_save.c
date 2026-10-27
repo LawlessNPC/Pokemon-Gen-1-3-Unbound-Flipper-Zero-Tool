@@ -121,7 +121,7 @@ void fake_save_build(uint8_t img[131072], const FakeSaveSpec* spec) {
                 x = x * 1664525u + 1013904223u;
                 s[i] = (uint8_t)(x >> 24);
             }
-            fake_save_clear_mons(s, spec->game, id, size);
+            if(spec->no_mons) fake_save_clear_mons(s, spec->game, id, size);
             fake_save_put16(s + FAKE_SAVE_OFF_ID, id);
             fake_save_put16(s + FAKE_SAVE_OFF_CHECKSUM, fake_save_checksum(s, size));
             fake_save_put32(s + FAKE_SAVE_OFF_SIGNATURE, 0x08012025u);

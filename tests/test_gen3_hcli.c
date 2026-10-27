@@ -132,7 +132,9 @@ static void tap_drop(uint8_t code, uint32_t times, Gen3HlinkFail as) {
 }
 
 /* The fake helper's command hook: counts each code, and when `code` next runs, unplugs the cable
- * for the next `unplug` transfers and corrupts the reply `corrupt` transfers on (if non-zero). */
+ * for the next `unplug` transfers and corrupts the reply `corrupt` transfers on (if non-zero), and
+ * XORs 0x01 into the flash byte at `flip` (if non-zero), so that running that command again would
+ * see another save. */
 typedef struct {
     uint32_t calls[256];
     uint16_t last_arg0;
@@ -140,6 +142,7 @@ typedef struct {
     uint8_t code;
     uint32_t unplug;
     uint32_t corrupt;
+    uint32_t flip;
 } Hook;
 
 static Hook hook;
@@ -152,6 +155,7 @@ static void hook_cb(void* ctx, uint8_t code, uint16_t arg0) {
     k->armed = false;
     if(k->unplug) fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), k->unplug);
     if(k->corrupt) fake_helper_corrupt_at(&fh, fake_helper_transfers(&fh) + k->corrupt);
+    if(k->flip) fake_gba_flash(&gba)[k->flip] ^= 0x01;
 }
 
 static void hook_arm(uint8_t code, uint32_t unplug, uint32_t corrupt) {
@@ -159,6 +163,7 @@ static void hook_arm(uint8_t code, uint32_t unplug, uint32_t corrupt) {
     hook.code = code;
     hook.unplug = unplug;
     hook.corrupt = corrupt;
+    hook.flip = 0;
 }
 
 /* The default save: Ruby, slot A with counter 4 and id 0 at its first sector, slot B absent. */
@@ -798,6 +803,10 @@ TEST(test_hcli_status_error) {
 
 TEST(test_hcli_resend_after_corrupt_reply) {
     ASSERT_TRUE(setup_identified());
+    /* The sector holds the builder's data, not zeros, so a reply that drops it can't pass */
+    uint32_t nonzero = 0;
+    for(uint32_t i = 0; i < 0xF80; i++) nonzero += sector(9)[i] != 0;
+    ASSERT_TRUE(nonzero > 0xF80 / 2);
     /* One word of the sector's data comes back wrong: BadCrc, then the same request again */
     hook_arm(GEN3_HCMD_READ_SECTOR, 0, 100);
     memset(buf, 0, sizeof(buf));
@@ -825,10 +834,17 @@ TEST(test_hcli_write_resend_not_reexecuted) {
 TEST(test_hcli_lost_responses_not_rerun) {
     ASSERT_TRUE(setup_identified());
     /* Each response lost twice after the helper ran the command, each a different way the pump
-     * reports it; the client sends the same packet again, and the helper answers from memory */
+     * reports it; the client sends the same packet again, and the helper answers from memory.
+     * Once ARM_WRITE has run, a data byte of slot A, the slot it keeps, goes bad: run again, it
+     * would answer REFUSED; the stored answer is OK. */
+    const uint32_t kept = fake_save_phys(&spec, 0, 3) * SECTOR_LEN + 0x10u;
+    hook_arm(GEN3_HCMD_ARM_WRITE, 0, 0);
+    hook.flip = kept;
     tap_drop(GEN3_HCMD_ARM_WRITE, 2, Gen3HlinkFailNoResponse);
     ASSERT_EQ(gen3_hcli_arm_write(&cli, MX, 1, 0, 4), Gen3HcliOk);
     ASSERT_EQ(tap.dropped, 2);
+    ASSERT_EQ(hook.calls[HP_CMD_ARM_WRITE], 3);
+    fake_gba_flash(&gba)[kept] ^= 0x01;
     tap_drop(GEN3_HCMD_ERASE_SECTOR, 2, Gen3HlinkFailBadCrc);
     ASSERT_EQ(gen3_hcli_erase_sector(&cli, 14), Gen3HcliOk);
     ASSERT_EQ(counts().erases, 1);

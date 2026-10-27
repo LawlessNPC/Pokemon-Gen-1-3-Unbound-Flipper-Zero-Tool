@@ -72,6 +72,12 @@ void fake_gba_rom_string(FakeGba* g, uint32_t off, const char* s) {
     g->strings++;
 }
 
+void fake_gba_rom_glitch_once(FakeGba* g, uint32_t off) {
+    if((off & 1u) || off >= FAKE_ROM_MAX) fake_gba_misuse("fake_gba_rom_glitch_once: offset", off);
+    g->rom_glitch = true;
+    g->rom_glitch_off = off;
+}
+
 void fake_gba_save(FakeGba* g, FakeSaveKind kind, uint16_t id) {
     g->save = kind;
     g->chip_id = id;
@@ -158,11 +164,19 @@ static uint8_t fake_rom_byte(const FakeGba* g, uint32_t off) {
     return (off & 1u) ? (uint8_t)(hw >> 8) : (uint8_t)hw;
 }
 
+/* XOR 0x0001 if this read of the halfword at off is the glitched one */
+static uint16_t fake_rom_glitch(FakeGba* g, uint32_t off) {
+    if(!g->rom_glitch || g->rom_glitch_off != off) return 0;
+    g->rom_glitch = false;
+    return 0x0001u;
+}
+
 uint16_t hp_hal_rom16(uint32_t off) {
     if((off & 1u) || off >= FAKE_ROM_MAX) fake_gba_misuse("hp_hal_rom16: bad offset", off);
     fake_gba_now->rom_bytes += 2;
-    return (uint16_t)(fake_rom_byte(fake_gba_now, off) | fake_rom_byte(fake_gba_now, off + 1)
-                                                             << 8);
+    const uint16_t hw =
+        (uint16_t)(fake_rom_byte(fake_gba_now, off) | fake_rom_byte(fake_gba_now, off + 1) << 8);
+    return (uint16_t)(hw ^ fake_rom_glitch(fake_gba_now, off));
 }
 
 /* The pattern word at off, if all 4 bytes are pattern (not header, string or past the end). */
@@ -180,10 +194,12 @@ static bool fake_rom_pattern_word(const FakeGba* g, uint32_t off, uint32_t* w) {
 uint32_t hp_hal_rom32(uint32_t off) {
     if((off & 3u) || off >= FAKE_ROM_MAX) fake_gba_misuse("hp_hal_rom32: bad offset", off);
     fake_gba_now->rom_bytes += 4;
+    const uint32_t glitch = fake_rom_glitch(fake_gba_now, off) |
+                            (uint32_t)fake_rom_glitch(fake_gba_now, off + 2u) << 16;
     uint32_t w = 0;
-    if(fake_rom_pattern_word(fake_gba_now, off, &w)) return w;
+    if(fake_rom_pattern_word(fake_gba_now, off, &w)) return w ^ glitch;
     for(uint32_t i = 0; i < 4; i++) w |= (uint32_t)fake_rom_byte(fake_gba_now, off + i) << (8 * i);
-    return w;
+    return w ^ glitch;
 }
 
 /* ---- The save chip ---- */

@@ -215,6 +215,24 @@ TEST(test_cart_identify_refusals) {
     identify();
     ASSERT_TRUE(allows(true, true, false));
     ASSERT_EQ(id.why, Gen3CartRefuseChip);
+    /* German Sapphire version 0 carries an MX29L010 that answers 0xD4BF: its chip passes, and
+     * its region refuses the write */
+    cart("POKEMON SAPP", "AXPD", 0);
+    probe.flash_id = SST;
+    identify();
+    ASSERT_TRUE(allows(true, true, false));
+    ASSERT_EQ(id.why, Gen3CartRefuseRegion);
+    static const struct {
+        const char* code;
+        uint8_t version;
+    } not_de0[] = {{"AXPD", 1}, {"AXPE", 0}, {"AXVD", 0}, {"BPGD", 0}};
+    for(uint32_t i = 0; i < sizeof(not_de0) / sizeof(not_de0[0]); i++) {
+        cart("POKEMON", not_de0[i].code, not_de0[i].version);
+        probe.flash_id = SST;
+        identify();
+        ASSERT_TRUE(allows(true, true, false));
+        ASSERT_EQ(id.why, Gen3CartRefuseChip);
+    }
     /* the ROM's save library */
     cart("POKEMON RUBY", "AXVE", 0);
     info.lib = GEN3_HLIB_EEPROM;

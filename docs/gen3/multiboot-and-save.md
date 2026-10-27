@@ -949,7 +949,10 @@ else: gSaveCounter = 0; first = 0; result 2 (CORRUPT)
 Then `sub_81258BC` (em: `CopySaveSlotData`) loads **slot `gSaveCounter % 2`**:
 for each physical sector of that slot it copies data to chunk `id` when the
 signature and checksum are good. It sets `gFirstSaveSector` (em:
-`gLastWrittenSector`) to the physical index `i` holding id 0.
+`gLastWrittenSector`) to the physical index `i` of the last sector whose footer
+says id 0, valid or not. It runs after every status: for EMPTY and CORRUPT
+`gSaveCounter` is 0, so it reads slot A, and `first` ends up as slot A's last
+id-0 footer, not the 0 set above.
 
 Consequences:
 

@@ -151,7 +151,9 @@ static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid) {
         h->rw1 = w;
     } else if(k == 2) {
         if(w > GEN3_HLINK_MAX_PAYLOAD) {
-            hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailTooLong); /* no length to read out to */
+            /* No sound packet has it, so a word went wrong on the wire (multiboot-and-save.md
+             * §6.2: drop the packet and hunt again); there is no length to read out to. */
+            hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailWire);
             return false;
         }
         h->rn = w;

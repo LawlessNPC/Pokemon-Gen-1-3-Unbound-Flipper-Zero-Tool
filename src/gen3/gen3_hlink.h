@@ -81,16 +81,18 @@ typedef enum {
     /* BUSY for longer than the request's budget, before or after the request */
     Gen3HlinkFailBusyTimeout,
     Gen3HlinkFailBadCrc, /* the response's CRC doesn't match */
-    /* A response word came back timed out or with a framing error. The pump reads the rest of the
-     * packet first, so that the helper is hunting again for the resend; only a bad n (w2) ends
-     * it at once, as the length is then unknown. */
+    /* A response word came back timed out or with a framing error, or the response's n is over
+     * GEN3_HLINK_MAX_PAYLOAD, which no sound packet has (multiboot-and-save.md §6.2). The pump
+     * reads the rest of the packet first, so that the helper is hunting again for the resend;
+     * only a bad n (w2) ends it at once, as the length is then unknown. */
     Gen3HlinkFailWire,
     Gen3HlinkFailSeq, /* a valid response for another seq */
-    /* The response's n is over resp_max_words: the packet is read out first, with no payload word
-     * stored, so that the helper is hunting again, and a packet that also fails Wire, BadCrc or Seq
-     * is reported as that. Or its n is over GEN3_HLINK_MAX_PAYLOAD (at w2, at once: there is no
-     * length to read out to). Or the request has more than GEN3_HLINK_MAX_ARGS args or
-     * GEN3_HLINK_MAX_PAYLOAD payload words (at once, with nothing sent). */
+    /* The response's n (at most GEN3_HLINK_MAX_PAYLOAD) is over resp_max_words: the packet is read
+     * out first, with no payload word stored, so that the helper is hunting again, and a packet
+     * that also fails Wire, BadCrc or Seq is reported as that. So TooLong is only ever a sound,
+     * current response too long for the request. Or the request has more than
+     * GEN3_HLINK_MAX_ARGS args or GEN3_HLINK_MAX_PAYLOAD payload words (at once, with nothing
+     * sent). */
     Gen3HlinkFailTooLong,
 } Gen3HlinkFail;
 

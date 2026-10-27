@@ -81,6 +81,8 @@ struct FakeGba {
     uint32_t string_off[FAKE_GBA_STRINGS];
     uint8_t string_len[FAKE_GBA_STRINGS];
     char string[FAKE_GBA_STRINGS][FAKE_GBA_STRING_MAX];
+    bool rom_glitch; /* the next read of the halfword at rom_glitch_off comes back XOR 0x0001 */
+    uint32_t rom_glitch_off;
 
     /* The save chip */
     FakeSaveKind save;
@@ -139,6 +141,9 @@ FakeGba* fake_gba_current(void);
 void fake_gba_rom(FakeGba* g, const uint8_t header[0xC0], uint32_t rom_size);
 /* Places a library string (without its NUL) at off, over the pattern. */
 void fake_gba_rom_string(FakeGba* g, uint32_t off, const char* s);
+/* The next read of the ROM halfword at off (even), by hp_hal_rom16 or as half of an hp_hal_rom32,
+ * returns it XORed with 0x0001, as a bus glitch would; later reads are right again. */
+void fake_gba_rom_glitch_once(FakeGba* g, uint32_t off);
 /* Sets the save chip, with id = device << 8 | maker for FakeSaveFlash, in read mode and bank 0.
  * The array is left as it is. */
 void fake_gba_save(FakeGba* g, FakeSaveKind kind, uint16_t id);

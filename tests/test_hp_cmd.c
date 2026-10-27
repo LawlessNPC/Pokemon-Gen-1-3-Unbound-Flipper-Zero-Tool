@@ -192,6 +192,9 @@ TEST(test_hp_read_footers) {
     ASSERT_EQ(resp[1], 256);
     const uint8_t* s5 = sector(5);
     const uint16_t sum5 = le16(s5 + 0xFF6);
+    /* the builder's data, not zeros: a reply of zeros can't pass */
+    ASSERT_EQ(sum5, sum_ref(s5, 0xF80));
+    ASSERT_TRUE(sum5 != 0);
     const uint16_t e5[8] = {5, sum5, 0x2025, 0x0801, 4, 0, sum5, 0};
     ASSERT_MEM_EQ(p + 5 * 8, e5, sizeof(e5));
     /* id 0 (0x890 bytes in Ruby): the zero padding past them changes nothing */

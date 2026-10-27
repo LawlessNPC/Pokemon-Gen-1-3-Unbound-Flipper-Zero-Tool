@@ -24,7 +24,9 @@ typedef enum {
     Gen3CartRefuseNotPokemon, /* not AXV, AXP, BPR, BPG or BPE */
     Gen3CartRefuseJapanese, /* region J: backup only */
     Gen3CartRefuseSram, /* the probe's write landed */
-    Gen3CartRefuseChip, /* not a 128 KB flash, or not one of the two chips above */
+    /* not a 128 KB flash, or not one of the two chips above (German Sapphire version 0's own
+     * 0xD4BF passes here, and its region refuses it) */
+    Gen3CartRefuseChip,
     Gen3CartRefuseLibrary, /* the ROM links no FLASH1M_V, or another save library too */
     Gen3CartRefuseRegion, /* not region E */
     Gen3CartRefuseEmerald, /* BPE */

@@ -88,8 +88,10 @@ typedef struct {
      * isn't zero, as no game writes it. The helper refuses to keep such a slot, so the cart isn't
      * writable until the game saves once. */
     bool padded;
-    /* As the game sets it: the physical index 0..13 of the active slot's last sector, in physical
-     * order, whose footer says id 0, valid or not. 0 when there is none, or Empty or Corrupt. */
+    /* As the game sets it for a save it loads: the physical index 0..13 of the active slot's last
+     * sector, in physical order, whose footer says id 0, valid or not; 0 when there is none. 0
+     * here when Empty or Corrupt, where the game, with its counter 0, still reads slot A and
+     * takes slot A's last id-0 footer the same way; nothing plans a write from such a save. */
     uint8_t first;
     /* id -> sector 0..27 the game loads it from: the active slot's last valid sector of that id in
      * physical order. GEN3_SAVE_NO_SECTOR when it has none (every id when Empty or Corrupt). */
