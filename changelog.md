@@ -1,22 +1,13 @@
 # Changelog - Patch Notes
 
-## Unreleased
-**Gen III link test (experimental)**
-- Add `Gen III  (GBA non-JPN)` menu with a Link Test: the Flipper joins Pokemon Ruby's Cable Club Trade Center as a second player and logs the link to `apps_data/pokemon/gen3_link.log`
-- See `docs/gen3/hardware-test-1.md`
-
-**Gen III Pokemon editor and .pk3 load/save (experimental)**
-- Add `Edit Pokemon` to the Gen III menu: species, nickname, level, EV/IV preset, nature, ability, shininess, gender, Unown form, moves, held item, Pokerus, ball and OT
-- Add `Load .pk3` and `Save .pk3` for PKHeX `.pk3` files in `apps_data/pokemon/gen3/`
+## Version 3.0
+**New Features**
+- Gen III (Game Boy Advance, non-Japanese): Cable Club trades with Ruby, Sapphire, FireRed and LeafGreen, one Pokemon at a time and back again without leaving the Trade Center
+- Gen III Pokemon editor: species, nickname, level, held item, moves, IVs/EVs, nature, ability, shiny, gender, Pokerus, Poke Ball, OT name/TID/SID, Unown form, fateful flag for Mew/Deoxys
+- Load and save Gen III Pokemon as PKHeX `.pk3` files
 - `files/gen3_bulk.bin` (species, move and item names, and learnsets) ships as an app asset; if the editor says `Data missing`, delete `apps_assets/pokemon` on the SD card and reopen
-- See `docs/gen3/editor-test.md`
-
-**Gen III Cable Club trade with Ruby/Sapphire (experimental)**
-- Add `Trade` to the Gen III menu: the Flipper sits at the Cable Club Trade Center table with Pokemon Ruby and trades the Pokemon from `Edit Pokemon`; the one it gets back can be edited and traded back without leaving the room, and the link keeps running behind every Gen III screen
-- The GBA player becomes the OT of the default Pokemon and of each species picked after linking; `OT: use <NAME>` in the editor gives any Pokemon the player's OT
-- The Flipper refuses Eggs, Bad Eggs and Mail holders, and doesn't offer Mail, the ENIGMA BERRY or items Ruby lacks; Back is locked while the GBA saves, and `End trade` makes the GBA walk out of the Trade Center by itself
-- `National Dex: Off` / `On` in the Gen III menu (off at every start) lets a trade unlock the GBA's National Dex, for good on that save
-- See `docs/gen3/hardware-test-2.md`
+- Gen III Link Test with a link log, and the SD pin on the Pinout screen
+- Hardware checklists in `docs/gen3/`
 
 ## Version 2.3
 - Fix potential bug in copying incoming trade data to the live working struct

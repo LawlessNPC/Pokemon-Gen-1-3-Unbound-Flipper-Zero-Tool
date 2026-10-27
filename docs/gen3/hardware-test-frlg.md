@@ -10,7 +10,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 
 - **The log** is `apps_data/pokemon/gen3_link.log`. It is overwritten each time a Trade or Link Test link starts, so after a failed run copy it off the SD card before you start another one.
 - **FireRed's Trade Center** is on Pokemon Center 2F: talk to the right-hand attendant, then choose TRADE CENTER. FireRed asks you to save first.
-- **The National Dex.** First write down whether your FireRed has the National Dex: its Pokedex offers a NATIONAL list. Without it, FireRed takes only Pokemon #1–151, and the Flipper never offers it one from #152 up. Section C1 needs a FireRed without the National Dex, C2 one with it; do the one that matches your save.
+- **The National Dex.** First write down whether your FireRed has the National Dex: its Pokedex offers a NATIONAL list. Without it, FireRed itself trades away only #1–151, and the Flipper never offers it one from #152 up. Section C1 needs a FireRed without the National Dex, C2 one with it; do the one that matches your save.
 - **The trade screen**, its three guide lines and `Edit` (the OK button) are as in `docs/gen3/hardware-test-2.md` (Notes). This checklist writes the three lines on one line, except where it quotes them.
 - `Review Focus n` refers to the Review Focus list in `docs/superpowers/plans/2026-10-25-gen3-04-frlg-trade.md`.
 - On any failure, report the step, what each screen showed (Flipper and GBA, including any `E<n>`), and the log file.
@@ -42,10 +42,10 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
    ```
 
    The reason shows only once FireRed is in the Trade Center (or on its way in): the Flipper learns FireRed's rules when it links, and with no GBA linked the screen shows `Go to the Cable Club` instead.
-2. **No sit.** Sit at the table on FireRed: its "Please wait..." stays, and the reason stays on the Flipper. Press B to stand up.
+2. **No sit.** Sit at the table on FireRed: its "Please wait. … … B Button: Cancel" stays, and the reason stays on the Flipper. Press B to stand up.
 3. **A Kanto Pokemon.** Set CHARMANDER, go back to the trade screen, and sit: the trade menu opens with CHARMANDER on the Flipper side.
 4. **FireRed's own rule.** If FireRed holds a Pokemon from #152 up, choose it → TRADE: FireRed itself refuses ("That POKéMON can't be traded now.").
-5. **An edit in the menu.** With the trade menu open, press OK (`Edit`) on the Flipper: FireRed goes back to the room as soon as the editor opens. Set TREECKO, then Back to the trade screen: `Can't offer it: GBA` / `has no National Dex.` / `Get it, or pick 1-151`. Sit again: "Please wait..." stays, and FireRed never shows TREECKO. Press B to stand up.
+5. **An edit in the menu.** With the trade menu open, press OK (`Edit`) on the Flipper: FireRed goes back to the room as soon as the editor opens. Set TREECKO, then Back to the trade screen: `Can't offer it: GBA` / `has no National Dex.` / `Get it, or pick 1-151`. Sit again: "Please wait. … … B Button: Cancel" stays, and FireRed never shows TREECKO. Press B to stand up.
 
 **C2. FireRed with the National Dex.** Skip this if your FireRed hasn't got it.
 
@@ -68,7 +68,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
    Mew/Deoxys: edit it.
    ```
 
-   Sitting on FireRed does nothing ("Please wait..." stays). Press B to stand up.
+   Sitting on FireRed does nothing ("Please wait. … … B Button: Cancel" stays). Press B to stand up.
 3. **Fateful again.** Set `Fateful: Yes` the same way, go back to the trade screen, and sit: the trade menu opens with MEW on the Flipper side. Trading it is optional.
 
 ## F. Refusals
@@ -78,7 +78,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 
 ## G. End and options
 
-1. **End trade.** Gen III menu → `End trade` → `End`, once with FireRed in the room and once with it in the trade menu. FireRed walks out by itself (from the trade menu it goes back to the room first), and the Flipper shows `Link ended. You can unplug the GBA.`
+1. **End trade.** With FireRed in the room, Gen III menu → `End trade` → `End`: FireRed walks out by itself, and the Flipper shows `Link ended. You can unplug the GBA.` That ends the trade session, so for the second case start a new one (Gen III → `Trade`), enter the Trade Center on FireRed again and sit, so the trade menu opens. Then Gen III menu → `End trade` → `End` again: FireRed goes back to the room first, then walks out, and the Flipper shows `Link ended. You can unplug the GBA.`
 2. **National Dex option.** Gen III menu → `National Dex: Off`: the dialog `Unlock National Dex?` says `Ruby/Sapphire only.` / `The next trade unlocks` / `it for good.` Choose `Cancel`. (If the item reads `National Dex: On`, choose it once to turn it off, then choose it again.)
 
 ## H. Swap cartridges (Review Focus 3)
@@ -89,5 +89,42 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 
 ## I. `.pk3` with FireRed
 
-1. **Save and load.** Gen III → `Save .pk3` the Pokemon you received in D, then `Load .pk3` it: the species, level and OT match.
+1. **Save and load.** Gen III → `Save .pk3` the Pokemon the Flipper received from FireRed in H.3, then `Load .pk3` it: the species, level and OT match.
 2. **PKHeX** (optional). PKHeX opens the file with no checksum warning.
+
+## J. Memory
+
+1. **Free heap.** Start a trade session (Gen III → `Trade`) and enter the Trade Center on FireRed, then open `Edit Pokemon`. In the qFlipper CLI (or `ufbt cli`), run `free` and write down `Free heap size`. It must be at least 12,000.
+
+## Results
+
+Game: FireRed or LeafGreen (which one?), with or without the National Dex.
+
+| Section | Pass / fail | What each screen showed (Flipper, FireRed) |
+|---|---|---|
+| A Link Test with FireRed | | |
+| B Start a trade | | |
+| C National Dex rules (C1 or C2) | | |
+| D Trade both ways (with D.2's "met" text) | | |
+| E Mew and Deoxys | | |
+| F Refusals | | |
+| G End and options | | |
+| H Swap cartridges | | |
+| I `.pk3` with FireRed | | |
+| J Memory: free heap (bytes) | | |
+
+## On failure
+
+Report the step (for example `C1.2`), what each screen showed (the trade screen's three lines and any `E<n>` on the Flipper, FireRed's message on the GBA), and the log `apps_data/pokemon/gen3_link.log`. Copy the log off the SD card before you start another Trade or Link Test, because starting one overwrites it.
+
+To finish a run, use `End trade` → `End`. If you had to use `Stop link?` and FireRed shows a link error, restart the GBA; it saved before linking.
+
+## If it fails (for whoever reads the log)
+
+The hints in `docs/gen3/hardware-test-2.md` and `docs/gen3/hardware-test-1.md` still apply. `docs/gen3/link-protocol-trade.md` Part C has the FireRed/LeafGreen background.
+
+| Symptom | Where to look |
+|---|---|
+| FireRed closes the link at the counter | the `version` the Flipper claims in its first LinkPlayerBlock: 0x4004 for FireRed, 0x4005 for LeafGreen (§C1, plan 4 D1). With a Ruby `version`, FireRed refuses the linkup unless its save can link with Ruby/Sapphire |
+| A link error on FireRed right after YES | the 0x1144 relink took over 300 frames, FireRed's deadline (`fr: trade_scene.c: CB2_LinkTrade` states 3/4 → `CheckLinkTimeout`, about 363 frames after FireRed reopens the link; Review Focus 5). In the host tests the relink takes about 24 frames, so look in the log for what held the Flipper's 0x1144 LinkPlayerBlock back |
+| A garbled trainer card | card byte 0x38 (the version, 4 or 5) or `stars` (at most 4): `link-protocol-trade.md` §C2, and its Uncertain item T13 (card fields not traced) |

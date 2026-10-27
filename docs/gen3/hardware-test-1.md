@@ -2,7 +2,7 @@
 
 Goal: the Flipper acts as the other player in Pokemon Ruby's Cable Club Trade Center, stays linked, and leaves cleanly. No Pokemon is traded in this test.
 
-You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable, genuine Ruby, genuine FireRed (FireRed is for the later comparison run; this checklist is Ruby only).
+You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable, genuine Ruby. FireRed has its own checklist, `docs/gen3/hardware-test-frlg.md`.
 
 ## Steps
 

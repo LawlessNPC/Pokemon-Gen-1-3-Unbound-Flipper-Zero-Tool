@@ -68,8 +68,8 @@ typedef struct {
     bool muted; /* bench_mute */
     uint8_t party[FAKE_RUBY_PARTY][GEN3_PARTY_SIZE]; /* the GBA's party as set, game form */
     uint8_t party_count;
-    /* An FRLG fake's save progress, applied again at each ruby_relink */
-    bool natdex, can_link_rs;
+    /* An FRLG fake's save progress (its National Dex), applied again at each ruby_relink */
+    bool natdex;
 } Bench;
 
 /* The GBA's party (game form, slots 0..count-1), for the fake now and after ruby_relink. */
@@ -162,7 +162,6 @@ static inline void bench_init_trade(Bench* b) {
 static inline void bench_swap_gba(Bench* b, const Gen3LinkPlayer* me, bool natdex) {
     b->me = *me;
     b->natdex = natdex;
-    b->can_link_rs = false;
     fake_ruby_init(&b->ruby, &b->me);
     if(fake_ruby_is_frlg(&b->ruby)) fake_ruby_set_frlg_progress(&b->ruby, natdex, false);
     fake_ruby_set_party(&b->ruby, b->party, b->party_count);
@@ -184,9 +183,7 @@ static inline void bench_init_frlg(Bench* b, uint16_t version, bool natdex) {
  * and an FRLG save's same progress. */
 static inline void ruby_relink(Bench* b) {
     fake_ruby_init(&b->ruby, &b->me);
-    if(fake_ruby_is_frlg(&b->ruby)) {
-        fake_ruby_set_frlg_progress(&b->ruby, b->natdex, b->can_link_rs);
-    }
+    if(fake_ruby_is_frlg(&b->ruby)) fake_ruby_set_frlg_progress(&b->ruby, b->natdex, false);
     fake_ruby_set_party(&b->ruby, b->party, b->party_count);
     fake_ruby_open_link(&b->ruby);
 }
