@@ -24,7 +24,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable
 
 ## B. Start a trade
 
-1. **Start.** Start the app fresh and don't edit the Pokemon first. Gen III → `Trade`: the screen shows `Plug in the cable (or swap its ends).` until the cable reads OK, then `Go to the Cable Club: Pokemon Center 2F, right counter.`
+1. **Start.** Start the app fresh and don't edit the Pokemon first. Gen III → `Trade`: the screen shows `Plug in the cable (or swap its ends).` until the cable reads OK, then `Go to the Cable Club: PC 2F, Trade Center: RS middle, FRLG right`. Ruby's Trade Center is the middle counter.
 2. **Enter.** On Ruby, go to the Trade Center as in test 1. The Flipper shows `Linking...`, then `In the Trade Center: sit at the table on the GBA.`
 3. **OT.** Back to the Gen III menu (the link keeps running) → `Edit Pokemon`: `OT Name` is your Ruby name, and `OT TID`/`OT SID` are yours. The default Bulbasaur took your OT (D7). Back to the Gen III menu, then `Trade` to return to the trade screen.
 
