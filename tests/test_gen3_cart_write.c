@@ -877,12 +877,14 @@ TEST(test_write_cart_changed_same_footer) {
     }
 }
 
-/* The game saved since the backup, in slot B: with counter 5 the game loads it, as it would a
- * finished write, but it holds other data; with counter 6 it still loads slot A (the counter's
- * parity), but not with the counter backed up. Either is another save: nothing is armed. */
+/* A save in slot B since the backup, which the backup doesn't hold: with counter 5 the game loads
+ * it, as it would a finished write, but it holds other data; with counter 6 it still loads slot A
+ * (the counter's parity), but not with the counter backed up; with counter 3, an older save, the
+ * game still loads slot A as backed up, but slot B is no longer what the backup has there. Each is
+ * another save: nothing is armed, and it stays byte for byte. */
 TEST(test_write_game_saved_since) {
-    static const uint32_t counters[] = {5, 6};
-    for(uint32_t i = 0; i < 2; i++) {
+    static const uint32_t counters[] = {5, 6, 3};
+    for(uint32_t i = 0; i < 3; i++) {
         ASSERT_TRUE(backed_up());
         ASSERT_TRUE(edit_party());
         FakeSaveSpec s = spec;
@@ -891,13 +893,15 @@ TEST(test_write_game_saved_since) {
         s.first[1] = 1;
         fake_save_build(img2, &s);
         memcpy(flash() + 14 * SECTOR_LEN, img2 + 14 * SECTOR_LEN, 14 * SECTOR_LEN);
+        memcpy(before, flash(), SAVE_LEN);
         hook.crc_sectors = 0;
         ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartChanged);
         ASSERT_EQ(calls(GEN3_HCMD_ARM_WRITE), 0);
         ASSERT_TRUE(no_flash_ops());
+        ASSERT_MEM_EQ(flash(), before, SAVE_LEN);
         ASSERT_FALSE(gen3_cart_backup_current(&cart));
-        /* the counter-5 save was read on the cart against the write's first image; the other
-         * needed only its footers */
+        /* the counter-5 save was read on the cart against the write's first image; the others
+         * needed only their footers */
         ASSERT_EQ(hook.crc_sectors, i == 0 ? 1u << 15 : 0u);
     }
 }
@@ -1144,8 +1148,10 @@ static void old_slot_newer(void) {
     for(uint8_t k = 0; k < 14; k++) fake_save_set_counter(flash(), phys(0, k), 6);
 }
 
-static void hall_of_fame_differs(void) {
-    flash()[29u * SECTOR_LEN + 0x10] ^= 0x01;
+static uint8_t act_sector; /* the sector other_sector_differs changes */
+
+static void other_sector_differs(void) {
+    flash()[act_sector * SECTOR_LEN + 0x10] ^= 0x01;
 }
 
 /* The check after the commits: a new sector, any of the 14, that doesn't hold its image, its
@@ -1313,24 +1319,165 @@ TEST(test_write_commit_link_lost) {
     ASSERT_TRUE(written_and_backed_up());
 }
 
-/* Every new sector checked, but a sector the write never touches (the Hall of Fame) isn't the
- * backup's: written and checked, but no new backup */
+/* A write whose slot the game loads, not yet backed up, then Discard: the edits go, and with them
+ * the write's claim on its slot. After a power cycle, attach compares that slot and backs up the
+ * cart as it is, the edited save the game loads; a new edit then writes over the old slot. Cut
+ * right after the 14th commit, or a check that failed with every commit done. */
+TEST(test_discard_after_write) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    watch_write();
+    snap_take();
+    for(uint32_t i = 0; i < 2; i++) {
+        snap_restore();
+        hook.act_code = GEN3_HCMD_COMMIT_SECTOR;
+        hook.act_nth = 14;
+        if(i == 0) {
+            hook.act = power_off;
+            ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+            power_back_on();
+        } else {
+            act_k = 5;
+            hook.act = new_sector_differs;
+            ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartVerifyFailed);
+        }
+        ASSERT_EQ(cart.wslot, 1);
+        ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartOk);
+        ASSERT_EQ(gen3_cart_changes(&cart), 0);
+        ASSERT_EQ(cart.wslot, NONE);
+        /* the game loads the new slot */
+        Gen3SaveSectorInfo info[28];
+        for(uint32_t s = 0; s < 28; s++) {
+            gen3_save_sector_info(Gen3LinkGameRS, flash() + s * SECTOR_LEN, &info[s]);
+        }
+        Gen3SaveSlots v;
+        gen3_save_analyze(info, &v);
+        ASSERT_EQ(v.active, 1);
+        ASSERT_EQ(v.save_counter, 5);
+        fake_helper_restart(&fh);
+        ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+        bool dropped = true;
+        ASSERT_EQ(gen3_cart_attach(&cart, STAMP3, &dropped), Gen3CartOk);
+        ASSERT_FALSE(dropped);
+        ASSERT_EQ(fake_store_count(&store, ".sav"), 2);
+        ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+        const Gen3SaveSlots* s = gen3_cart_slots(&cart);
+        ASSERT_EQ(s->active, 1);
+        ASSERT_EQ(s->save_counter, 5);
+        /* the edit is in the working copy now: a new one goes to slot A, counter 6 */
+        Gen3Pkm p;
+        ASSERT_TRUE(treecko(70, &p));
+        ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartOk);
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartOk);
+        ASSERT_EQ(gen3_cart_slots(&cart)->active, 0);
+        ASSERT_EQ(gen3_cart_slots(&cart)->save_counter, 6);
+        ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+    }
+}
+
+/* A write cut in its 8th commit, then the GBA off and another cart in: the same game and header,
+ * its loaded slot A byte for byte the first cart's, but an older save of its own in slot B. Attach
+ * sees in slot B what neither the backup, the write nor a game save after it put there: a new
+ * backup first, which holds that older save, and only then a write over it. */
+TEST(test_attach_other_cart_same_save) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    fake_gba_power_cut_after(&gba, CUT_IN_COMMIT8);
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(cart.wslot, 1);
+    FakeSaveSpec s = spec;
+    s.slot_present[1] = true;
+    s.counter[1] = 3;
+    s.first[1] = 5;
+    fake_save_build(img2, &s);
+    memcpy(flash() + 14 * SECTOR_LEN, img2 + 14 * SECTOR_LEN, 14 * SECTOR_LEN);
+    fake_helper_restart(&fh);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_backup_current(&cart));
+    const FakeGbaCounts n = counts();
+    bool dropped = false;
+    ASSERT_EQ(gen3_cart_attach(&cart, STAMP3, &dropped), Gen3CartOk);
+    ASSERT_TRUE(dropped);
+    ASSERT_EQ(counts().erases, n.erases);
+    ASSERT_EQ(counts().programs, n.programs);
+    ASSERT_STR_EQ(gen3_cart_backup_name(&cart), "backups/AXVE_12345_" STAMP3 ".sav");
+    ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+    ASSERT_MEM_EQ(flash() + 14 * SECTOR_LEN, img2 + 14 * SECTOR_LEN, 14 * SECTOR_LEN);
+    ASSERT_EQ(cart.wslot, NONE);
+    ASSERT_EQ(gen3_cart_slots(&cart)->result, Gen3SaveOk);
+    /* with that backup, the write goes over the older save */
+    ASSERT_TRUE(edit_party());
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartOk);
+    uint32_t size;
+    const uint8_t* sav = file("backups/AXVE_12345_" STAMP3 ".sav", &size);
+    ASSERT_TRUE(sav != NULL && size == SAVE_LEN);
+    ASSERT_MEM_EQ(sav + 14 * SECTOR_LEN, img2 + 14 * SECTOR_LEN, 14 * SECTOR_LEN);
+}
+
+/* While a write's slot is skipped, the slot the backup's save is in is still compared: after a cut
+ * in the 8th commit, a footer of slot A changed means another save. Attach backs it up, the edit
+ * dropped; reconnect says Changed. */
+TEST(test_kept_slot_compared) {
+    for(uint32_t i = 0; i < 2; i++) {
+        ASSERT_TRUE(backed_up());
+        ASSERT_TRUE(edit_party());
+        if(i == 0) {
+            fake_gba_power_cut_after(&gba, CUT_IN_COMMIT8);
+        } else {
+            hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+            hook.unplug_nth = 7;
+            hook.unplug_len = FOREVER;
+        }
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+        ASSERT_EQ(cart.wslot, 1);
+        fake_save_set_counter(flash(), phys(0, 13), 2);
+        fake_helper_replug(&fh);
+        if(i == 0) {
+            fake_helper_restart(&fh);
+            ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+            bool dropped = false;
+            ASSERT_EQ(gen3_cart_attach(&cart, STAMP3, &dropped), Gen3CartOk);
+            ASSERT_TRUE(dropped);
+            ASSERT_EQ(gen3_cart_changes(&cart), 0);
+            ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+            ASSERT_EQ(fake_store_count(&store, ".sav"), 2);
+        } else {
+            ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartChanged);
+            ASSERT_FALSE(gen3_cart_backup_current(&cart));
+            ASSERT_EQ(gen3_cart_changes(&cart), 1);
+        }
+        ASSERT_EQ(cart.wslot, NONE);
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartRefused);
+    }
+}
+
+/* Every new sector checked, but a sector the write never touches (any of the old slot's, or of
+ * 28..31) isn't the backup's: written and checked, but no new backup */
 TEST(test_post_write_backup_cart_differs) {
     ASSERT_TRUE(backed_up());
     ASSERT_TRUE(edit_party());
     watch_write();
-    hook.act_code = GEN3_HCMD_COMMIT_SECTOR;
-    hook.act_nth = 14;
-    hook.act = hall_of_fame_differs;
-    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartWrittenNoBackup);
-    ASSERT_EQ(watch.violations, 0);
-    ASSERT_EQ(game_view(), ViewNew);
-    ASSERT_FALSE(gen3_cart_backup_current(&cart));
-    ASSERT_EQ(fake_store_count(&store, ".sav"), 1);
-    ASSERT_EQ(fake_store_count(&store, ".tmp"), 0);
-    ASSERT_EQ(gen3_cart_changes(&cart), 0);
-    ASSERT_EQ(gen3_cart_backup(&cart, STAMP3), Gen3CartOk);
-    ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+    snap_take();
+    /* each sector the write doesn't touch: slot A (the old save, now the fallback) and 28..31 */
+    for(uint8_t s = 0; s < 32; s++) {
+        if(s >= 14 && s < 28) continue;
+        snap_restore();
+        act_sector = s;
+        hook.act_code = GEN3_HCMD_COMMIT_SECTOR;
+        hook.act_nth = 14;
+        hook.act = other_sector_differs;
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartWrittenNoBackup);
+        ASSERT_EQ(watch.violations, 0);
+        ASSERT_EQ(game_view(), ViewNew);
+        ASSERT_FALSE(gen3_cart_backup_current(&cart));
+        ASSERT_EQ(fake_store_count(&store, ".sav"), 1);
+        ASSERT_EQ(fake_store_count(&store, ".tmp"), 0);
+        ASSERT_EQ(gen3_cart_changes(&cart), 0);
+        if(s == 0 || s == 31) {
+            ASSERT_EQ(gen3_cart_backup(&cart, STAMP3), Gen3CartOk);
+            ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+        }
+    }
 }
 
 /* The link lost while the new backup is checked on the cart: written, not yet backed up. The
@@ -2009,6 +2156,9 @@ int main(void) {
     RUN(test_write_written_differs);
     RUN(test_attach_after_power_cut);
     RUN(test_write_commit_link_lost);
+    RUN(test_discard_after_write);
+    RUN(test_attach_other_cart_same_save);
+    RUN(test_kept_slot_compared);
     RUN(test_post_write_backup_cart_differs);
     RUN(test_write_link_lost_in_backup);
     RUN(test_write_link_drop_sweep);

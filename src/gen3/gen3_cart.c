@@ -423,24 +423,40 @@ static bool cart_sector_same(const Gen3Cart* c, uint32_t s) {
            v->full_ok == b->full_ok;
 }
 
-/* ... all of sectors 0..27 but the slot skip's (GEN3_SAVE_NO_SECTOR: none skipped) */
-static bool cart_footers_same(const Gen3Cart* c, uint8_t skip) {
+/* READ_FOOTERS showed sector s, in a slot a write with counter `counter` may have changed, holding
+ * only what the backup has there, or what that write or the game put there: the backup's footer;
+ * no valid signature (erased, or an image whose commit byte isn't programmed yet: the game skips
+ * it); or the signature with that counter, as the write's own sectors carry it, and as the game's
+ * next save after the backup's does too. Any other sector with the signature (another cart's save,
+ * say) is not the backup's to lose. */
+static bool cart_sector_may_stand(const Gen3Cart* c, uint32_t s, uint32_t counter) {
+    const Gen3SaveSectorInfo* v = &c->seen[s];
+    return cart_sector_same(c, s) || v->f.signature != GEN3_SAVE_SIGNATURE ||
+           v->f.counter == counter;
+}
+
+/* ... all of sectors 0..27, those of slot skip only as cart_sector_may_stand (GEN3_SAVE_NO_SECTOR:
+ * none skipped) */
+static bool cart_footers_same(const Gen3Cart* c, uint8_t skip, uint32_t counter) {
     for(uint32_t s = 0; s < CART_INFOS; s++) {
-        if(s / GEN3_SAVE_SLOT_SECTORS == skip) continue;
-        if(!cart_sector_same(c, s)) return false;
+        const bool ok = s / GEN3_SAVE_SLOT_SECTORS == skip ? cart_sector_may_stand(c, s, counter) :
+                                                             cart_sector_same(c, s);
+        if(!ok) return false;
     }
     return true;
 }
 
-/* *same: READ_FOOTERS shows the cart as the backup has it, but for the slot of a write or restore
- * not yet backed up (wslot). That slot may have changed since: by the write itself, cut short or
- * finished, or, after a power cut, by a game save. The write's next run reads it before anything
- * is armed: its own save there is found written and isn't written again, anything else is Changed.
- * So the other slot's footers decide here. */
+/* *same: READ_FOOTERS shows the cart as the backup has it, except that the slot of a write or
+ * restore not yet backed up (wslot) may hold, besides the backup's sectors, sectors without the
+ * signature and sectors with the write's counter (cart_sector_may_stand): the write's own, cut
+ * short or finished, or, after a power cut, a game save, which carries the same counter. The
+ * other slot, the one the backup's save is in, must be exactly as backed up. The write's next run
+ * then reads the slot again before anything is armed: its own whole save there is found written
+ * and isn't written again, any other save there is Changed, and anything less is written over. */
 static Gen3CartResult cart_still_backed_up(Gen3Cart* c, bool* same) {
     *same = false;
     const Gen3CartResult r = cart_footer_view(c);
-    if(r == Gen3CartOk) *same = cart_footers_same(c, c->wslot);
+    if(r == Gen3CartOk) *same = cart_footers_same(c, c->wslot, c->wcounter);
     return r;
 }
 
@@ -473,6 +489,9 @@ Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
 
 Gen3CartResult gen3_cart_discard(Gen3Cart* c) {
     if(!c->backup_current || !c->id.can_browse || !cart_loads(c)) return Gen3CartBadArg;
+    /* The edits go, and with them the write of them not yet backed up: if it finished, the game
+     * loads it now, and the next attach or reconnect must see that slot, not skip it */
+    c->wslot = GEN3_SAVE_NO_SECTOR;
     return cart_build_work(c);
 }
 
@@ -721,10 +740,11 @@ static bool cart_view_written(const Gen3Cart* c, const CartWrite* w) {
 }
 
 /* The footers show the cart as backed up, but for slot T: the slot kept's footers are the
- * backup's, and the game still loads that slot with its counter, or in mode 1 neither slot. A slot
- * T changed by an interrupted run of this write isn't the game's choice. */
+ * backup's, slot T holds only what the backup, this write (its counter) or the game put there
+ * (cart_sector_may_stand), and the game still loads the slot kept with its counter, or in mode 1
+ * neither slot. A slot T changed by an interrupted run of this write isn't the game's choice. */
 static bool cart_view_fresh(const Gen3Cart* c, const CartWrite* w) {
-    if(!cart_footers_same(c, w->plan.target)) return false;
+    if(!cart_footers_same(c, w->plan.target, w->plan.counter)) return false;
     const Gen3SaveSlots* v = &c->seen_slots;
     if(w->mode == 1) return v->result == Gen3SaveEmpty || v->result == Gen3SaveCorrupt;
     return cart_slots_load(v) && v->active == cart_keep(w) &&
@@ -819,6 +839,7 @@ static Gen3CartResult cart_commit(Gen3Cart* c, const CartWrite* w) {
 static Gen3CartResult cart_flash(Gen3Cart* c, const CartWrite* w) {
     const Gen3SaveWritePlan* p = &w->plan;
     c->wslot = p->target;
+    c->wcounter = p->counter;
     Gen3CartResult r = cart_wlink(
         c,
         gen3_hcli_arm_write(c->cli, c->flash_id, p->target, w->mode, c->slots.save_counter),
@@ -1007,6 +1028,7 @@ static Gen3CartResult cart_write_slot(Gen3Cart* c, const CartWrite* w, const cha
         /* A run that a lost link interrupted after its last commit: these are step 9's checks,
          * the footers first. Nothing is written again. */
         c->wslot = w->plan.target;
+        c->wcounter = w->plan.counter;
         bool same = false;
         r = cart_dst_same(c, w, &same);
         if(r == Gen3CartOk && !same) r = Gen3CartChanged;

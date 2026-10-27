@@ -154,9 +154,11 @@ struct Gen3Cart {
     uint16_t dirty; /* bit k: section id k was edited */
     uint8_t changed[(GEN3_CART_MON_SLOTS + 7u) / 8u]; /* bit per Pokemon slot */
     /* A write or restore that armed (or found its slot already written) and hasn't ended with a
-     * new backup: the slot it may have changed since the backup, which neither reconnect nor
-     * attach compares. GEN3_SAVE_NO_SECTOR: none. */
+     * new backup or a discard: the slot it may have changed since the backup, GEN3_SAVE_NO_SECTOR
+     * for none, and its counter. Reconnect and attach take a sector there that has the signature
+     * only if it is the backup's or has that counter. */
     uint8_t wslot;
+    uint32_t wcounter;
     /* The jobs' scratch */
     Gen3HFooter footers[GEN3_SAVE_SECTORS];
     /* Sectors 0..27 as READ_FOOTERS shows them, or as a restore's backup file holds them, and
@@ -184,9 +186,11 @@ void gen3_cart_init(
 Gen3CartResult gen3_cart_connect(Gen3Cart* c);
 /* After gen3_cart_connect: keeps the current backup and working copy, edits included, if this
  * cart's header and flash id (the connect checked them) and its footers (READ_FOOTERS) still match
- * them, but for the slot of a write or restore not yet backed up, which may have changed (as
- * gen3_cart_reconnect); otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were
- * pending). So a write cut short by a power cut keeps its edits, and its next run finishes it.
+ * them, except that the slot of a write or restore not yet backed up may also hold sectors with no
+ * signature and sectors with that write's counter (its own, or a game save after a power cut);
+ * otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were pending). So a write
+ * cut short by a power cut keeps its edits, and its next run finishes it, or finds the game's save
+ * there and is Changed; any other save in that slot (another cart's, say) gets a backup first.
  * A cart whose save can't be read (not can_read_save) is Ok with no backup: it has its info and,
  * when rom_size > 0, its ROM copy, while browsing, writing and restoring all need can_read_save;
  * edits pending from the cart before are dropped. */
@@ -198,9 +202,10 @@ Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped);
  * file it made and leaves no current backup. stamp: YYYYMMDD-HHMMSS (at most 20 characters).
  * Progress BackupRead per sector, then BackupVerify and Analyze; cancel after each sector. */
 Gen3CartResult gen3_cart_backup(Gen3Cart* c, const char* stamp);
-/* Rebuilds the working copy from the backup and reads it back: the edits are gone. On a failure
- * there is no working copy, and the edits stay counted, until a discard works. BadArg without a
- * current backup of a save the game loads. */
+/* Rebuilds the working copy from the backup and reads it back: the edits are gone, and so is any
+ * write of them not yet backed up, whose slot the next attach or reconnect compares again. On a
+ * failure there is no working copy, and the edits stay counted, until a discard works. BadArg
+ * without a current backup of a save the game loads. */
 Gen3CartResult gen3_cart_discard(Gen3Cart* c);
 
 /* Writes the edits back (multiboot-and-save.md §5.8, plan 5 D4): the working copy's 14 sectors,
@@ -213,10 +218,12 @@ Gen3CartResult gen3_cart_discard(Gen3Cart* c);
  * - Before any link traffic: Refused unless gen3_cart_writable; Nothing without an edit; SdFull
  *   unless a backup and a sector fit on the card.
  * - Before arming, the cart must still hold what the backup says: the footers of the slot kept, the
- *   game's choice, and SECTOR_CRC32 of each sector kept; else Changed, which drops the backup. A
- *   write that a lost link or a power cut interrupted after its last commit is found written (the
- *   game loads the new slot, which holds exactly the images), and not redone; anything else in
- *   that slot is Changed.
+ *   game's choice, and SECTOR_CRC32 of each sector kept; and the slot to write may hold only what
+ *   the backup has there, sectors with no signature, or sectors with the write's counter N + 1;
+ *   else Changed, which drops the backup. If the game loads that slot with N + 1 and each of its
+ *   sectors holds this write's image (SECTOR_CRC32), a run a lost link or a power cut interrupted
+ *   after its last commit is found written, and not redone; a save there with N + 1 and other
+ *   data, as the game's own next save, is Changed.
  * - A failure from the arming to the check ends any arming (its result ignored). The backup stays
  *   current: the slot it holds was never written. Until the last commit the game still loads that
  *   slot; after it (a lost link in the check, or a check that failed with every commit done) it
@@ -248,9 +255,9 @@ Gen3CartResult gen3_cart_restore_check(
 Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stamp);
 /* After LinkLost or BusyTimeout: gen3_cart_connect (HELLO tried for the lost command's budget,
  * CART_INFO, SAVE_PROBE); then, if there was a current backup, the cart must still be its cart
- * (header and flash id) with the same footers (READ_FOOTERS), but for the slot of a write or
- * restore not yet backed up, which may have changed (as gen3_cart_attach); else Changed, which
- * drops the backup. The edits stay. Progress Identify; cancel as gen3_cart_connect. */
+ * (header and flash id) with the same footers (READ_FOOTERS), the slot of a write or restore not
+ * yet backed up taken as gen3_cart_attach takes it; else Changed, which drops the backup. The
+ * edits stay. Progress Identify; cancel as gen3_cart_connect. */
 Gen3CartResult gen3_cart_reconnect(Gen3Cart* c);
 
 /* The cart as the last connect found it. Read it, gen3_cart_rom_size and gen3_cart_rom_name only
