@@ -304,6 +304,23 @@ static inline size_t bench_codes(const BenchBlock* blocks, uint8_t n, uint16_t* 
     return count;
 }
 
+/* The k-th 20-byte (§B3.1) block among blocks[0..n), or NULL */
+static inline const BenchBlock* trade_block(const BenchBlock* blocks, uint8_t n, size_t k) {
+    for(uint8_t i = 0; i < n; i++) {
+        if(blocks[i].size != GEN3_TRADE_BLOCK_SIZE) continue;
+        if(k-- == 0) return &blocks[i];
+    }
+    return NULL;
+}
+
+/* Index of the latest block of `size` among blocks[0..n), or -1 */
+static inline int latest_block(const BenchBlock* blocks, uint8_t n, uint16_t size) {
+    for(int i = n - 1; i >= 0; i--) {
+        if(blocks[i].size == size) return i;
+    }
+    return -1;
+}
+
 static inline void run(Bench* b, uint32_t frames) {
     for(uint32_t i = 0; i < frames; i++) step(b);
 }
@@ -354,6 +371,26 @@ static inline bool run_until_browsing(Bench* b, uint32_t max_frames) {
         step(b);
         if(fake_ruby_error(&b->ruby) != NULL) return false;
         if(fake_ruby_menu_state(&b->ruby) == FakeRubyMenuBrowsing) return true;
+    }
+    return false;
+}
+
+/* Until the GBA's phase is `phase`; false on a fake error or after max_frames */
+static inline bool run_until_fake_phase(Bench* b, FakeRubyPhase phase, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_phase(&b->ruby) == phase) return true;
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+    }
+    return false;
+}
+
+/* Until the GBA's trade menu is in `state`; false on a fake error or after max_frames */
+static inline bool run_until_menu_state(Bench* b, FakeRubyMenuState state, uint32_t max_frames) {
+    for(uint32_t i = 0; i < max_frames; i++) {
+        step(b);
+        if(fake_ruby_error(&b->ruby) != NULL) return false;
+        if(fake_ruby_menu_state(&b->ruby) == state) return true;
     }
     return false;
 }

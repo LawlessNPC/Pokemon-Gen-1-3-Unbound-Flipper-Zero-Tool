@@ -12,11 +12,12 @@
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* Gen III editor menu. Each row's item index is the scene it opens, except two rows that change
- * the Pokemon in place, whose indexes are no scene ids: "OT: use <NAME>" (PokemonSceneNum), which
- * applies the GBA player's OT, and "Fateful" (GEN3_EDIT_ROW_FATEFUL), which flips the
+ * the Pokemon in place, whose indexes are no scene ids: "OT: use <NAME>" (GEN3_EDIT_ROW_USE_OT),
+ * which applies the GBA player's OT, and "Fateful" (GEN3_EDIT_ROW_FATEFUL), which flips the
  * fateful-encounter bit of a Mew or Deoxys. The spaces after each label line the values up at the
  * same pixel column in the submenu font, as in pokemon_gen.c. */
 
+#define GEN3_EDIT_ROW_USE_OT  PokemonSceneNum
 #define GEN3_EDIT_ROW_FATEFUL (PokemonSceneNum + 1)
 
 /* The "Shiny lost" notice from "OT: use <NAME>" is up over this menu (D7) */
@@ -156,7 +157,7 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
     if(trainer && !gen3_edit_ot_is_trainer(ed)) {
         gen3_text_decode(trainer->name, GEN3_OT_NAME_LEN, name_buf, sizeof(name_buf));
         snprintf(buf, sizeof(buf), "OT: use %s", name_buf);
-        gen3_edit_add(pokemon_fap, buf, PokemonSceneNum);
+        gen3_edit_add(pokemon_fap, buf, GEN3_EDIT_ROW_USE_OT);
     }
 
     submenu_set_selected_item(
@@ -217,7 +218,7 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
     case PokemonSceneGen3Unown:
         alias = PokemonSceneGen3Preset;
         break;
-    case PokemonSceneNum:
+    case GEN3_EDIT_ROW_USE_OT:
         /* "OT: use <NAME>" (D7): the row goes once applied; keep the highlight next to it */
         scene_manager_set_scene_state(
             pokemon_fap->scene_manager, PokemonSceneGen3Edit, PokemonSceneGen3Sid);

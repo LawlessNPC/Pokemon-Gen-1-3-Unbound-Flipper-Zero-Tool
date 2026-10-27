@@ -216,6 +216,30 @@ static const char* guide_reason(Gen3Refuse r) {
     return "its data is invalid.";
 }
 
+/* Which Pokemon Center 2F counter is the Trade Center, for the game whose LinkPlayerBlock parsed:
+ * - Ruby and Sapphire: the middle one. Every pokeruby <Town>_PokemonCenter_2F map has three
+ *   attendants: x = 4 the COLOSSEUM (data/scripts/cable_club.inc: <Town>_..._EventScript_1A3EA6),
+ *   x = 7 the TRADE CENTER (EventScript_1A40CC, which links with sub_80834E4 [TryTradeLinkup])
+ *   and x = 10 the RECORD CORNER (EventScript_1A41FB).
+ * - FireRed and LeafGreen: the right-hand attendant (x = 10, fr: data/scripts/cable_club.inc:
+ *   CableClub_EventScript_DirectCornerAttendant), which with no wireless adapter offers TRADE
+ *   CENTER and COLOSSEUM (CableClub_EventScript_WelcomeToCableClub); x = 2 and x = 6 are the
+ *   wireless club and the Union Room.
+ * - Emerald: as FireRed. pokeemerald's PokemonCenter_2F maps place the same three attendants,
+ *   and its CableClub_EventScript_DirectCornerAttendant falls back to the same menu.
+ * - Unknown: as R/S. */
+static bool trade_center_right(Gen3LinkGame game) {
+    switch(game) {
+    case Gen3LinkGameE:
+    case Gen3LinkGameFRLG:
+        return true;
+    case Gen3LinkGameRS:
+    case Gen3LinkGameUnknown:
+        break;
+    }
+    return false;
+}
+
 /* SAY sets the three lines and returns: the first row that matches wins */
 #define SAY(a, b, c) \
     do { \
@@ -253,10 +277,25 @@ static void guide_pick(
     /* Ahead of the menu rows: no "offer changed" hint while leaving */
     if(st->leaving && !lost_in_save)
         SAY("Ending: the GBA walks", "out of the Trade", "Center by itself.");
-    if(st->trade_pending) SAY("Trading...", "Watch the GBA.", "");
+    if(st->trade_pending) {
+        /* No GBA linked, not even in a relink's gap: the trade's 0x1144 link didn't come within
+         * the relink wait (a GBA turned off in the gap), or closed before the GBA's block parsed
+         * (FRLG's own 300-frame deadline on it, fr: trade_scene.c: CB2_LinkTrade, then a link
+         * error on the GBA). No sync was answered, so nothing reached the GBA's save. The trade
+         * stays pending until the GBA's next block: a late 0x1144 relink still trades, any other
+         * link cancels it */
+        if(!gba_linked(st))
+            SAY("Link lost before the", "trade. On a GBA link", "error, restart it.");
+        SAY("Trading...", "Watch the GBA.", "");
+    }
     if(st->phase == Gen3ClubPhaseError) {
-        if(st->last_error == Gen3ClubErrorOtherRoom)
-            SAY("The GBA chose another", "room. Use the Trade", "Center (right).");
+        /* The GBA's block parsed, so its rules (partner_rules) are this GBA's: name its game's
+         * counter, not the one the player just used */
+        if(st->last_error == Gen3ClubErrorOtherRoom) {
+            if(trade_center_right(st->partner_rules.game))
+                SAY("The GBA chose another", "room. Right counter,", "then TRADE CENTER.");
+            SAY("The GBA chose another", "room. Use the middle", "counter: Trade Center");
+        }
         SAY("Link error. Restart", "the GBA, then go to", "the Cable Club.");
     }
     /* No valid offer (R5, O2): the club doesn't sit, and in the menu it sends EEBB */
@@ -290,7 +329,9 @@ static void guide_pick(
             SAY("Link lost at the end.", "Check the GBA party:", "it likely traded.");
         if(st->last_result == Gen3TradeResultCanceled)
             SAY("Link lost. Nothing", "was traded.", "");
-        SAY("Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+        /* No GBA linked: the rules are the last GBA's, and the next GBA may be another
+         * cartridge, swapped meanwhile. So both games' counters */
+        SAY("Go to the Cable Club:", "PC 2F, Trade Center:", "RS middle, FRLG right");
     case Gen3ClubPhaseLinked:
     case Gen3ClubPhasePlayers:
     case Gen3ClubPhaseCards:

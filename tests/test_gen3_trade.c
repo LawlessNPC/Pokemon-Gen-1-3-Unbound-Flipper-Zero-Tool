@@ -15,25 +15,8 @@
 
 static const uint8_t zero_mon[GEN3_PARTY_SIZE];
 
-/* Index of the latest block of `size` among blocks[0..n), or -1. */
-static int latest_block(const BenchBlock* blocks, uint8_t n, uint16_t size) {
-    for(int i = n - 1; i >= 0; i--) {
-        if(blocks[i].size == size) return i;
-    }
-    return -1;
-}
-
 static uint32_t later_burst(uint32_t a, uint32_t b) {
     return a > b ? a : b;
-}
-
-static bool run_until_fake_phase(Bench* b, FakeRubyPhase phase, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_phase(&b->ruby) == phase) return true;
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-    }
-    return false;
 }
 
 /* Until the GBA's trade menu has both LinkPlayers of its 0x1122 relink. */
@@ -546,15 +529,6 @@ TEST(test_trade_extra_request_trips_fake) {
 
 /* ---- Trade menu (§B3) ---- */
 
-/* The k-th 20-byte (§B3.1) block among blocks[0..n), or NULL. */
-static const BenchBlock* trade_block(const BenchBlock* blocks, uint8_t n, size_t k) {
-    for(uint8_t i = 0; i < n; i++) {
-        if(blocks[i].size != GEN3_TRADE_BLOCK_SIZE) continue;
-        if(k-- == 0) return &blocks[i];
-    }
-    return NULL;
-}
-
 static size_t n_trade_blocks(const BenchBlock* blocks, uint8_t n) {
     uint16_t codes[BENCH_BLOCKS];
     return bench_codes(blocks, n, codes, BENCH_BLOCKS);
@@ -578,15 +552,6 @@ static bool trade_block_is(const BenchBlock* blk, uint16_t code, uint16_t arg) {
  * there shows here. */
 static bool replied_after(const BenchBlock* gba, const BenchBlock* flipper) {
     return gba && flipper && flipper->first_burst >= gba->last_burst + 7;
-}
-
-static bool run_until_menu_state(Bench* b, FakeRubyMenuState state, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(fake_ruby_menu_state(&b->ruby) == state) return true;
-    }
-    return false;
 }
 
 TEST(test_trade_offer_confirm_ccdd) {
@@ -2931,6 +2896,102 @@ static bool guide_step(Bench* b, GuideWatch* w) {
         } \
     } while(0)
 
+/* The guide for st with no offer refusal and no pickup failure is l1 / l2 / l3 */
+static bool guide_says(const Gen3ClubStatus* st, const char* l1, const char* l2, const char* l3) {
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+    if(!gen3_trade_guide(st, true, true, Gen3RefuseNone, Gen3PickupOk, out)) return false;
+    if(strcmp(out[0], l1) == 0 && strcmp(out[1], l2) == 0 && strcmp(out[2], l3) == 0) return true;
+    printf("  guide: \"%s\" / \"%s\" / \"%s\"\n", out[0], out[1], out[2]);
+    return false;
+}
+
+TEST(test_guide_other_room) {
+    /* A GBA linked as another room: the guide names its own game's Trade Center counter, never
+     * the one the player just used. Ruby's Record Corner (0x3311) is its right counter, the Trade
+     * Center the middle one; FireRed's COLOSSEUM (0x2233) is a choice at its right-hand
+     * attendant, as TRADE CENTER is. Once the GBA has closed the link, no GBA is linked: the
+     * Waiting row names both counters */
+    static const struct {
+        bool frlg;
+        uint32_t link_type;
+        const char* l2;
+        const char* l3;
+    } cases[] = {
+        {false, 0x3311, "room. Use the middle", "counter: Trade Center"},
+        {true, 0x2233, "room. Right counter,", "then TRADE CENTER."},
+    };
+    for(size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        Bench b;
+        bench_init_cfg(&b, cases[i].link_type, &club_cfg_trade);
+        if(cases[i].frlg) {
+            Gen3LinkPlayer me = bench_frlg_player(GEN3_VERSION_FIRERED);
+            me.link_type = cases[i].link_type;
+            bench_swap_gba(&b, &me, false);
+        }
+        fake_ruby_open_link(&b.ruby);
+        ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseError, 400));
+        Gen3ClubStatus st = club_status(&b);
+        ASSERT_EQ(st.last_error, Gen3ClubErrorOtherRoom);
+        ASSERT_EQ(st.partner_rules.game, cases[i].frlg ? Gen3LinkGameFRLG : Gen3LinkGameRS);
+        ASSERT_TRUE(guide_says(&st, "The GBA chose another", cases[i].l2, cases[i].l3));
+        ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 400));
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        st = club_status(&b);
+        ASSERT_EQ(st.last_error, Gen3ClubErrorOtherRoom);
+        ASSERT_TRUE(guide_says(
+            &st, "Go to the Cable Club:", "PC 2F, Trade Center:", "RS middle, FRLG right"));
+    }
+}
+
+TEST(test_guide_trade_link_late) {
+    /* The trade's 0x1144 link doesn't come within the club's relink wait: the GBA stalls here, as
+     * a GBA turned off in the gap would, or one whose own deadline on that link has run out
+     * (FRLG: fr: trade_scene.c: CB2_LinkTrade, CheckLinkTimeout), which shows a link error. The
+     * trade stays pending (the club waits for the GBA's next LinkPlayerBlock), but no GBA is
+     * linked: the guide says the link was lost before the trade, not "Trading...". A late relink
+     * then trades, and the guide follows it */
+    Bench b;
+    bench_init_trade(&b);
+    ASSERT_TRUE(bench_reach_menu(&b));
+    fake_ruby_offer(&b.ruby, 2);
+    ASSERT_TRUE(run_until_menu_state(&b, FakeRubyMenuPrompt, 260));
+    fake_ruby_answer(&b.ruby, true);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyTrade, 400));
+    fake_ruby_stall(&b.ruby, 255);
+    ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseWaiting, 10));
+    Gen3ClubStatus st = club_status(&b);
+    ASSERT_TRUE(st.relinking);
+    ASSERT_TRUE(st.trade_pending);
+    ASSERT_TRUE(guide_says(&st, "Trading...", "Watch the GBA.", ""));
+    for(int i = 0; i <= GEN3_CLUB_RELINK_WAIT_FRAMES && club_status(&b).relinking; i++) {
+        if(i % 200 == 0) fake_ruby_stall(&b.ruby, 255);
+        step(&b);
+    }
+    st = club_status(&b);
+    ASSERT_EQ(st.phase, Gen3ClubPhaseWaiting);
+    ASSERT_TRUE(!st.relinking);
+    ASSERT_TRUE(st.trade_pending);
+    ASSERT_TRUE(!st.left);
+    ASSERT_TRUE(
+        guide_says(&st, "Link lost before the", "trade. On a GBA link", "error, restart it."));
+
+    /* The late relink: "Trading..." again once linked, then the trade and its link save */
+    bool trading_shown = false;
+    for(int i = 0; i < 4000 && club_status(&b).trades_done == 0; i++) {
+        char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+        step(&b);
+        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
+        st = club_status(&b);
+        ASSERT_TRUE(gen3_trade_guide(&st, true, true, Gen3RefuseNone, Gen3PickupOk, out));
+        if(st.phase != Gen3ClubPhaseWaiting) trading_shown |= strcmp(out[0], "Trading...") == 0;
+    }
+    st = club_status(&b);
+    ASSERT_TRUE(trading_shown);
+    ASSERT_EQ(st.trades_done, 1);
+    ASSERT_EQ(st.last_result, Gen3TradeResultDone);
+    ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
+}
+
 TEST(test_guide_through_relinks) {
     /* Every normal relink has a gap of about 20 frames in Waiting. The guide reads it as linked:
      * "Linking...", or "Trading..." for the trade's own relink, never "Go to the Cable Club". Five
@@ -3236,6 +3297,8 @@ int main(void) {
     RUN(test_leave_gba_gone);
     RUN(test_status_relinking);
     RUN(test_guide_through_relinks);
+    RUN(test_guide_other_room);
+    RUN(test_guide_trade_link_late);
     RUN(test_leave_and_gba_exit);
     RUN(test_leave_queue_busy);
     RUN(test_leave_during_linkup);

@@ -496,33 +496,6 @@ static void set_gba_party(Bench* b, const uint8_t* slot1, const uint8_t* slot2) 
     bench_set_party(b, party, 3);
 }
 
-static bool run_until_fake_phase(Bench* b, FakeRubyPhase phase, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_phase(&b->ruby) == phase) return true;
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-    }
-    return false;
-}
-
-static bool run_until_menu_state(Bench* b, FakeRubyMenuState state, uint32_t max_frames) {
-    for(uint32_t i = 0; i < max_frames; i++) {
-        step(b);
-        if(fake_ruby_error(&b->ruby) != NULL) return false;
-        if(fake_ruby_menu_state(&b->ruby) == state) return true;
-    }
-    return false;
-}
-
-/* The k-th 20-byte (§B3.1) block among blocks[0..n), or NULL */
-static const BenchBlock* trade_block(const BenchBlock* blocks, uint8_t n, size_t k) {
-    for(uint8_t i = 0; i < n; i++) {
-        if(blocks[i].size != GEN3_TRADE_BLOCK_SIZE) continue;
-        if(k-- == 0) return &blocks[i];
-    }
-    return NULL;
-}
-
 /* The codes of the 20-byte blocks among blocks[0..n) are exactly want[0..count), in order */
 static bool codes_are(const BenchBlock* blocks, uint8_t n, const uint16_t* want, size_t count) {
     uint16_t codes[BENCH_BLOCKS];
@@ -535,14 +508,6 @@ static bool codes_are(const BenchBlock* blocks, uint8_t n, const uint16_t* want,
         printf("\n");
     }
     return ok;
-}
-
-/* Index of the latest block of `size` among blocks[0..n), or -1 */
-static int latest_block(const BenchBlock* blocks, uint8_t n, uint16_t size) {
-    for(int i = n - 1; i >= 0; i--) {
-        if(blocks[i].size == size) return i;
-    }
-    return -1;
 }
 
 /* The latest 0x1122 session's five margins: margin[k] is the burst of the Flipper's CCCC k

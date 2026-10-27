@@ -61,7 +61,10 @@
 /* After the GBA closed a link to open the next one at once (the 5FFF answered in Room for the
  * trade menu, in Menu or in Save), the frames the club waits for it to connect before taking the
  * GBA as gone. Ruby opens the next link within about 20 frames of its CloseLink (§B1.5, §B4.1,
- * §B6.1, §B6.3) and gives a 0x1122 or 0x1111 relink 300 frames (§B8). */
+ * §B6.1, §B6.3) and gives a 0x1122 or 0x1111 relink 300 frames (§B8). FireRed and LeafGreen
+ * open theirs as fast, with the same 300 frames, and give the trade's 0x1144 relink a deadline of
+ * its own: 300 frames, then a link error on the GBA (§C4; fr: trade_scene.c: CB2_LinkTrade,
+ * CheckLinkTimeout). */
 #define GEN3_CLUB_RELINK_WAIT_FRAMES  300
 
 /* The values are the phase numbers in the link log: append only. */

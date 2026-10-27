@@ -1305,6 +1305,32 @@ static bool guide_is(
 }
 
 #define GUIDE(st, r, pf, l1, l2, l3) ASSERT_TRUE(guide_is((st), true, true, (r), (pf), l1, l2, l3))
+#define GUIDE_ROW(st, r, pf, row)    GUIDE((st), (r), (pf), (row)[0], (row)[1], (row)[2])
+
+/* The Trade Center's counter on Pokemon Center 2F: the middle one in Ruby and Sapphire, the
+ * right-hand attendant (then TRADE CENTER) in FireRed, LeafGreen and Emerald. With no GBA linked
+ * the next GBA's game is unknown, so the Waiting row names both. */
+static const char* const ROW_GO_CLUB[GEN3_GUIDE_LINES] = {
+    "Go to the Cable Club:",
+    "PC 2F, Trade Center:",
+    "RS middle, FRLG right",
+};
+static const char* const ROW_OTHER_ROOM_MIDDLE[GEN3_GUIDE_LINES] = {
+    "The GBA chose another",
+    "room. Use the middle",
+    "counter: Trade Center",
+};
+static const char* const ROW_OTHER_ROOM_RIGHT[GEN3_GUIDE_LINES] = {
+    "The GBA chose another",
+    "room. Right counter,",
+    "then TRADE CENTER.",
+};
+/* A trade pending with no GBA linked: its 0x1144 link never came, or closed before the trade */
+static const char* const ROW_LOST_BEFORE_TRADE[GEN3_GUIDE_LINES] = {
+    "Link lost before the",
+    "trade. On a GBA link",
+    "error, restart it.",
+};
 
 /* The reason line of each refusal */
 static const char* const REASON[] = {
@@ -1417,12 +1443,27 @@ TEST(test_guide_texts) {
     status_reset(&st, Gen3ClubPhaseTrade);
     st.trade_pending = true;
     GUIDE(&st, no, ok, "Trading...", "Watch the GBA.", "");
+    /* The trade still pending with no GBA linked, not even in a relink's gap: its 0x1144 link
+     * didn't come within the club's relink wait (a GBA turned off in the gap), or FRLG's own
+     * deadline on that link closed it before the trade (a link error on the GBA). Not
+     * "Trading...": nothing is under way */
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    st.trade_pending = true;
+    GUIDE_ROW(&st, no, ok, ROW_LOST_BEFORE_TRADE);
+    GUIDE_ROW(&st, Gen3RefuseNationalDex, Gen3PickupNoData, ROW_LOST_BEFORE_TRADE);
+    st.last_result = Gen3TradeResultDone; /* an older trade's */
+    GUIDE_ROW(&st, no, ok, ROW_LOST_BEFORE_TRADE);
+    st.relinking = true; /* the gap before the relink wait runs out: linked */
+    GUIDE(&st, no, ok, "Trading...", "Watch the GBA.", "");
+    /* A late relink: a GBA is linked again, and the trade may go on */
+    status_reset(&st, Gen3ClubPhaseLinked);
+    st.trade_pending = true;
+    GUIDE(&st, no, ok, "Trading...", "Watch the GBA.", "");
 
     /* Errors */
     status_reset(&st, Gen3ClubPhaseError);
     st.last_error = Gen3ClubErrorOtherRoom;
-    GUIDE(
-        &st, Gen3RefuseItem, ok, "The GBA chose another", "room. Use the Trade", "Center (right).");
+    GUIDE_ROW(&st, Gen3RefuseItem, ok, ROW_OTHER_ROOM_MIDDLE); /* game Unknown: as R/S */
     st.last_error = Gen3ClubErrorBadPlayerBlock;
     GUIDE(&st, no, ok, "Link error. Restart", "the GBA, then go to", "the Cable Club.");
     st.last_error = Gen3ClubErrorUnexpected;
@@ -1484,12 +1525,12 @@ TEST(test_guide_texts) {
     st.last_result = Gen3TradeResultCanceled;
     GUIDE(&st, no, ok, "Link lost. Nothing", "was traded.", "");
     st.last_result = Gen3TradeResultDone;
-    GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+    GUIDE_ROW(&st, no, ok, ROW_GO_CLUB);
     st.last_result = Gen3TradeResultNone;
-    GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+    GUIDE_ROW(&st, no, ok, ROW_GO_CLUB);
     /* After a Disconnected, the link state, not the re-sit hint */
     st.resit_needed = true;
-    GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+    GUIDE_ROW(&st, no, ok, ROW_GO_CLUB);
 
     /* A relink's gap: Waiting with relinking is the GBA opening its next link, about 20 frames. It
      * counts as linked, so never the Waiting rows */
@@ -1512,7 +1553,7 @@ TEST(test_guide_texts) {
     GUIDE(&st, Gen3RefuseItem, ok, "Can't offer it:", REASON[Gen3RefuseItem], "Edit it first.");
     /* The relink wait ran out: the GBA is gone, plain Waiting again */
     st.relinking = false;
-    GUIDE(&st, no, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+    GUIDE_ROW(&st, no, ok, ROW_GO_CLUB);
 
     status_reset(&st, Gen3ClubPhaseLinked);
     GUIDE(&st, no, ok, "Linking...", "", "");
@@ -1590,7 +1631,6 @@ static const char* const ROW_FATEFUL[GEN3_GUIDE_LINES] = {
     "needs Fateful: Yes on",
     "Mew/Deoxys: edit it.",
 };
-#define GUIDE_ROW(st, r, pf, row) GUIDE((st), (r), (pf), (row)[0], (row)[1], (row)[2])
 
 TEST(test_guide_frlg_rows) {
     Gen3ClubStatus st;
@@ -1625,7 +1665,7 @@ TEST(test_guide_frlg_rows) {
     /* No GBA linked: the Waiting rows, as with no refusal */
     for(Gen3Refuse r = nd; r <= fa; r++) {
         status_reset(&st, Gen3ClubPhaseWaiting);
-        GUIDE(&st, r, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+        GUIDE_ROW(&st, r, ok, ROW_GO_CLUB);
         st.last_result = Gen3TradeResultRolledBack;
         GUIDE(&st, r, ok, "Link lost while the", "GBA saved. It keeps", "its old save.");
     }
@@ -1650,11 +1690,79 @@ TEST(test_guide_frlg_rows) {
         "unreadable. Retrying.");
 }
 
+/* The GBA linked as another room (Ruby's Record Corner at the right counter, FireRed's
+ * COLOSSEUM): its LinkPlayerBlock parsed, so the guide names that game's Trade Center counter,
+ * never the one the player just used. With no GBA linked, the rules are the last GBA's, and the
+ * next one may be another cartridge: the Waiting row names both counters. */
+TEST(test_guide_counter_by_game) {
+    Gen3ClubStatus st;
+    const Gen3Refuse no = Gen3RefuseNone;
+    const Gen3PickupFail ok = Gen3PickupOk;
+    static const struct {
+        Gen3LinkGame game;
+        const char* const* other_room;
+    } games[] = {
+        {Gen3LinkGameUnknown, ROW_OTHER_ROOM_MIDDLE}, /* as R/S */
+        {Gen3LinkGameRS, ROW_OTHER_ROOM_MIDDLE},
+        {Gen3LinkGameE, ROW_OTHER_ROOM_RIGHT}, /* Emerald's 2F is laid out as FRLG's */
+        {Gen3LinkGameFRLG, ROW_OTHER_ROOM_RIGHT},
+    };
+    for(size_t i = 0; i < sizeof(games) / sizeof(games[0]); i++) {
+        status_reset(&st, Gen3ClubPhaseError);
+        st.last_error = Gen3ClubErrorOtherRoom;
+        st.partner_rules.game = games[i].game;
+        st.partner_rules.national_dex = games[i].game != Gen3LinkGameFRLG;
+        GUIDE_ROW(&st, no, ok, games[i].other_room);
+        GUIDE_ROW(&st, Gen3RefuseItem, Gen3PickupBadData, games[i].other_room);
+        /* The other errors name no counter */
+        st.last_error = Gen3ClubErrorBadPlayerBlock;
+        GUIDE(&st, no, ok, "Link error. Restart", "the GBA, then go to", "the Cable Club.");
+        /* The GBA's 5FFF answered, its link closed: Waiting, last_error kept */
+        status_reset(&st, Gen3ClubPhaseWaiting);
+        st.last_error = Gen3ClubErrorOtherRoom;
+        st.partner_rules.game = games[i].game;
+        GUIDE_ROW(&st, no, ok, ROW_GO_CLUB);
+        st.last_error = Gen3ClubErrorNone;
+        GUIDE_ROW(&st, no, ok, ROW_GO_CLUB);
+        GUIDE_ROW(&st, Gen3RefuseNationalDex, ok, ROW_GO_CLUB);
+    }
+}
+
 /* Every line fits FontSecondary across 128 px (21 characters) for every combination */
 static unsigned long guide_calls;
 static bool guide_saw_confirm, guide_saw_next;
-/* A "Link lost ..." row shown with a partner refusal (one only the unlinked sweep reaches) */
+/* A "Link lost ..." row about a lost trade shown with a partner refusal (one only the unlinked
+ * sweep reaches) */
 static bool guide_saw_partner_lost;
+/* A line naming one game's counter seen (the other-room rows): middle, right */
+static bool guide_saw_middle, guide_saw_right;
+
+/* A known game's player is never sent to another game's counter: "middle" only for R/S (and an
+ * unknown game, as R/S), "right" only for FRLG and Emerald, except in the row that names both */
+static bool guide_counter_ok(const Gen3ClubStatus* st, const char out[][GEN3_GUIDE_LINE_LEN]) {
+    bool right_game = false;
+    switch(st->partner_rules.game) {
+    case Gen3LinkGameE:
+    case Gen3LinkGameFRLG:
+        right_game = true;
+        break;
+    case Gen3LinkGameRS:
+    case Gen3LinkGameUnknown:
+        break;
+    }
+    for(int i = 0; i < GEN3_GUIDE_LINES; i++) {
+        if(strcmp(out[i], ROW_GO_CLUB[2]) == 0) continue;
+        const bool middle = strstr(out[i], "middle") != NULL;
+        const bool right = strstr(out[i], "right") != NULL || strstr(out[i], "Right") != NULL;
+        guide_saw_middle |= middle;
+        guide_saw_right |= right;
+        if(right_game ? middle : right) {
+            printf("  guide, game %d: \"%s\"\n", st->partner_rules.game, out[i]);
+            return false;
+        }
+    }
+    return true;
+}
 
 /* One sweep call: gen3_trade_guide cut no text, and line 1 says something */
 static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFail pf) {
@@ -1662,10 +1770,11 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
     guide_calls++;
     if(!gen3_trade_guide(st, true, true, offer, pf, out) || out[0][0] == '\0') {
         printf(
-            "  guide: phase %d error %d menu %d trades_done %u refused %d result %d offer %d "
-            "pickup %d: \"%s\" / \"%s\" / \"%s\"\n",
+            "  guide: phase %d error %d game %d menu %d trades_done %u refused %d result %d "
+            "offer %d pickup %d: \"%s\" / \"%s\" / \"%s\"\n",
             st->phase,
             st->last_error,
+            st->partner_rules.game,
             st->menu,
             (unsigned)st->trades_done,
             st->refused,
@@ -1678,7 +1787,7 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
         return false;
     }
     /* A relink's gap is linked: never the Waiting rows, whatever else is set */
-    if(st->relinking && (strcmp(out[0], "Go to the Cable Club:") == 0 ||
+    if(st->relinking && (strcmp(out[0], ROW_GO_CLUB[0]) == 0 ||
                          strncmp(out[0], "Link lost", strlen("Link lost")) == 0)) {
         printf(
             "  guide in a relink gap: phase %d result %d: \"%s\"\n",
@@ -1688,12 +1797,15 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
         return false;
     }
     /* "unplug" only with no GBA linked; the GBA's own rules only with one linked (unlinked, they
-     * may be another cartridge's) */
+     * may be another cartridge's); "Trading..." only with one linked, and a trade lost before it
+     * began only with none */
     const bool linked = st->phase != Gen3ClubPhaseWaiting || st->relinking;
     const bool partner = offer == Gen3RefuseNationalDex || offer == Gen3RefuseFateful;
+    const bool lost_before = strcmp(out[0], ROW_LOST_BEFORE_TRADE[0]) == 0;
     if((linked && strcmp(out[0], "Link ended. You can") == 0) ||
        (!linked && strcmp(out[0], "Walk out on the GBA,") == 0) ||
-       (!linked && partner && strncmp(out[0], "Can't offer it", strlen("Can't offer it")) == 0)) {
+       (!linked && partner && strncmp(out[0], "Can't offer it", strlen("Can't offer it")) == 0) ||
+       (!linked && strcmp(out[0], "Trading...") == 0) || (linked && lost_before)) {
         printf(
             "  guide, linked %d: phase %d relinking %d offer %d: \"%s\"\n",
             linked,
@@ -1703,17 +1815,81 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
             out[0]);
         return false;
     }
+    if(!guide_counter_ok(st, out)) return false;
     guide_saw_confirm |= strcmp(out[0], "Confirm the trade") == 0;
     guide_saw_next |= strcmp(out[0], "Edit it (OK), or pick") == 0;
-    guide_saw_partner_lost |= partner && strncmp(out[0], "Link lost", strlen("Link lost")) == 0;
+    guide_saw_partner_lost |= partner && !lost_before &&
+                              strncmp(out[0], "Link lost", strlen("Link lost")) == 0;
+    return true;
+}
+
+/* The sweep's status: phase, the GBA's game (partner_rules), last_error, the eight flags of
+ * test_guide_line_lengths by bit, menu and trades_done; refused and last_result None */
+static void sweep_status(
+    Gen3ClubStatus* st,
+    int phase,
+    int game,
+    int err,
+    unsigned flags,
+    int menu,
+    uint32_t done) {
+    status_reset(st, (Gen3ClubPhase)phase);
+    st->partner_rules.game = (Gen3LinkGame)game;
+    st->partner_rules.national_dex = game != Gen3LinkGameFRLG;
+    st->last_error = (Gen3ClubError)err;
+    st->save_window = flags & 1;
+    st->left = flags & 2;
+    st->leaving = flags & 4;
+    st->trade_pending = flags & 8;
+    st->offer_stale = flags & 16;
+    st->resit_needed = flags & 32;
+    st->gba_seated = flags & 64;
+    st->relinking = flags & 128;
+    st->menu = (Gen3ClubMenu)menu;
+    st->trades_done = done;
+}
+
+/* (a), then (b), of test_guide_line_lengths on st */
+static bool guide_fits_linked(Gen3ClubStatus* st) {
+    for(int r = Gen3RefuseNone; r <= Gen3RefuseFateful; r++) {
+        for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed; res++) {
+            st->refused = (Gen3Refuse)r;
+            st->last_result = (Gen3TradeResult)res;
+            if(!guide_fits(st, Gen3RefuseNone, Gen3PickupOk)) return false;
+        }
+    }
+    st->refused = Gen3RefuseNone;
+    st->last_result = Gen3TradeResultNone;
+    for(int offer = Gen3RefuseNone; offer <= Gen3RefuseFateful; offer++) {
+        for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++) {
+            if(!guide_fits(st, (Gen3Refuse)offer, (Gen3PickupFail)pf)) return false;
+        }
+    }
+    return true;
+}
+
+/* (c) of test_guide_line_lengths on st */
+static bool guide_fits_unlinked(Gen3ClubStatus* st) {
+    for(int offer = Gen3RefuseNone; offer <= Gen3RefuseFateful; offer++) {
+        for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++) {
+            for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed; res++) {
+                st->last_result = (Gen3TradeResult)res;
+                if(!guide_fits(st, (Gen3Refuse)offer, (Gen3PickupFail)pf)) return false;
+            }
+        }
+    }
     return true;
 }
 
 /* Every text fits FontSecondary across 128 px (21 characters): gen3_trade_guide reports any text
  * it had to cut. Every phase x last_error x {save_window, left, leaving, trade_pending,
- * offer_stale, resit_needed, gba_seated, relinking} x menu x trades_done (0, 1), then
+ * offer_stale, resit_needed, gba_seated, relinking} x menu x trades_done (0, 1), in the Error
+ * phase x partner_rules.game too, then
  * (a) refused x last_result with no pickup failure and no offer refusal, and
  * (b) offer_refuse x pickup_fail with refused and last_result None.
+ * The game: only the Error phase's other-room row reads it (it names that game's Trade Center
+ * counter), so there every game, and elsewhere Unknown. The Waiting row names both counters
+ * whatever the game (test_guide_counter_by_game).
  * While a GBA is linked (a phase other than Waiting, or relinking), a pickup failure or an offer
  * refusal decides the guide before any row that reads refused or last_result, so there (a) and
  * (b) stand for the full cross product. With no GBA linked they don't: last_result decides
@@ -1721,43 +1897,25 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
  * partner refusal (NationalDex, Fateful) falls through to the Waiting rows, which read
  * last_result. So a second sweep, counted on its own, covers every unlinked status:
  * (c) Waiting, not relinking, x last_error x the other seven flags x menu x trades_done, then
- * offer_refuse x pickup_fail x last_result, with refused None (no unlinked row reads it). */
+ * offer_refuse x pickup_fail x last_result, with refused None (no unlinked row reads it).
+ * Every call also checks that a known game's player is never sent to another game's counter
+ * (guide_counter_ok). */
 TEST(test_guide_line_lengths) {
     Gen3ClubStatus st;
     guide_calls = 0;
     guide_saw_confirm = false;
     guide_saw_next = false;
+    guide_saw_middle = false;
+    guide_saw_right = false;
     for(int phase = Gen3ClubPhaseWaiting; phase <= Gen3ClubPhaseSave; phase++) {
-        for(int err = Gen3ClubErrorNone; err <= Gen3ClubErrorUnexpected; err++) {
-            for(unsigned flags = 0; flags < (1u << 8); flags++) {
-                for(int menu = Gen3ClubMenuIdle; menu <= Gen3ClubMenuLeaving; menu++) {
-                    for(uint32_t done = 0; done <= 1; done++) {
-                        status_reset(&st, (Gen3ClubPhase)phase);
-                        st.last_error = (Gen3ClubError)err;
-                        st.save_window = flags & 1;
-                        st.left = flags & 2;
-                        st.leaving = flags & 4;
-                        st.trade_pending = flags & 8;
-                        st.offer_stale = flags & 16;
-                        st.resit_needed = flags & 32;
-                        st.gba_seated = flags & 64;
-                        st.relinking = flags & 128;
-                        st.menu = (Gen3ClubMenu)menu;
-                        st.trades_done = done;
-                        for(int r = Gen3RefuseNone; r <= Gen3RefuseFateful; r++) {
-                            for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed;
-                                res++) {
-                                st.refused = (Gen3Refuse)r;
-                                st.last_result = (Gen3TradeResult)res;
-                                ASSERT_TRUE(guide_fits(&st, Gen3RefuseNone, Gen3PickupOk));
-                            }
-                        }
-                        st.refused = Gen3RefuseNone;
-                        st.last_result = Gen3TradeResultNone;
-                        for(int offer = Gen3RefuseNone; offer <= Gen3RefuseFateful; offer++) {
-                            for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++)
-                                ASSERT_TRUE(
-                                    guide_fits(&st, (Gen3Refuse)offer, (Gen3PickupFail)pf));
+        const int last_game = phase == Gen3ClubPhaseError ? Gen3LinkGameFRLG : Gen3LinkGameUnknown;
+        for(int game = Gen3LinkGameUnknown; game <= last_game; game++) {
+            for(int err = Gen3ClubErrorNone; err <= Gen3ClubErrorUnexpected; err++) {
+                for(unsigned flags = 0; flags < (1u << 8); flags++) {
+                    for(int menu = Gen3ClubMenuIdle; menu <= Gen3ClubMenuLeaving; menu++) {
+                        for(uint32_t done = 0; done <= 1; done++) {
+                            sweep_status(&st, phase, game, err, flags, menu, done);
+                            ASSERT_TRUE(guide_fits_linked(&st));
                         }
                     }
                 }
@@ -1765,9 +1923,12 @@ TEST(test_guide_line_lengths) {
         }
     }
     ASSERT_EQ(GEN3_GUIDE_LINE_LEN, 22);
-    ASSERT_EQ(guide_calls, 11ul * 5 * 256 * 4 * 2 * (9 * 5 + 9 * 3));
+    /* 10 phases with game Unknown, and the Error phase with each of the 4 games */
+    ASSERT_EQ(guide_calls, (10ul + 4) * 5 * 256 * 4 * 2 * (9 * 5 + 9 * 3));
     ASSERT_TRUE(guide_saw_confirm);
     ASSERT_TRUE(guide_saw_next);
+    ASSERT_TRUE(guide_saw_middle);
+    ASSERT_TRUE(guide_saw_right);
 
     /* (c) No GBA linked */
     guide_calls = 0;
@@ -1776,27 +1937,9 @@ TEST(test_guide_line_lengths) {
         for(unsigned flags = 0; flags < (1u << 7); flags++) {
             for(int menu = Gen3ClubMenuIdle; menu <= Gen3ClubMenuLeaving; menu++) {
                 for(uint32_t done = 0; done <= 1; done++) {
-                    status_reset(&st, Gen3ClubPhaseWaiting);
-                    st.last_error = (Gen3ClubError)err;
-                    st.save_window = flags & 1;
-                    st.left = flags & 2;
-                    st.leaving = flags & 4;
-                    st.trade_pending = flags & 8;
-                    st.offer_stale = flags & 16;
-                    st.resit_needed = flags & 32;
-                    st.gba_seated = flags & 64;
-                    st.menu = (Gen3ClubMenu)menu;
-                    st.trades_done = done;
-                    for(int offer = Gen3RefuseNone; offer <= Gen3RefuseFateful; offer++) {
-                        for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++) {
-                            for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed;
-                                res++) {
-                                st.last_result = (Gen3TradeResult)res;
-                                ASSERT_TRUE(
-                                    guide_fits(&st, (Gen3Refuse)offer, (Gen3PickupFail)pf));
-                            }
-                        }
-                    }
+                    sweep_status(
+                        &st, Gen3ClubPhaseWaiting, Gen3LinkGameUnknown, err, flags, menu, done);
+                    ASSERT_TRUE(guide_fits_unlinked(&st));
                 }
             }
         }
@@ -1872,6 +2015,7 @@ int main(void) {
     RUN_BULK(test_trade_left_stop);
     RUN_BULK(test_guide_texts);
     RUN_BULK(test_guide_frlg_rows);
+    RUN_BULK(test_guide_counter_by_game);
     RUN_BULK(test_guide_line_lengths);
     RUN_BULK(test_guide_copy_reports_cut);
     TEST_EXIT();

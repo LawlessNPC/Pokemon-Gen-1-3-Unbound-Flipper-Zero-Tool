@@ -39,11 +39,11 @@ void gen3_partner_rules(const Gen3LinkPlayer* gba, Gen3PartnerRules* out);
 /* fr: include/constants/species.h: KANTO_SPECIES_END (SPECIES_MEW) */
 #define GEN3_NATIONAL_KANTO_LAST 151
 
-/* Offer traits: what a partner's rules look at, as bits */
-enum {
+/* Offer traits: what a partner's rules look at, as bits of a uint8_t */
+typedef enum {
     Gen3OfferNonKanto = 1u << 0, /* National Dex number above 151, or no valid species */
     Gen3OfferUnfateful = 1u << 1, /* Mew or Deoxys with the fateful-encounter bit 0 */
-};
+} Gen3OfferTrait;
 /* For an offer whose game form doesn't decrypt: never usable by FRLG */
 #define GEN3_OFFER_TRAITS_UNKNOWN (Gen3OfferNonKanto | Gen3OfferUnfateful)
 
