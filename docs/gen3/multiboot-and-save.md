@@ -1218,8 +1218,15 @@ everything when §3.6 checks 1–4 failed.
 - P timeouts:
   - No `SOF` within 32 transfers after the request's last word, while H sends
     neither `H_BUSY` nor a packet: resend.
-  - `H_BUSY` longer than 6 s: give up, report a flash failure, keep the slot
-    analysis.
+  - `H_BUSY` longer than the command's budget: give up, report a flash failure,
+    keep the slot analysis. The budget is per command:
+    - `CART_INFO`: 20 s. Its whole-ROM scan takes ~6.7 s for 16 MiB and ~14.5 s
+      for 32 MiB (§3.3, M7), so a 32 MiB cart that isn't a Pokemon game still
+      gets its refusal instead of a link timeout.
+    - `ERASE_SECTOR`, `WRITE_SECTOR`, `COPY_SECTOR`: 12 s. Up to 5 erase tries
+      of up to 2.04 s each, then the program and the verify (§3.4).
+    - Every other command: 6 s. `ROM_CRC32` is limited to 0x40000 bytes per
+      call to stay under it.
   - 3 failed resends: reset the link (wait for `H_READY`, `HELLO`).
 - H receive timeout: abort a packet if no transfer arrives for 200 ms (TM3 ≥ 196).
 

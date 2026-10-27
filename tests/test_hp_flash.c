@@ -432,9 +432,33 @@ TEST(test_hp_erased_ok) {
     fake_gba_fail_erase(&gba, 4, 5);
     ASSERT_EQ(hp_flash_erase(&fl, 4).status, HP_ST_ERASE_FAIL);
     ASSERT_EQ(fl.erased_ok, 1u << 30);
-    /* a failed write too */
+    /* a failed write too: its first try needs no erase, the two retries each erase */
+    const uint32_t erases = counts().erases;
     fake_gba_fail_program(&gba, 30, 0x10, 3);
     ASSERT_EQ(hp_flash_program(&fl, 30, img, false).status, HP_ST_PROGRAM_FAIL);
+    ASSERT_EQ(counts().erases, erases + 2);
+    ASSERT_EQ(fl.erased_ok, 0);
+}
+
+/* A try that fails after this session's own erase has programmed the sector, whether its program
+ * or its verify failed: the retry erases first. */
+TEST(test_hp_erased_ok_retry) {
+    setup(FakeSaveFlash, 0x09C2);
+    make_img();
+    ASSERT_EQ(hp_flash_erase(&fl, 7).status, HP_ST_OK);
+    fake_gba_fail_program(&gba, 7, 0x123, 1);
+    HpFlashResult r = hp_flash_program(&fl, 7, img, false);
+    ASSERT_EQ(r.status, HP_ST_OK);
+    ASSERT_EQ(counts().erases, 2);
+    ASSERT_MEM_EQ(sector(7), img, HP_FLASH_SECTOR_LEN);
+    ASSERT_EQ(fl.erased_ok, 0);
+    setup(FakeSaveFlash, 0x09C2);
+    ASSERT_EQ(hp_flash_erase(&fl, 7).status, HP_ST_OK);
+    fake_gba_weak_program(&gba, 7, 0x123, 1);
+    r = hp_flash_program(&fl, 7, img, false);
+    ASSERT_EQ(r.status, HP_ST_OK);
+    ASSERT_EQ(counts().erases, 2);
+    ASSERT_MEM_EQ(sector(7), img, HP_FLASH_SECTOR_LEN);
     ASSERT_EQ(fl.erased_ok, 0);
 }
 
@@ -723,6 +747,7 @@ int main(void) {
     RUN(test_hp_commit_program_fail);
     RUN(test_hp_program_erases_first);
     RUN(test_hp_erased_ok);
+    RUN(test_hp_erased_ok_retry);
     RUN(test_hp_erased_ok_hello);
     RUN(test_hp_erase_retry);
     RUN(test_hp_erase_timeout);
