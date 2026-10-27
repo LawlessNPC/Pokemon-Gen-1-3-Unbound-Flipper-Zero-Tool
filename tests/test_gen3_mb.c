@@ -110,6 +110,28 @@ static bool is_frame(const BenchFrame* f, uint16_t word) {
     return f->tx.count == 1 && f->tx.word[0] == word;
 }
 
+/* Time from the start of the first header frame to the end of the logged run. */
+static uint64_t us_since_first_header(void) {
+    uint64_t us = 0;
+    bool started = false;
+    for(uint32_t i = 1; i < bench_n; i++) {
+        if(bench_log[i - 1].phase == Gen3MbPhaseHeader) started = true;
+        if(started) us += bench_log[i].us;
+    }
+    return us;
+}
+
+/* Time from the end of the frame whose failure first started a Wait to the end of the run. */
+static uint64_t us_since_first_wait(void) {
+    uint64_t us = 0;
+    bool started = false;
+    for(uint32_t i = 0; i < bench_n; i++) {
+        if(started) us += bench_log[i].us;
+        if(bench_log[i].phase == Gen3MbPhaseWait) started = true;
+    }
+    return us;
+}
+
 /* After Done or Failed the sender only sends idle ticks. */
 static bool idles_forever(void) {
     for(int i = 0; i < 50; i++) {
@@ -325,7 +347,7 @@ TEST(test_mb_busy_slave) {
 /* The palette budget, one 0x63pp per tick: the last poll it allows is the one whose reply comes
  * at or past GEN3_MB_PALETTE_US. A slave whose 0x73cc comes on that poll is taken; one busy for
  * one poll longer times the wait out. That wait saw only valid 0x7202 replies, so it is not
- * counted: the sender keeps trying, and last_fail says why. */
+ * counted: the sender keeps trying until the attempt budget runs out. */
 TEST(test_mb_palette_timeout) {
     const uint32_t polls = (GEN3_MB_PALETTE_US + MLINK_TICK_US - 1u) / MLINK_TICK_US;
     ASSERT_TRUE(GEN3_MB_PALETTE_US >= 3500000u && GEN3_MB_PALETTE_US <= 4500000u);
@@ -341,11 +363,8 @@ TEST(test_mb_palette_timeout) {
     bench_init(0x1000, 0x5A, 0xC3);
     fake_bios_set_busy(&bios, polls * MLINK_TICK_US, 0);
     fake_bios_power_on(&bios);
-    run(&mb, &bios, 3u * (polls + 400u));
+    run(&mb, &bios, 100000);
     st = status();
-    ASSERT_TRUE(st.phase != Gen3MbPhaseDone && st.phase != Gen3MbPhaseFailed);
-    ASSERT_EQ(st.restarts, 0);
-    ASSERT_EQ(st.last_fail, Gen3MbFailPalette);
     ASSERT_EQ(fake_bios_boots(&bios), 0);
     uint32_t timeouts = 0;
     for(uint32_t i = 0; i < bench_n; i++) {
@@ -355,7 +374,11 @@ TEST(test_mb_palette_timeout) {
             timeouts++;
         }
     }
-    ASSERT_TRUE(timeouts >= 3);
+    /* none counted; the attempt budget ends it */
+    ASSERT_TRUE(timeouts >= 4);
+    ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
 }
 
 /* A palette wait that saw anything but valid 0x7202 replies counts: here the GBA resets in the
@@ -375,16 +398,90 @@ TEST(test_mb_palette_reset_counts) {
     ASSERT_EQ(fake_bios_boots(&bios), 1);
 }
 
+/* No 0x0075 within GEN3_MB_FINAL_US is a counted Final failure. Four of those don't fit in the
+ * attempt budget, so the budget ends it. */
 TEST(test_mb_final_timeout) {
     bench_init(0x1C0, 0x5A, 0xC3);
     fake_bios_set_busy(&bios, 0, 6000000);
     fake_bios_power_on(&bios);
+    for(uint32_t i = 0; i < 100000 && status().restarts == 0; i++) run(&mb, &bios, 1);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseWait);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailFinal);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
+    ASSERT_EQ(st.restarts, 3);
+    ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
+    ASSERT_EQ(fake_bios_boots(&bios), 0);
+}
+
+/* The attempt budget, from the first header word: a corrupted reply to 0x64hh leaves the slave
+ * waiting for its length word, so the restart's 0x6200 becomes a length of 0x18990 bytes and the
+ * slave drains it for minutes. The sender gives up within the budget and asks for a power
+ * cycle. */
+TEST(test_mb_attempt_budget) {
+    ASSERT_TRUE(GEN3_MB_ATTEMPT_US >= 15000000u && GEN3_MB_ATTEMPT_US <= 25000000u);
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_corrupt_reply(&bios, 105); /* 2 timeouts, 0x0000, 0x7202, Hello, 96 + 2, palette */
+    fake_bios_power_on(&bios);
     run(&mb, &bios, 100000);
     Gen3MbStatus st = status();
     ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
-    ASSERT_EQ(st.restarts, 4);
-    ASSERT_EQ(st.last_fail, Gen3MbFailFinal);
+    ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
     ASSERT_EQ(fake_bios_boots(&bios), 0);
+    bool handshake_failed = false;
+    for(uint32_t i = 1; i < bench_n; i++) {
+        if(bench_log[i - 1].phase == Gen3MbPhaseHandshake &&
+           bench_log[i].phase == Gen3MbPhaseWait) {
+            handshake_failed = true;
+        }
+    }
+    ASSERT_TRUE(handshake_failed);
+    const uint64_t us = us_since_first_header();
+    ASSERT_TRUE(us >= GEN3_MB_ATTEMPT_US);
+    ASSERT_TRUE(us < GEN3_MB_ATTEMPT_US + MLINK_BURST_LEN * MLINK_TICK_US);
+}
+
+/* One early data glitch recovers to Done: within 15 s of the glitch for an 8 KB image, and inside
+ * the attempt budget for the largest one. */
+TEST(test_mb_glitch_recovers_in_budget) {
+    bench_init(0x2000, 0x5A, 0xC3);
+    fake_bios_corrupt_reply(&bios, 110); /* data halfword 3 */
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailData);
+    ASSERT_TRUE(image_received(0x2000));
+    ASSERT_TRUE(us_since_first_wait() <= 15000000u);
+
+    bench_init(GEN3_MB_MAX_LEN, 0x5A, 0xC3);
+    fake_bios_corrupt_reply(&bios, 110);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailData);
+    ASSERT_TRUE(image_received(GEN3_MB_MAX_LEN));
+    ASSERT_TRUE(us_since_first_header() < GEN3_MB_ATTEMPT_US);
+}
+
+/* Waiting for the GBA to be powered on doesn't count against the attempt budget. */
+TEST(test_mb_late_power_on) {
+    bench_init(0x1000, 0x5A, 0xC3);
+    run(&mb, &bios, 30000000u / MLINK_TICK_US);
+    ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
 }
 
 TEST(test_mb_header_glitch) {
@@ -533,9 +630,9 @@ TEST(test_mb_wrong_length_reply) {
     ASSERT_EQ(fake_bios_boots(&bios), 1);
 }
 
-/* Detection: 16 replies that are neither 0x0000, 0xFFFF nor 0x72x2 start a restart wait, not
- * counted: 70 ms plus up to 170 ms of idle ticks (multiboot-and-save.md §2.4). waiting_us counts
- * the waits too. */
+/* Detection: GEN3_MB_JUNK_LIMIT replies that are neither 0x0000, 0xFFFF nor 0x72x2 start a
+ * restart wait, not counted: 70 ms plus up to 170 ms of idle ticks (multiboot-and-save.md §2.4).
+ * waiting_us counts the waits too, and no attempt budget runs before a header word. */
 TEST(test_mb_junk_wait) {
     static const uint16_t replies[3] = {0x0000, 0xFFFF, 0x1234};
     make_image(image, 0x1C0);
@@ -558,7 +655,7 @@ TEST(test_mb_junk_wait) {
         }
         ASSERT_EQ(status().phase, Gen3MbPhaseWait);
         ASSERT_EQ(polls, 3 * GEN3_MB_JUNK_LIMIT);
-        ASSERT_EQ(GEN3_MB_JUNK_LIMIT, 16);
+        ASSERT_EQ(GEN3_MB_JUNK_LIMIT, 255);
         uint32_t idle_us = 0;
         while(tx.count == 0) {
             memset(&rx, 0, sizeof(rx));
@@ -733,6 +830,9 @@ int main(void) {
     RUN(test_mb_palette_timeout);
     RUN(test_mb_palette_reset_counts);
     RUN(test_mb_final_timeout);
+    RUN(test_mb_attempt_budget);
+    RUN(test_mb_glitch_recovers_in_budget);
+    RUN(test_mb_late_power_on);
     RUN(test_mb_header_glitch);
     RUN(test_mb_data_glitch);
     RUN(test_mb_bad_crc_gives_up);

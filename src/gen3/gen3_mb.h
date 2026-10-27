@@ -30,8 +30,17 @@
 #define GEN3_MB_RESTART_MIN_US 70000u
 #define GEN3_MB_RESTART_RAND_US 170000u
 /* Detection replies that are neither 0x0000, 0xFFFF nor 0x72x2 before a restart wait (not
- * counted) */
-#define GEN3_MB_JUNK_LIMIT 16u
+ * counted). After a glitch the slave is still mid-transfer: it answers each 0x6200 with its own
+ * header count or data offset until it has had every word it expects. A high limit lets it drain
+ * at one word per tick instead of pausing every 16 words. GBATEK ("Repeat 15 times, if failed:
+ * delay 1/16s and restart") and afska's LinkCableMultiboot give no reason for the pause and no
+ * slave timeout, so pausing less often has no documented cost. 255 is the counter's limit. */
+#define GEN3_MB_JUNK_LIMIT 255u
+/* Total time for every attempt, from the first header word of the first one: past it the sender
+ * gives up with Gen3MbFailPowerCycle. A slave left mid-transfer can take minutes to drain, while
+ * turning the GBA off and on, the fallback (multiboot-and-save.md §2.6), takes seconds. Waiting
+ * for the GBA before any header word doesn't count. */
+#define GEN3_MB_ATTEMPT_US 20000000u
 /* Detect and Palette poll back to back, one word per tick, as afska's LinkCableMultiboot does
  * (each try right after the previous reply). Only Final's 0x0065 retries wait one GBA frame
  * between polls, with idle ticks: afska retries those once per VBlank. */
@@ -90,7 +99,8 @@ typedef enum {
     Gen3MbPhaseFinal,
     Gen3MbPhaseCrc,
     Gen3MbPhaseDone, /* the BIOS took the image: idle ticks from now on */
-    Gen3MbPhaseFailed, /* too many counted failures, or a bad length: idle ticks from now on */
+    /* too many counted failures, the attempt budget, or a bad length: idle ticks from now on */
+    Gen3MbPhaseFailed,
 } Gen3MbPhase;
 
 typedef enum {
@@ -103,6 +113,8 @@ typedef enum {
     Gen3MbFailData,
     Gen3MbFailFinal,
     Gen3MbFailCrc,
+    /* GEN3_MB_ATTEMPT_US ran out: turn the GBA off and on, holding Start+Select */
+    Gen3MbFailPowerCycle,
 } Gen3MbFail;
 
 typedef struct {
@@ -129,12 +141,14 @@ typedef struct Gen3Mb {
     uint8_t junk; /* Detect: other replies since entering it */
     uint8_t tx_count; /* words in the frame in flight */
     bool palette_other; /* Palette: a reply other than a valid 0x7202 came back */
+    bool attempting; /* a header word has gone out: the attempt budget runs */
     uint16_t pos; /* Header: next word of 98; Data: next payload halfword */
     uint16_t crc; /* Crc: the CRC sent */
     uint32_t e; /* Data: the encrypted word whose high half goes next */
     uint32_t phase_us; /* time in this phase */
     uint32_t poll_us; /* Final: time since the last 0x0065 */
     uint32_t wait_us; /* Wait: this wait's length */
+    uint32_t attempt_us; /* time since the first header frame started */
     uint32_t sent;
     uint32_t waiting_us;
 } Gen3Mb;

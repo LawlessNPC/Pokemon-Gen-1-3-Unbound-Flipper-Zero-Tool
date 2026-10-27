@@ -132,6 +132,7 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
         break;
     case Gen3MbPhaseHello:
         if(mb_valid(mb, rx, 0) && r == MB_DETECT_REPLY) {
+            mb->attempting = true; /* the first header frame goes out next */
             mb_enter(mb, Gen3MbPhaseHeader);
         } else {
             mb_fail(mb, Gen3MbFailHello);
@@ -299,7 +300,14 @@ void gen3_mb_frame(Gen3Mb* mb, const MlinkRx* rx, MlinkTx* tx, uint32_t elapsed_
     if(mb->phase == Gen3MbPhaseWait || mb->phase == Gen3MbPhaseDetect) {
         mb->waiting_us = mb_add(mb->waiting_us, elapsed_us);
     }
+    if(mb->attempting) mb->attempt_us = mb_add(mb->attempt_us, elapsed_us);
     if(rx) mb_receive(mb, rx);
+    /* After the reply, so a CRC that matches on the last frame still ends Done. */
+    if(mb->attempting && mb->attempt_us >= GEN3_MB_ATTEMPT_US && mb->phase != Gen3MbPhaseDone &&
+       mb->phase != Gen3MbPhaseFailed) {
+        mb->last_fail = Gen3MbFailPowerCycle;
+        mb_enter(mb, Gen3MbPhaseFailed);
+    }
     mb_send(mb, tx);
 }
 
