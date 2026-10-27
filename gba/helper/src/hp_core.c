@@ -150,8 +150,16 @@ static uint16_t hp_fail(Hp* hp, uint8_t status, uint16_t code, uint16_t off) {
     return hp_respond(hp, status, 2);
 }
 
-/* CART_INFO: 96 header words; flags; ROM size (2 words); library kind; its offset (2 words). */
+static void hp_disarm(Hp* hp) {
+    hp->armed = false;
+    hp->programmed = 0;
+    hp->completed = 0;
+}
+
+/* CART_INFO: 96 header words; flags; ROM size (2 words); library kind; its offset (2 words). The
+ * cart may have changed since an arming checked it, so it ends any arming. */
 static uint16_t hp_cart_info(Hp* hp) {
+    hp_disarm(hp);
     hp_cart_scan(&hp->cart);
     hp->cart_scanned = true;
     const HpCart* c = &hp->cart;
@@ -191,11 +199,6 @@ static uint16_t hp_save_probe(Hp* hp) {
     return hp_respond(hp, HP_ST_OK, 5);
 }
 
-static void hp_disarm(Hp* hp) {
-    hp->armed = false;
-    hp->completed = 0;
-}
-
 /* HELLO starts a session: nothing stays armed, and no erase from before it lets a write skip its
  * own. */
 static uint16_t hp_hello(Hp* hp) {
@@ -219,13 +222,15 @@ static bool hp_flash128(const Hp* hp) {
 }
 
 /* multiboot-and-save.md §3.6 checks 1-4, from CART_INFO's and SAVE_PROBE's last results: 0 if the
- * cart may be written, else the HP_REFUSE_* reason. */
+ * cart may be written, else the HP_REFUSE_* reason. The game code must also name a save layout
+ * the helper knows, which the slot checks need. */
 static uint16_t hp_write_refusal(const Hp* hp) {
     const HpCart* c = &hp->cart;
     if(!hp->cart_scanned || !c->logo_ok || !c->fixed_ok || !c->complement_ok || !c->write_game ||
        c->lib != HpLibFlash1M || c->other_lib) {
         return HP_REFUSE_CART;
     }
+    if(hp_save_game(c->code) == HpSaveGameUnknown) return HP_REFUSE_LAYOUT;
     if(!hp_flash128(hp) || (hp->probe.id != HP_ID_MX && hp->probe.id != HP_ID_SANYO)) {
         return HP_REFUSE_CHIP;
     }
@@ -283,10 +288,13 @@ static uint16_t hp_sector_crc32(Hp* hp) {
 
 /* ARM_WRITE: magic, flash id, target slot T, mode, N (2 words). Whatever the outcome, it first ends
  * any arming and forgets this session's erases, so nothing from before it (another cart, another
- * plan) can carry into the writes it allows. Mode 0 writes a new save over the older slot: slot
- * 1-T must hold one complete save with counter N, whose parity is its own (the game writes even
- * counters to slot 0, odd to slot 1: pokeruby: src/save.c: WriteSingleChunk), and be the slot the
- * game loads. Mode 1 restores onto a cart with no valid save, so neither slot may be one. */
+ * plan) can carry into the writes it allows. Which slot the game loads is judged with the game's
+ * own section sizes, so a slot the game takes is never written, whatever its padding.
+ * - Mode 0 writes a new save over the older slot: the game must load slot 1-T, and it must be one
+ *   clean save (hp_save_slot_ok) with counter N, whose parity is its own (the game writes even
+ *   counters to slot 0, odd to slot 1: pokeruby: src/save.c: WriteSingleChunk).
+ * - Mode 1 restores onto a cart with no valid save: the game must load neither slot, and neither
+ *   may be a clean save. */
 static uint16_t hp_arm_write(Hp* hp) {
     const uint16_t* a = hp->req;
     hp_disarm(hp);
@@ -298,18 +306,17 @@ static uint16_t hp_arm_write(Hp* hp) {
     const uint8_t t = (uint8_t)a[2];
     const uint8_t keep = (uint8_t)(1u - t);
     const uint32_t n = a[4] | (uint32_t)a[5] << 16;
+    const int loads = hp_save_active_slot(hp_save_game(hp->cart.code));
     uint32_t ctr = 0;
     bool ok;
     if(a[3] == 0) {
-        ok = hp_save_slot_ok(keep, &ctr) && ctr == n && n % 2u == keep &&
-             hp_save_active_slot() == keep;
+        ok = loads == keep && hp_save_slot_ok(keep, &ctr) && ctr == n && n % 2u == keep;
     } else {
-        ok = hp_save_active_slot() == -1 && !hp_save_slot_ok(0, &ctr) && !hp_save_slot_ok(1, &ctr);
+        ok = loads == -1 && !hp_save_slot_ok(0, &ctr) && !hp_save_slot_ok(1, &ctr);
     }
     if(!ok) return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_SLOT, 0);
     hp->armed = true;
     hp->arm_slot = t;
-    hp->completed = 0;
     return hp_respond(hp, HP_ST_OK, 0);
 }
 
@@ -341,9 +348,10 @@ static uint16_t hp_slot_bit(const Hp* hp, uint8_t sector) {
 }
 
 /* The game ignores the armed slot until all 14 of its ids are valid (multiboot-and-save.md §5.5).
- * So that it can only become valid as a whole save this arming wrote, a sector's signature may be
- * completed only while every other sector of the slot either was completed since the arming or
- * holds no valid signature. HP_NONE if so, else the first sector in the way. */
+ * So that it can only become valid as a whole save this arming wrote, COMMIT_SECTOR completes only
+ * a sector this arming programmed, and only while every other sector of the slot either was
+ * completed since the arming or holds no valid signature. HP_NONE if so, else the first sector in
+ * the way. */
 static uint8_t hp_slot_in_way(Hp* hp, uint8_t sector) {
     static const uint8_t sig[4] = {0x25, 0x20, 0x01, 0x08};
     const uint8_t first = (uint8_t)(hp->arm_slot * HP_SAVE_SLOT_SECTORS);
@@ -370,41 +378,48 @@ static void hp_completed(Hp* hp, uint8_t sector) {
     if(hp->completed == (1u << HP_SAVE_SLOT_SECTORS) - 1u) hp_disarm(hp);
 }
 
+/* Erasing or writing a sector undoes what the arming knew about it. */
+static void hp_forget(Hp* hp, uint8_t sector) {
+    const uint16_t bit = hp_slot_bit(hp, sector);
+    hp->programmed &= (uint16_t)~bit;
+    hp->completed &= (uint16_t)~bit;
+}
+
 static uint16_t hp_erase_sector(Hp* hp) {
     const uint16_t sector = hp->req[0];
     const uint16_t refused = hp_write_gate(hp, sector);
     if(refused) return refused;
-    hp->completed &= (uint16_t)~hp_slot_bit(hp, (uint8_t)sector);
+    hp_forget(hp, (uint8_t)sector);
     return hp_flash_answer(hp, hp_flash_erase(&hp->flash, (uint8_t)sector));
 }
 
-/* Writes sector_buf into the (gated) sector. Without DEFER_COMMIT the signature is programmed with
- * the rest, so it completes the sector as COMMIT_SECTOR does. */
-static uint16_t hp_program(Hp* hp, uint8_t sector, bool defer) {
-    if(!defer) {
-        const uint8_t in_way = hp_slot_in_way(hp, sector);
-        if(in_way != HP_NONE) return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_VALID, in_way);
-    }
-    hp->completed &= (uint16_t)~hp_slot_bit(hp, sector);
-    const HpFlashResult r = hp_flash_program(&hp->flash, sector, hp->sector_buf, defer);
-    if(r.status == HP_ST_OK && !defer) hp_completed(hp, sector);
+/* Writes sector_buf into the (gated) sector with 0xFF8 left erased, for COMMIT_SECTOR. */
+static uint16_t hp_program(Hp* hp, uint8_t sector) {
+    hp_forget(hp, sector);
+    const HpFlashResult r = hp_flash_program(&hp->flash, sector, hp->sector_buf, true);
+    if(r.status == HP_ST_OK) hp->programmed |= hp_slot_bit(hp, sector);
     return hp_flash_answer(hp, r);
+}
+
+/* Writes always defer the commit byte: then a sector's signature, the last byte programmed, is only
+ * ever valid over a complete sector, its counter included (multiboot-and-save.md §6.8). */
+static bool hp_flags_ok(uint16_t flags) {
+    return flags == HP_FLAG_DEFER_COMMIT;
 }
 
 /* WRITE_SECTOR: sector, flags, the image. The packet's CRC passed before this runs, so a torn
  * upload never reaches the chip. */
 static uint16_t hp_write_sector(Hp* hp) {
     const uint16_t sector = hp->req[0];
-    const uint16_t flags = hp->req[1];
     const uint16_t refused = hp_write_gate(hp, sector);
     if(refused) return refused;
-    if(flags & (uint16_t)~HP_FLAG_DEFER_COMMIT) return hp_fail(hp, HP_ST_BAD_ARG, 0, sector);
+    if(!hp_flags_ok(hp->req[1])) return hp_fail(hp, HP_ST_BAD_ARG, 0, sector);
     const uint16_t* w = hp->req + 2;
     for(uint32_t k = 0; k < HP_SECTOR_WORDS; k++) {
         hp->sector_buf[2 * k] = (uint8_t)w[k];
         hp->sector_buf[2 * k + 1] = (uint8_t)(w[k] >> 8);
     }
-    return hp_program(hp, (uint8_t)sector, flags & HP_FLAG_DEFER_COMMIT);
+    return hp_program(hp, (uint8_t)sector);
 }
 
 /* COPY_SECTOR: src, dst, flags, counter (2 words). The source must be in the other slot, the one
@@ -412,11 +427,10 @@ static uint16_t hp_write_sector(Hp* hp) {
 static uint16_t hp_copy_sector(Hp* hp) {
     const uint16_t src = hp->req[0];
     const uint16_t dst = hp->req[1];
-    const uint16_t flags = hp->req[2];
     const uint16_t refused = hp_write_gate(hp, dst);
     if(refused) return refused;
     if(src >= HP_SLOT_SECTORS_END || hp_sector_slot(src) == hp->arm_slot ||
-       (flags & (uint16_t)~HP_FLAG_DEFER_COMMIT)) {
+       !hp_flags_ok(hp->req[2])) {
         return hp_fail(hp, HP_ST_BAD_ARG, 0, src);
     }
     hp_flash_read((uint8_t)src, 0, hp->sector_buf, HP_FLASH_SECTOR_LEN);
@@ -425,13 +439,16 @@ static uint16_t hp_copy_sector(Hp* hp) {
     hp->sector_buf[HP_COUNTER_OFF + 1] = (uint8_t)(c[0] >> 8);
     hp->sector_buf[HP_COUNTER_OFF + 2] = (uint8_t)c[1];
     hp->sector_buf[HP_COUNTER_OFF + 3] = (uint8_t)(c[1] >> 8);
-    return hp_program(hp, (uint8_t)dst, flags & HP_FLAG_DEFER_COMMIT);
+    return hp_program(hp, (uint8_t)dst);
 }
 
 static uint16_t hp_commit_sector(Hp* hp) {
     const uint16_t sector = hp->req[0];
     const uint16_t refused = hp_write_gate(hp, sector);
     if(refused) return refused;
+    if(!(hp->programmed & hp_slot_bit(hp, (uint8_t)sector))) {
+        return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_NOT_PROGRAMMED, sector);
+    }
     const uint8_t in_way = hp_slot_in_way(hp, (uint8_t)sector);
     if(in_way != HP_NONE) return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_VALID, in_way);
     const HpFlashResult r = hp_flash_commit(&hp->flash, (uint8_t)sector);
@@ -534,7 +551,8 @@ uint16_t hp_execute(Hp* hp) {
     /* The packet's CRC: rx_crc stays as its last word left it, because hp_step receives nothing
      * while a packet is pending. */
     const uint32_t crc = ~hp->rx_crc;
-    if(hp->last_valid && crc == hp->last_crc && hp_write_class(hp->code)) {
+    const uint16_t w1 = (uint16_t)(hp->seq << 8 | hp->code);
+    if(hp->last_valid && w1 == hp->last_w1 && crc == hp->last_crc && hp_write_class(hp->code)) {
         /* The same request again, and resp still holds its response: send that once more. */
         hp->tx_len = hp->last_len;
         hp->tx_pos = 1;
@@ -542,6 +560,7 @@ uint16_t hp_execute(Hp* hp) {
     }
     const uint16_t first = hp_run(hp);
     hp->last_valid = true;
+    hp->last_w1 = w1;
     hp->last_crc = crc;
     hp->last_len = hp->tx_len;
     return first;

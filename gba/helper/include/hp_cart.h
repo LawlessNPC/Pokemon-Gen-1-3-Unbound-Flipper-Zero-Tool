@@ -27,6 +27,7 @@ typedef struct {
     bool other_lib; /* a library string other than FLASH1M_V was found */
     bool write_game; /* game code AXVE, AXPE, BPRE or BPGE: the English Ruby, Sapphire, FireRed
                       * and LeafGreen */
+    uint8_t code[4]; /* the game code, 0xAC..0xAF */
 } HpCart;
 
 /* Checks the header and scans the whole ROM for library strings, in 32-bit steps. On the GBA this

@@ -47,6 +47,7 @@ TEST(test_hp_cart_ruby) {
     ASSERT_EQ(c.lib_off, 0x3B0000);
     ASSERT_TRUE(!c.other_lib);
     ASSERT_TRUE(c.write_game);
+    ASSERT_MEM_EQ(c.code, "AXVE", 4);
 }
 
 /* A ROM patched to save to SRAM still holds FLASH1M_V, wherever the other string is. */

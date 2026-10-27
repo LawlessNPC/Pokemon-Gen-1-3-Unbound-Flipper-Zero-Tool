@@ -290,7 +290,7 @@ TEST(test_hp_save_slots) {
             .seed = (uint32_t)i,
         };
         ASSERT_TRUE(setup_spec());
-        ASSERT_EQ(hp_save_active_slot(), cases[i].active);
+        ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), cases[i].active);
         uint32_t n = 0x1234;
         ASSERT_EQ(hp_save_slot_ok(0, &n), cases[i].a);
         if(cases[i].a) ASSERT_EQ(n, cases[i].ca);
@@ -306,24 +306,75 @@ TEST(test_hp_save_slots) {
     ASSERT_TRUE(setup_spec());
     fake_save_set_counter(gba.flash, 2, 3);
     ASSERT_TRUE(!hp_save_slot_ok(0, &n));
-    ASSERT_EQ(hp_save_active_slot(), 0);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
     fake_save_set_counter(gba.flash, 13, 7);
-    ASSERT_EQ(hp_save_active_slot(), 1);
-    /* a broken checksum, a duplicated id, an id over 13, a padded section: not ok, and the game
-     * doesn't take the slot either */
-    for(int c = 0; c < 4; c++) {
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 1);
+    /* a broken checksum, a duplicated id, an id over 13: not ok, and the game doesn't take the slot
+     * either */
+    for(int c = 0; c < 3; c++) {
         ASSERT_TRUE(setup());
         const uint32_t s = fake_save_phys(&spec, 0, 7);
         if(c == 0) fake_save_break_checksum(gba.flash, (uint8_t)s);
         if(c == 1) fake_save_set_id(gba.flash, (uint8_t)s, 6);
         if(c == 2) fake_save_set_id(gba.flash, (uint8_t)s, 14);
-        if(c == 3) sector(fake_save_phys(&spec, 0, 0))[0x890] = 0x5A;
         ASSERT_TRUE(!hp_save_slot_ok(0, &n));
-        ASSERT_EQ(hp_save_active_slot(), -1);
+        ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), -1);
     }
-    /* a slot of the wrong number */
+    /* a non-zero byte past id 0's 0x890 bytes: not a clean save, but the game still takes it */
+    ASSERT_TRUE(setup());
+    sector(fake_save_phys(&spec, 0, 0))[0x890] = 0x5A;
+    ASSERT_TRUE(!hp_save_slot_ok(0, &n));
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
+    /* a slot of the wrong number; no layout */
     ASSERT_TRUE(setup());
     ASSERT_TRUE(!hp_save_slot_ok(2, &n));
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameUnknown), HP_SAVE_NO_LAYOUT);
+}
+
+/* The layout comes from the game code; its sizes are the game's (multiboot-and-save.md §5.4, here
+ * fake_save's own table). */
+TEST(test_hp_save_layouts) {
+    static const struct {
+        const char* code;
+        HpSaveGame game;
+    } codes[] = {
+        {"AXVE", HpSaveGameRS},
+        {"AXPE", HpSaveGameRS},
+        {"AXVD", HpSaveGameRS},
+        {"BPRE", HpSaveGameFRLG},
+        {"BPGE", HpSaveGameFRLG},
+        {"BPEE", HpSaveGameUnknown},
+        {"ZFGE", HpSaveGameUnknown},
+        {"AXXE", HpSaveGameUnknown},
+    };
+    for(size_t i = 0; i < sizeof(codes) / sizeof(codes[0]); i++) {
+        ASSERT_EQ(hp_save_game((const uint8_t*)codes[i].code), codes[i].game);
+    }
+    for(uint8_t id = 0; id < 14; id++) {
+        ASSERT_EQ(hp_save_size(HpSaveGameRS, id), fake_save_size(FakeGameRS, id));
+        ASSERT_EQ(hp_save_size(HpSaveGameFRLG, id), fake_save_size(FakeGameFRLG, id));
+        ASSERT_EQ(hp_save_size(HpSaveGameUnknown, id), 0);
+    }
+    ASSERT_EQ(hp_save_size(HpSaveGameRS, 14), 0);
+    ASSERT_EQ(hp_save_size(HpSaveGameFRLG, 0xFFFF), 0);
+    /* A 4 and B 5, B's id 0 with a non-zero byte just past its section in the save's own game:
+     * that game loads B; read with the other game's sizes, B's id 0 is broken (in FRLG's longer
+     * section), or both slots are (an FRLG save's ids 0 and 4 under RS's shorter ones) */
+    static const struct {
+        FakeGame save;
+        uint16_t pad;
+        int as_rs, as_frlg;
+    } saves[] = {{FakeGameRS, 0x890, 1, 0}, {FakeGameFRLG, 0xF24, -1, 1}};
+    for(size_t i = 0; i < 2; i++) {
+        default_spec();
+        spec.game = saves[i].save;
+        spec.slot_present[1] = true;
+        spec.counter[1] = 5;
+        ASSERT_TRUE(setup_spec());
+        sector(fake_save_phys(&spec, 1, 0))[saves[i].pad] = 0x5A;
+        ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), saves[i].as_rs);
+        ASSERT_EQ(hp_save_active_slot(HpSaveGameFRLG), saves[i].as_frlg);
+    }
 }
 
 /* ---- ARM_WRITE ---- */
@@ -398,7 +449,7 @@ TEST(test_hp_arm_refused_matrix) {
     spec.counter[0] = 5;
     spec.counter[1] = 6;
     ASSERT_TRUE(setup_spec());
-    ASSERT_EQ(hp_save_active_slot(), 0);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
     ASSERT_EQ(arm(MX, 1, 0, 5), HP_ST_REFUSED);
     ASSERT_TRUE(refused_cleanly());
     /* mode 1 while a slot is valid */
@@ -415,7 +466,7 @@ TEST(test_hp_arm_refused_matrix) {
     ASSERT_TRUE(identify());
     memset(&gba.counts, 0, sizeof(gba.counts));
     snapshot();
-    ASSERT_EQ(hp_save_active_slot(), 0);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
     ASSERT_EQ(arm(MX, 0, 1, 4), HP_ST_REFUSED);
     ASSERT_TRUE(refused_cleanly());
     ASSERT_EQ(arm(MX, 1, 1, 4), HP_ST_REFUSED);
@@ -429,6 +480,116 @@ TEST(test_hp_arm_refused_matrix) {
     ASSERT_TRUE(refused_cleanly());
     ASSERT_EQ(arm(MX, 2, 0, 4), HP_ST_BAD_ARG);
     ASSERT_TRUE(refused_cleanly());
+}
+
+/* A 4 is clean, B 5 has a non-zero byte just past its id 0's section. Over the game's own sizes
+ * B is valid and newer, so the game loads B: neither slot may be written (B isn't a clean save to
+ * keep, and A isn't the slot the game loads). Ruby's layout, then FireRed's. */
+TEST(test_hp_arm_padded_loaded) {
+    static const struct {
+        const char* code;
+        FakeGame game;
+        uint16_t pad;
+    } carts[] = {{"AXVE", FakeGameRS, 0x890}, {"BPRE", FakeGameFRLG, 0xF24}};
+    for(size_t i = 0; i < 2; i++) {
+        default_spec();
+        spec.game = carts[i].game;
+        spec.slot_present[1] = true;
+        spec.counter[1] = 5;
+        insert(carts[i].code, 0, MX, NULL);
+        sector(fake_save_phys(&spec, 1, 0))[carts[i].pad] = 0x5A;
+        ASSERT_TRUE(identify());
+        memset(&gba.counts, 0, sizeof(gba.counts));
+        snapshot();
+        ASSERT_EQ(hp_save_active_slot(hp_save_game((const uint8_t*)carts[i].code)), 1);
+        ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_REFUSED);
+        ASSERT_EQ(p[0], HP_REFUSE_SLOT);
+        ASSERT_TRUE(refused_cleanly());
+        ASSERT_EQ(arm(MX, 0, 0, 5), HP_ST_REFUSED);
+        ASSERT_TRUE(refused_cleanly());
+        ASSERT_EQ(arm(MX, 0, 1, 5), HP_ST_REFUSED);
+        ASSERT_TRUE(refused_cleanly());
+        ASSERT_EQ(arm(MX, 1, 1, 5), HP_ST_REFUSED);
+        ASSERT_TRUE(refused_cleanly());
+    }
+    /* the only save, padded: the game loads it, so mode 1 may not write over it */
+    ASSERT_TRUE(setup());
+    sector(fake_save_phys(&spec, 0, 0))[0x890] = 0x5A;
+    snapshot();
+    ASSERT_EQ(arm(MX, 0, 1, 0), HP_ST_REFUSED);
+    ASSERT_TRUE(refused_cleanly());
+    ASSERT_EQ(arm(MX, 1, 1, 0), HP_ST_REFUSED);
+    ASSERT_TRUE(refused_cleanly());
+    /* the reverse: id 0's stored checksum matches its whole data area (a padding word 0x00010000
+     * past 0x890) but not the game's 0x890 bytes. The game loads nothing, yet slot A is a whole
+     * save by the full-length check: mode 1 still refuses to write over it */
+    ASSERT_TRUE(setup());
+    uint8_t* s0 = sector(fake_save_phys(&spec, 0, 0));
+    s0[0x892] = 0x01;
+    const uint16_t full = sum_ref(s0, 0xF80);
+    s0[0xFF6] = (uint8_t)full;
+    s0[0xFF7] = (uint8_t)(full >> 8);
+    snapshot();
+    uint32_t n = 0;
+    ASSERT_TRUE(hp_save_slot_ok(0, &n));
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), -1);
+    ASSERT_EQ(arm(MX, 1, 1, 4), HP_ST_REFUSED);
+    ASSERT_TRUE(refused_cleanly());
+    ASSERT_EQ(arm(MX, 0, 1, 4), HP_ST_REFUSED);
+    ASSERT_TRUE(refused_cleanly());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_REFUSED);
+    ASSERT_TRUE(refused_cleanly());
+    /* a clean FireRed save on a FireRed cart arms */
+    default_spec();
+    spec.game = FakeGameFRLG;
+    insert("BPRE", 0, MX, NULL);
+    ASSERT_TRUE(identify());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_OK);
+}
+
+/* Without a known save layout the helper can't tell which slot the game loads: nothing is armed or
+ * written. CART_INFO's list of writable games implies a layout, so this pins the second check on
+ * its own, with the scanned code changed behind CART_INFO's back. */
+TEST(test_hp_arm_unknown_layout) {
+    ASSERT_TRUE(setup());
+    memcpy(hp.cart.code, "BPEE", 4);
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_LAYOUT);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_LAYOUT);
+    ASSERT_TRUE(no_writes());
+    ASSERT_TRUE(unchanged());
+    /* armed, then the layout is gone: every write is refused */
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    memcpy(hp.cart.code, "ZFGE", 4);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_LAYOUT);
+    ASSERT_TRUE(no_writes());
+    /* a real Emerald cart stops at the cart check */
+    default_spec();
+    insert("BPEE", 0, MX, NULL);
+    ASSERT_TRUE(identify());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_CART);
+}
+
+/* A malformed ARM_WRITE ends the arming, and forgets the erases, before it looks at its
+ * arguments. */
+TEST(test_hp_arm_bad_args_end_arming) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_OK);
+    ASSERT_EQ(hp.flash.erased_ok, 1u << 14);
+    const uint16_t bad_magic[6] = {0x1234, MX, 1, 0, 4, 0};
+    ASSERT_EQ(cmd(HP_CMD_ARM_WRITE, bad_magic, 6), HP_ST_BAD_ARG);
+    ASSERT_EQ(hp.flash.erased_ok, 0);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 15), HP_ST_NOT_ARMED);
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    ASSERT_EQ(arm(MX, 1, 2, 4), HP_ST_BAD_ARG);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 15), HP_ST_NOT_ARMED);
+    ASSERT_EQ(counts().erases, 1);
 }
 
 /* Carts that may never be written: Emerald, Japanese, German, a ROM that links another save
@@ -529,14 +690,17 @@ TEST(test_hp_write_gating) {
     ASSERT_TRUE(unchanged());
 }
 
-/* Malformed write commands: unknown flag bits; a copy whose source isn't in the slot the game
+/* Malformed write commands: flags other than DEFER_COMMIT alone (a write without it would program
+ * the signature before the counter after it); a copy whose source isn't in the slot the game
  * loads. */
 TEST(test_hp_write_args) {
     ASSERT_TRUE(setup());
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
     make_img(2, 5);
+    ASSERT_EQ(write_sector(14, 0, img), HP_ST_BAD_ARG);
     ASSERT_EQ(write_sector(14, 2, img), HP_ST_BAD_ARG);
     ASSERT_EQ(write_sector(14, 0x8001, img), HP_ST_BAD_ARG);
+    ASSERT_EQ(copy_sector(3, 14, 0, 5), HP_ST_BAD_ARG);
     ASSERT_EQ(copy_sector(3, 14, 2, 5), HP_ST_BAD_ARG);
     ASSERT_EQ(copy_sector(20, 14, DEFER, 5), HP_ST_BAD_ARG);
     ASSERT_EQ(copy_sector(28, 14, DEFER, 5), HP_ST_BAD_ARG);
@@ -586,15 +750,17 @@ TEST(test_hp_copy_sector) {
 /* The plan's three passes over slot B: erase, program (deferred), commit. The 14th commit
  * completes the new slot, which the game now loads, so the helper disarms. */
 TEST(test_hp_disarm_after_14_commits) {
+    static uint8_t images[14][SECTOR_LEN];
     ASSERT_TRUE(setup());
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
     for(uint8_t k = 0; k < 14; k++) ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14 + k), HP_ST_OK);
     for(uint8_t k = 0; k < 14; k++) {
         make_img(k, 5);
+        memcpy(images[(k + 1) % 14], img, SECTOR_LEN);
         ASSERT_EQ(write_sector(14 + (k + 1) % 14, DEFER, img), HP_ST_OK);
     }
     for(uint8_t k = 0; k < 13; k++) ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 14 + k), HP_ST_OK);
-    ASSERT_EQ(hp_save_active_slot(), 0);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
     ASSERT_EQ(
         helper_cmd_run(&hp, 0x77, HP_CMD_COMMIT_SECTOR, (const uint16_t[]){27}, 1, resp),
         HP_ST_OK);
@@ -610,22 +776,101 @@ TEST(test_hp_disarm_after_14_commits) {
     uint32_t n = 0;
     ASSERT_TRUE(hp_save_slot_ok(1, &n));
     ASSERT_EQ(n, 5);
-    ASSERT_EQ(hp_save_active_slot(), 1);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 1);
+    /* slot B is exactly the images; slot A and sectors 28..31 are as they were */
+    for(uint32_t k = 0; k < 14; k++) ASSERT_MEM_EQ(sector(14 + k), images[k], SECTOR_LEN);
     for(uint32_t s = 0; s < 14; s++) ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
+    for(uint32_t s = 28; s < 32; s++) {
+        ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
+    }
 }
 
-/* A write without DEFER_COMMIT completes its sector at once: it counts as that sector's commit. */
-TEST(test_hp_write_undeferred) {
+/* A write that would program the signature with the rest of the sector, before the counter after
+ * it, is refused: a power cut between them would leave a valid signature over a torn counter. */
+TEST(test_hp_write_needs_defer) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    make_img(0, 5);
+    ASSERT_EQ(write_sector(14, 0, img), HP_ST_BAD_ARG);
+    ASSERT_EQ(resp[1], 2);
+    ASSERT_EQ(copy_sector(0, 14, 0, 5), HP_ST_BAD_ARG);
+    ASSERT_TRUE(no_writes());
+    ASSERT_TRUE(unchanged());
+    ASSERT_EQ(write_sector(14, DEFER, img), HP_ST_OK);
+}
+
+/* COMMIT_SECTOR completes only what this arming programmed: images a link drop or power cut left
+ * in slot B from an earlier arming can't be committed into the save the game loads. */
+TEST(test_hp_commit_needs_program) {
     ASSERT_TRUE(setup());
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
     for(uint8_t k = 0; k < 14; k++) {
-        make_img(k, 5);
-        ASSERT_EQ(write_sector(14 + k, 0, img), HP_ST_OK);
-        ASSERT_MEM_EQ(sector(14 + k), img, SECTOR_LEN);
+        ASSERT_EQ(copy_sector(k, 14 + (k + 1) % 14, DEFER, 5), HP_ST_OK);
     }
-    ASSERT_EQ(counts().commits, 14);
-    ASSERT_EQ(hp_save_active_slot(), 1);
+    /* a new session and a new arming: the 14 commits are all refused */
+    ASSERT_EQ(cmd(HP_CMD_HELLO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    memset(&gba.counts, 0, sizeof(gba.counts));
+    snapshot();
+    for(uint8_t s = 14; s < 28; s++) {
+        ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, s), HP_ST_REFUSED);
+        ASSERT_EQ(p[0], HP_REFUSE_NOT_PROGRAMMED);
+        ASSERT_EQ(p[1], s);
+    }
+    ASSERT_TRUE(no_writes());
+    ASSERT_TRUE(unchanged());
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
+    /* an erase ends what the arming programmed there; so does a new arming without a HELLO */
+    ASSERT_EQ(copy_sector(3, 17, DEFER, 5), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 17), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 17), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_NOT_PROGRAMMED);
+    ASSERT_EQ(copy_sector(3, 17, DEFER, 5), HP_ST_OK);
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 17), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_NOT_PROGRAMMED);
+    /* what this arming programmed commits: the earlier copies left no valid signature in the way */
+    ASSERT_EQ(copy_sector(3, 18, DEFER, 5), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 18), HP_ST_OK);
+    ASSERT_EQ(sector(18)[0xFF8], 0x25);
+    for(uint32_t s = 0; s < 14; s++) ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
+}
+
+/* CART_INFO scans the cart again, which may not be the one the arming checked: it disarms. */
+TEST(test_hp_cart_info_disarms) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    ASSERT_EQ(cmd(HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_NOT_ARMED);
+    ASSERT_TRUE(no_writes());
+}
+
+/* An erase or a new deferred write of a completed sector un-completes it, so the 14th completion,
+ * which disarms, counts only sectors that are complete now. */
+TEST(test_hp_completed_forgets) {
+    for(int undo = 0; undo < 2; undo++) {
+        ASSERT_TRUE(setup());
+        ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+        for(uint8_t k = 0; k < 14; k++) {
+            make_img(k, 5);
+            ASSERT_EQ(write_sector(14 + k, DEFER, img), HP_ST_OK);
+        }
+        for(uint8_t s = 14; s < 27; s++) ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, s), HP_ST_OK);
+        ASSERT_EQ(hp.completed, 0x1FFF);
+        make_img(0, 5);
+        if(undo == 0) {
+            ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_OK);
+        } else {
+            ASSERT_EQ(write_sector(14, DEFER, img), HP_ST_OK);
+        }
+        ASSERT_EQ(hp.completed, 0x1FFE);
+        ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 27), HP_ST_OK);
+        ASSERT_TRUE(hp.armed); /* 13 complete: sector 14 isn't */
+        if(undo == 0) ASSERT_EQ(write_sector(14, DEFER, img), HP_ST_OK);
+        ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 14), HP_ST_OK);
+        ASSERT_TRUE(!hp.armed);
+        ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 1);
+    }
 }
 
 /* Slot B holds the previous save (counter 3), which the game ignores while A is newer. A sector of
@@ -643,9 +888,8 @@ TEST(test_hp_complete_needs_clear_slot) {
     const FakeGbaCounts c0 = counts();
     ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 14), HP_ST_REFUSED);
     ASSERT_EQ(resp[1], 2);
+    ASSERT_EQ(p[0], HP_REFUSE_VALID);
     ASSERT_EQ(p[1], 15); /* the first sector still valid */
-    ASSERT_EQ(write_sector(14, 0, img), HP_ST_REFUSED);
-    ASSERT_EQ(copy_sector(0, 14, 0, 5), HP_ST_REFUSED);
     ASSERT_EQ(counts().erases, c0.erases);
     ASSERT_EQ(counts().programs, c0.programs);
     ASSERT_EQ(sector(14)[0xFF8], 0xFF);
@@ -659,14 +903,13 @@ TEST(test_hp_complete_needs_clear_slot) {
     make_img(1, 5);
     ASSERT_EQ(write_sector(15, DEFER, img), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 15), HP_ST_OK);
-    ASSERT_EQ(write_sector(16, 0, img), HP_ST_OK);
     /* a new arming doesn't count what an earlier one completed */
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
     ASSERT_EQ(write_sector(17, DEFER, img), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 17), HP_ST_REFUSED);
     ASSERT_EQ(p[1], 14);
     for(uint32_t s = 0; s < 14; s++) ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
-    ASSERT_EQ(hp_save_active_slot(), 0);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), 0);
     /* slot A armed, its sector 0 in the way */
     default_spec();
     spec.slot_present[1] = true;
@@ -738,14 +981,15 @@ TEST(test_hp_mode1_blank) {
     default_spec();
     spec.slot_present[0] = false;
     ASSERT_TRUE(setup_spec());
-    ASSERT_EQ(hp_save_active_slot(), -1);
+    ASSERT_EQ(hp_save_active_slot(HpSaveGameRS), -1);
     ASSERT_EQ(arm(MX, 0, 0, 0), HP_ST_REFUSED);
     ASSERT_EQ(arm(MX, 1, 0, 0), HP_ST_REFUSED);
     ASSERT_TRUE(refused_cleanly());
     ASSERT_EQ(arm(MX, 0, 1, 0), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 0), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_REFUSED);
-    /* both slots present, both damaged */
+    ASSERT_TRUE(others_unchanged(0));
+    /* both slots present, both damaged: a restore into B leaves A as it was */
     default_spec();
     spec.slot_present[1] = true;
     spec.counter[1] = 5;
@@ -753,12 +997,96 @@ TEST(test_hp_mode1_blank) {
     fake_save_break_checksum(gba.flash, 2);
     fake_save_break_checksum(gba.flash, 20);
     ASSERT_TRUE(identify());
+    snapshot();
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_REFUSED);
     ASSERT_EQ(arm(MX, 1, 1, 5), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_OK);
+    make_img(1, 5);
+    ASSERT_EQ(write_sector(15, DEFER, img), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, 15), HP_ST_REFUSED); /* B's other sectors still valid */
+    for(uint32_t s = 0; s < 14; s++) ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
+    for(uint32_t s = 28; s < 32; s++) {
+        ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
+    }
 }
 
 /* ---- Duplicates (plan 5 D3) ---- */
+
+/* The CRC a request carries: over w1, n and its arguments, each word low byte first */
+static uint32_t request_crc(uint16_t w1, const uint16_t* a, uint16_t n) {
+    uint8_t b[4 + 2 * 8];
+    b[0] = (uint8_t)w1;
+    b[1] = (uint8_t)(w1 >> 8);
+    b[2] = (uint8_t)n;
+    b[3] = (uint8_t)(n >> 8);
+    for(uint16_t i = 0; i < n; i++) {
+        b[4 + 2 * i] = (uint8_t)a[i];
+        b[5 + 2 * i] = (uint8_t)(a[i] >> 8);
+    }
+    return crc32_ref(b, 4u + 2u * n);
+}
+
+/* x with the XOR of g[i] over x's set bits equal to t (Gaussian elimination over GF(2)) */
+static bool solve32(const uint32_t g[32], uint32_t t, uint32_t* x) {
+    uint32_t row[32];
+    uint32_t comb[32];
+    bool have[32] = {false};
+    for(uint32_t i = 0; i < 32; i++) {
+        uint32_t v = g[i];
+        uint32_t c = 1u << i;
+        for(int b = 31; b >= 0 && v; b--) {
+            if(!((v >> b) & 1u)) continue;
+            if(!have[b]) {
+                have[b] = true;
+                row[b] = v;
+                comb[b] = c;
+                break;
+            }
+            v ^= row[b];
+            c ^= comb[b];
+        }
+    }
+    uint32_t c = 0;
+    for(int b = 31; b >= 0; b--) {
+        if(!((t >> b) & 1u)) continue;
+        if(!have[b]) return false;
+        t ^= row[b];
+        c ^= comb[b];
+    }
+    *x = c;
+    return true;
+}
+
+/* A request with the last one's code and CRC but another seq is a new request: CRC-32 is linear,
+ * so changing the counter words (the last 32 bits) can cancel the seq's change exactly. Executed,
+ * this ARM_WRITE is refused (its N is wrong) and ends the arming; answered from memory it would
+ * say OK. */
+TEST(test_hp_dedupe_seq) {
+    ASSERT_TRUE(setup());
+    const uint16_t a[6] = {ARM_MAGIC, MX, 1, 0, 4, 0};
+    const uint16_t w1a = 0x60 << 8 | HP_CMD_ARM_WRITE;
+    const uint16_t w1b = 0x61 << 8 | HP_CMD_ARM_WRITE;
+    const uint32_t base = request_crc(w1a, a, 6);
+    uint32_t g[32];
+    for(uint32_t i = 0; i < 32; i++) {
+        uint16_t d[6];
+        memcpy(d, a, sizeof(d));
+        d[4 + i / 16] ^= (uint16_t)(1u << (i % 16));
+        g[i] = request_crc(w1a, d, 6) ^ base;
+    }
+    uint32_t x = 0;
+    ASSERT_TRUE(solve32(g, request_crc(w1b, a, 6) ^ base, &x));
+    uint16_t b[6];
+    memcpy(b, a, sizeof(b));
+    b[4] ^= (uint16_t)x;
+    b[5] ^= (uint16_t)(x >> 16);
+    ASSERT_EQ(request_crc(w1b, b, 6), base);
+    ASSERT_TRUE(x != 0);
+    ASSERT_EQ(helper_cmd_run(&hp, 0x60, HP_CMD_ARM_WRITE, a, 6, resp), HP_ST_OK);
+    ASSERT_EQ(helper_cmd_run(&hp, 0x61, HP_CMD_ARM_WRITE, b, 6, resp), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_SLOT);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_NOT_ARMED);
+}
 
 TEST(test_hp_dedupe_write_resend) {
     ASSERT_TRUE(setup());
@@ -892,8 +1220,12 @@ int main(void) {
     RUN(test_hp_sector_crc32);
     RUN(test_hp_read_refused_unless_flash128);
     RUN(test_hp_save_slots);
+    RUN(test_hp_save_layouts);
     RUN(test_hp_arm_ok);
     RUN(test_hp_arm_refused_matrix);
+    RUN(test_hp_arm_padded_loaded);
+    RUN(test_hp_arm_unknown_layout);
+    RUN(test_hp_arm_bad_args_end_arming);
     RUN(test_hp_arm_refused_carts);
     RUN(test_hp_arm_refused_id_d4bf);
     RUN(test_hp_write_gating);
@@ -901,13 +1233,17 @@ int main(void) {
     RUN(test_hp_write_full_path);
     RUN(test_hp_copy_sector);
     RUN(test_hp_disarm_after_14_commits);
-    RUN(test_hp_write_undeferred);
+    RUN(test_hp_write_needs_defer);
+    RUN(test_hp_commit_needs_program);
+    RUN(test_hp_cart_info_disarms);
+    RUN(test_hp_completed_forgets);
     RUN(test_hp_complete_needs_clear_slot);
     RUN(test_hp_arm_clears_erased_ok);
     RUN(test_hp_hello_disarms);
     RUN(test_hp_flash_error_disarms);
     RUN(test_hp_mode1_blank);
     RUN(test_hp_dedupe_write_resend);
+    RUN(test_hp_dedupe_seq);
     RUN(test_hp_dedupe_rules);
     RUN(test_hp_rom_read);
     RUN(test_hp_rom_crc32);

@@ -48,10 +48,13 @@
 #define HP_REFUSE_SLOT 4u /* the save's slots don't allow ARM_WRITE's target and mode */
 #define HP_REFUSE_SECTOR 5u /* a sector outside the armed slot, Hall of Fame and after included */
 #define HP_REFUSE_VALID 6u /* another sector of the armed slot still holds a valid signature */
+#define HP_REFUSE_NOT_PROGRAMMED 7u /* COMMIT_SECTOR on a sector this arming didn't program */
+#define HP_REFUSE_LAYOUT 8u /* the cart's game code has no save layout the helper knows */
 
 /* ARM_WRITE's first word, "WR" */
 #define HP_ARM_MAGIC 0x5752u
-/* WRITE_SECTOR's and COPY_SECTOR's flags: leave 0xFF8 erased for COMMIT_SECTOR */
+/* WRITE_SECTOR's and COPY_SECTOR's flags: leave 0xFF8 erased for COMMIT_SECTOR. Required: a write
+ * without it is BAD_ARG. */
 #define HP_FLAG_DEFER_COMMIT 0x0001u
 
 /* CART_INFO's flags word */
@@ -90,17 +93,20 @@ struct Hp {
     /* The sectors this session erased OK and hasn't programmed since; HELLO and ARM_WRITE start
      * afresh */
     HpFlash flash;
-    /* ARM_WRITE allowed writes to the 14 sectors of slot arm_slot (multiboot-and-save.md §6.3) */
+    /* ARM_WRITE allowed writes to the 14 sectors of slot arm_slot (multiboot-and-save.md §6.3).
+     * Bit k of each mask is sector 14 * arm_slot + k, since the arming: */
     bool armed;
     uint8_t arm_slot;
-    /* Bit k: since the arming, sector 14 * arm_slot + k got its valid signature from this helper
-     * (COMMIT_SECTOR, or a write without DEFER_COMMIT) and hasn't been erased or written since */
-    uint16_t completed;
+    uint16_t programmed; /* a deferred WRITE or COPY wrote it OK, and nothing erased or wrote it
+                          * since: COMMIT_SECTOR may complete it */
+    uint16_t completed; /* COMMIT_SECTOR gave it its valid signature, and nothing erased or wrote
+                         * it since */
     /* WRITE_SECTOR's image, COPY_SECTOR's copy, READ_SECTOR's data */
     uint8_t sector_buf[HP_FLASH_SECTOR_LEN];
-    /* The last packet executed (plan 5 D3): its CRC, and its response's length; the response
-     * itself stays in resp until the next one executes */
+    /* The last packet executed (plan 5 D3): its w1 (seq, code), its CRC, and its response's
+     * length; the response itself stays in resp until the next one executes */
     bool last_valid;
+    uint16_t last_w1;
     uint32_t last_crc;
     uint16_t last_len;
 };
@@ -120,7 +126,7 @@ void hp_init(Hp* hp);
 uint16_t hp_step(Hp* hp, uint16_t in, uint8_t flags);
 bool hp_exec_pending(const Hp* hp);
 /* Runs the pending command and queues its response; returns the response's first word, HP_SOF.
- * A write-class command (ARM_WRITE, ERASE_SECTOR .. COMMIT_SECTOR) whose packet is byte-identical
- * to the last one executed is not run again: P resent it because the response went missing, and
- * gets that response again (plan 5 D3). */
+ * A write-class command (ARM_WRITE, ERASE_SECTOR .. COMMIT_SECTOR) with the same seq, code and
+ * packet CRC as the last packet executed is not run again: P resent it because the response went
+ * missing, and gets that response again (plan 5 D3). */
 uint16_t hp_execute(Hp* hp);
