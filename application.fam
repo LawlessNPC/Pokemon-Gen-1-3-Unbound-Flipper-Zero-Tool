@@ -7,7 +7,7 @@ App(
     stack_size=2 * 1024,
     fap_version=[3,0],
     fap_category="GPIO",
-    sources=["*.c*", "!tests"],
+    sources=["*.c*", "!tests", "!gba"],
     fap_icon="pokemon_10px.png",
     fap_icon_assets="assets",
     fap_file_assets="files",
