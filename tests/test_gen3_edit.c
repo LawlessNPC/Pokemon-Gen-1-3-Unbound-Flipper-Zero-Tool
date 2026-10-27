@@ -262,6 +262,41 @@ TEST(test_edit_species_fateful) {
     ASSERT_TRUE(edit_consistent(&ed));
 }
 
+/* The fateful-encounter bit by itself (decrypted raw 0x4F bit 7), for a Mew or Deoxys that came
+ * without it; pristine follows gen3_edit.h */
+TEST(test_edit_set_fateful) {
+    Gen3Editor ed;
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_EQ(G(Fateful), 0); /* BULBASAUR */
+    Gen3Editor before = ed;
+    gen3_edit_set_fateful(&ed, false);
+    ASSERT_TRUE(editor_eq(&ed, &before));
+    ASSERT_TRUE(ed.pristine);
+    gen3_edit_set_fateful(&ed, true);
+    ASSERT_EQ(G(Fateful), 1);
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 151));
+    ASSERT_EQ(G(Fateful), 1);
+    const Gen3Pkm mew = ed.pkm;
+    gen3_edit_set_fateful(&ed, false);
+    ASSERT_EQ(G(Fateful), 0);
+    ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(edit_consistent(&ed));
+    /* Only that bit and the checksum changed */
+    ASSERT_EQ(ed.pkm.raw[0x4F], mew.raw[0x4F] & 0x7F);
+    for(int i = 0; i < GEN3_PARTY_SIZE; i++) {
+        if(i == 0x1C || i == 0x1D || i == 0x4F) continue;
+        ASSERT_EQ(ed.pkm.raw[i], mew.raw[i]);
+    }
+    gen3_edit_set_fateful(&ed, true);
+    ASSERT_EQ(G(Fateful), 1);
+    ASSERT_MEM_EQ(ed.pkm.raw, mew.raw, GEN3_PARTY_SIZE);
+    ASSERT_TRUE(edit_consistent(&ed));
+}
+
 TEST(test_edit_all_species) {
     static const uint8_t levels[2] = {1, 100};
     for(int li = 0; li < 2; li++) {
@@ -1625,6 +1660,9 @@ TEST(test_edit_pristine_flags) {
     ASSERT_TRUE(gen3_edit_init(&ed, 7));
     ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
     ASSERT_TRUE(!ed.pristine);
+    ASSERT_TRUE(gen3_edit_init(&ed, 7));
+    gen3_edit_set_fateful(&ed, true);
+    ASSERT_TRUE(!ed.pristine);
 
     /* No change: kept */
     ASSERT_TRUE(gen3_edit_init(&ed, 7));
@@ -1637,6 +1675,7 @@ TEST(test_edit_pristine_flags) {
     gen3_edit_set_item(&ed, 0);
     gen3_edit_set_ball(&ed, GEN3_EDIT_BALL);
     gen3_edit_set_pokerus(&ed, 0);
+    gen3_edit_set_fateful(&ed, false);
     ASSERT_EQ(gen3_edit_set_ot_id(&ed, GEN3_EDIT_DEFAULT_TID, GEN3_EDIT_DEFAULT_SID), Gen3OtIdOk);
     gen3_edit_set_ot_name(&ed, GEN3_EDIT_DEFAULT_OT_NAME);
     ASSERT_TRUE(editor_eq(&ed, &before));
@@ -1670,6 +1709,7 @@ int main(void) {
     RUN(test_edit_species_same_is_noop);
     RUN(test_edit_species_skips_shiny_pid);
     RUN(test_edit_species_fateful);
+    RUN(test_edit_set_fateful);
     RUN(test_edit_all_species);
     RUN(test_edit_level);
     RUN(test_edit_level_clamped);

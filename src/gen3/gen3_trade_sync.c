@@ -2,6 +2,7 @@
 
 #include <string.h>
 #include <src/gen3/gen3_data.h>
+#include <src/gen3/gen3_partner.h>
 
 void gen3_trainer_from_link_player(const Gen3LinkPlayer* lp, Gen3Trainer* out) {
     memset(out, 0, sizeof(*out));
@@ -101,8 +102,10 @@ static unsigned sync_trainer(Gen3TradeSync* sync, Gen3Editor* ed, const Gen3Club
     return Gen3SyncTrainer;
 }
 
-/* Step 3 (D8, O2): only a Pokemon that passes gen3_trade_offer_check is ever offered */
-static unsigned sync_offer(Gen3TradeSync* sync, const Gen3Editor* ed) {
+/* Step 3 (D8, O2): only a Pokemon that passes gen3_trade_offer_check is ever offered. A valid
+ * one goes out with its traits even while the GBA's own rules refuse it (st->partner_rules): the
+ * club applies the rules of the GBA linked when it shows the offer, which may be a later one. */
+static unsigned sync_offer(Gen3TradeSync* sync, const Gen3Editor* ed, const Gen3ClubStatus* st) {
     /* The user loaded or made another Pokemon: the traded-away one is gone from the editor */
     if(sync->pickup_fail == Gen3PickupBadData && sync->gone_valid &&
        (gen3_pkm_get(&ed->pkm, Gen3FieldPid) != sync->gone_pid ||
@@ -112,7 +115,10 @@ static unsigned sync_offer(Gen3TradeSync* sync, const Gen3Editor* ed) {
     }
     sync->offer_refuse = gen3_trade_offer_check(&ed->pkm);
     sync->offer_valid = sync->offer_refuse == Gen3RefuseNone && sync->pickup_fail == Gen3PickupOk;
+    sync->offer_traits = 0;
     if(sync->offer_valid) {
+        sync->offer_traits = gen3_offer_traits(&ed->pkm);
+        sync->offer_refuse = gen3_partner_refuse(&st->partner_rules, sync->offer_traits);
         gen3_pkm_encrypt(&ed->pkm, sync->offer);
     } else {
         memset(sync->offer, 0, sizeof(sync->offer));
@@ -134,7 +140,7 @@ unsigned gen3_trade_sync_poll(
     if(editing) return 0;
     unsigned result = sync_pickup(sync, ed, received, received_count);
     result |= sync_trainer(sync, ed, st);
-    result |= sync_offer(sync, ed);
+    result |= sync_offer(sync, ed, st);
     return result;
 }
 
@@ -238,8 +244,12 @@ static void guide_pick(
                               (st->last_result == Gen3TradeResultRolledBack ||
                                st->last_result == Gen3TradeResultAssumed);
     /* left can come with a trade still pending (a 0x1144 relink that never came, before sync 1):
-     * it says nothing about the trade */
-    if(st->left && !lost_in_save) SAY("Link ended. You can", "unplug the GBA.", "");
+     * it says nothing about the trade. A GBA linked after it walked back in while a pickup waits:
+     * the Flipper won't sit, and unplugging it now would be a link error on it */
+    if(st->left && !lost_in_save) {
+        if(gba_linked(st)) SAY("Walk out on the GBA,", "then unplug.", "");
+        SAY("Link ended. You can", "unplug the GBA.", "");
+    }
     /* Ahead of the menu rows: no "offer changed" hint while leaving */
     if(st->leaving && !lost_in_save)
         SAY("Ending: the GBA walks", "out of the Trade", "Center by itself.");
@@ -254,7 +264,16 @@ static void guide_pick(
         SAY("Can't take the traded", "Pokemon: data file", "unreadable. Retrying.");
     if(pickup_fail == Gen3PickupBadData)
         SAY("Can't take the traded", "Pokemon: bad data.", "Load or pick another.");
-    if(offer_refuse != Gen3RefuseNone) {
+    /* The GBA's own rules refuse the offer (an FRLG GBA): the club neither sits nor shows it. Only
+     * while a GBA is linked: the rules outlive the link, so unlinked they may be the last
+     * cartridge's, while the user walks another one to the counter (the Waiting rows instead) */
+    if(offer_refuse == Gen3RefuseNationalDex || offer_refuse == Gen3RefuseFateful) {
+        if(gba_linked(st)) {
+            if(offer_refuse == Gen3RefuseNationalDex)
+                SAY("Can't offer it: GBA", "has no National Dex.", "Get it, or pick 1-151");
+            SAY("Can't offer it: FRLG", "needs Fateful: Yes on", "Mew/Deoxys: edit it.");
+        }
+    } else if(offer_refuse != Gen3RefuseNone) {
         /* R5: the Flipper sits as soon as there is a valid offer */
         if(st->phase == Gen3ClubPhaseRoom && st->gba_seated)
             SAY("Can't offer it:", guide_reason(offer_refuse), "Edit it; stay seated.");

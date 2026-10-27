@@ -6,6 +6,7 @@
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_link_player.h>
+#include <src/gen3/gen3_partner.h>
 #include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_rules.h>
 #include <src/gen3/gen3_trade_block.h>
@@ -720,6 +721,205 @@ TEST(test_sync_bad_offer_unpublished) {
     ASSERT_TRUE(!sync.offer_valid);
 }
 
+/* ---- The GBA's own rules (FireRed/LeafGreen): the offer's traits, and why the GBA linked last
+ * won't take it. Such an offer is still published: the club decides, with the rules of the GBA
+ * linked at that moment. ---- */
+
+/* A status in Room whose GBA has these rules; refused None */
+static void status_rules(Gen3ClubStatus* st, Gen3LinkGame game, bool national_dex) {
+    status_reset(st, Gen3ClubPhaseRoom);
+    st->partner_rules.game = game;
+    st->partner_rules.national_dex = national_dex;
+}
+
+/* A fresh editor holding that species: 252 TREECKO (FRLG takes it only with the National Dex),
+ * 151 MEW, 386 DEOXYS */
+static bool editor_at(Gen3Editor* ed, uint16_t national) {
+    return gen3_edit_init(ed, 7) && gen3_edit_set_species(ed, national);
+}
+
+TEST(test_sync_frlg_no_natdex) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(editor_at(&ed, 252));
+    gen3_trade_sync_init(&sync);
+    status_rules(&st, Gen3LinkGameFRLG, false);
+
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed)); /* published: the club won't show it */
+    ASSERT_EQ(sync.offer_traits, Gen3OfferNonKanto);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNationalDex);
+    gen3_trade_sync_offer_taken(&sync);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNationalDex);
+
+    /* A Kanto Pokemon: nothing refused */
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_traits, 0);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+
+    /* DEOXYS: both traits, and the National Dex comes first */
+    ASSERT_TRUE(editor_at(&ed, 386));
+    gen3_edit_set_fateful(&ed, false);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_traits, Gen3OfferNonKanto | Gen3OfferUnfateful);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNationalDex);
+}
+
+TEST(test_sync_frlg_natdex) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(editor_at(&ed, 252));
+    gen3_trade_sync_init(&sync);
+    status_rules(&st, Gen3LinkGameFRLG, true);
+
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_traits, Gen3OfferNonKanto);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+}
+
+/* Only an FRLG partner refuses; the traits are the offer's whatever the partner */
+TEST(test_sync_ruby_ignores_rules) {
+    static const Gen3LinkGame games[] = {Gen3LinkGameUnknown, Gen3LinkGameRS, Gen3LinkGameE};
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    for(unsigned g = 0; g < sizeof(games) / sizeof(games[0]); g++) {
+        for(int natdex = 0; natdex <= 1; natdex++) {
+            status_rules(&st, games[g], natdex);
+            gen3_trade_sync_init(&sync);
+            ASSERT_TRUE(editor_at(&ed, 252));
+            ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+            ASSERT_TRUE(offer_is_editor(&sync, &ed));
+            ASSERT_EQ(sync.offer_traits, Gen3OfferNonKanto);
+            ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+
+            ASSERT_TRUE(editor_at(&ed, 151));
+            gen3_edit_set_fateful(&ed, false);
+            ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+            ASSERT_TRUE(offer_is_editor(&sync, &ed));
+            ASSERT_EQ(sync.offer_traits, Gen3OfferUnfateful);
+            ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+        }
+    }
+}
+
+TEST(test_sync_unfateful_mew) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(editor_at(&ed, 151));
+    gen3_trade_sync_init(&sync);
+    status_rules(&st, Gen3LinkGameFRLG, true);
+
+    gen3_edit_set_fateful(&ed, false);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_traits, Gen3OfferUnfateful);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseFateful);
+    gen3_trade_sync_offer_taken(&sync);
+
+    gen3_edit_set_fateful(&ed, true);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_traits, 0);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+}
+
+/* Another GBA with other rules: the reason follows it, and the offer taken still holds (the club
+ * applies the new rules itself) */
+TEST(test_sync_partner_change) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(editor_at(&ed, 252));
+    gen3_trade_sync_init(&sync);
+    status_rules(&st, Gen3LinkGameRS, true);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+    gen3_trade_sync_offer_taken(&sync);
+
+    status_rules(&st, Gen3LinkGameFRLG, false);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_traits, Gen3OfferNonKanto);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNationalDex);
+
+    status_rules(&st, Gen3LinkGameRS, true);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), 0);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+}
+
+/* gen3_trade_offer_check first: a Pokemon no game may take has no traits and no partner reason.
+ * The editor can't hold Mail, so poke it. */
+TEST(test_sync_check_before_partner) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(editor_at(&ed, 252));
+    gen3_trade_sync_init(&sync);
+    status_rules(&st, Gen3LinkGameFRLG, false);
+    gen3_pkm_set(&ed.pkm, Gen3FieldHeldItem, 121);
+    gen3_pkm_fix_checksum(&ed.pkm);
+
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseMail);
+    ASSERT_EQ(sync.offer_traits, 0);
+}
+
+/* O2 under the GBA's rules: the Pokemon traded away is never offered again, whichever GBA is
+ * linked, and a blocked offer has no traits and no partner reason */
+TEST(test_sync_frlg_keeps_pickup_block) {
+    Gen3Editor ed;
+    Gen3TradeSync sync;
+    Gen3ClubStatus st;
+    uint8_t rx[GEN3_PARTY_SIZE] = {0};
+    ASSERT_TRUE(editor_at(&ed, 252));
+    gen3_trade_sync_init(&sync);
+    status_rules(&st, Gen3LinkGameFRLG, true);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    gen3_trade_sync_offer_taken(&sync);
+
+    golden_game(rx);
+    rx[0x30] ^= 1; /* doesn't decrypt: BadData */
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), Gen3SyncPickupBad | Gen3SyncOffer);
+    ASSERT_EQ(sync.pickup_fail, Gen3PickupBadData);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_EQ(sync.offer_traits, 0);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+    gen3_trade_sync_offer_taken(&sync);
+
+    /* Another GBA, without the National Dex: still blocked, and no reason of its own */
+    status_rules(&st, Gen3LinkGameFRLG, false);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 1), 0);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+    gen3_trade_sync_restart(&sync);
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(!sync.offer_valid);
+    ASSERT_EQ(sync.offer_traits, 0);
+
+    /* Another Pokemon frees the editor */
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 4));
+    ASSERT_EQ(poll(&sync, &ed, &st, rx, 0), Gen3SyncOffer);
+    ASSERT_TRUE(offer_is_editor(&sync, &ed));
+    ASSERT_EQ(sync.offer_refuse, Gen3RefuseNone);
+}
+
 /* R7: the ENIGMA BERRY holder for the device check (checklist H.3) */
 TEST(test_enigma_fixture) {
     Gen3Pkm p;
@@ -1170,15 +1370,35 @@ TEST(test_guide_texts) {
     GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
     st.last_result = Gen3TradeResultDone;
     GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
-    /* An older trade's outcome: a later trade pending, a relink's gap, the GBA linked again */
+    /* An older trade's outcome: a later trade pending, a relink's gap, the GBA linked again. A
+     * GBA linked after the leave (it walked back in while a pickup waits) is walked out first:
+     * unplugged now, it would show a link error */
     st.last_result = Gen3TradeResultAssumed;
     st.trade_pending = true;
     GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
     st.trade_pending = false;
     st.relinking = true;
-    GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
+    GUIDE(&st, no, ok, "Walk out on the GBA,", "then unplug.", "");
     st.relinking = false;
     st.phase = Gen3ClubPhaseRoom;
+    GUIDE(&st, no, ok, "Walk out on the GBA,", "then unplug.", "");
+
+    /* left with a GBA linked, whatever else is set below the save's outcome */
+    status_reset(&st, Gen3ClubPhaseRoom);
+    st.left = true;
+    st.gba_seated = true;
+    GUIDE(&st, no, ok, "Walk out on the GBA,", "then unplug.", "");
+    GUIDE(
+        &st, Gen3RefuseNationalDex, Gen3PickupNoData, "Walk out on the GBA,", "then unplug.", "");
+    status_reset(&st, Gen3ClubPhaseMenu);
+    st.left = true;
+    st.offer_stale = true;
+    GUIDE(&st, no, ok, "Walk out on the GBA,", "then unplug.", "");
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    st.left = true;
+    st.relinking = true;
+    GUIDE(&st, no, ok, "Walk out on the GBA,", "then unplug.", "");
+    st.relinking = false;
     GUIDE(&st, no, ok, "Link ended. You can", "unplug the GBA.", "");
 
     /* leaving: no "offer changed" hint in the menu */
@@ -1244,8 +1464,9 @@ TEST(test_guide_texts) {
         REASON[Gen3RefuseItem],
         "Edit it; stay seated.");
 
-    /* No valid offer, each reason */
-    for(Gen3Refuse r = Gen3RefuseEmpty; r <= Gen3RefuseFateful; r++) {
+    /* No valid offer, each reason of gen3_trade_offer_check (the GBA's own rules have their own
+     * rows: test_guide_frlg_rows) */
+    for(Gen3Refuse r = Gen3RefuseEmpty; r <= Gen3RefuseBadData; r++) {
         status_reset(&st, Gen3ClubPhaseWaiting);
         st.last_result = Gen3TradeResultRolledBack;
         GUIDE(&st, r, ok, "Can't offer it:", REASON[r], "Edit it first.");
@@ -1356,6 +1577,79 @@ TEST(test_guide_texts) {
     GUIDE(&st, no, ok, "Please wait...", "", "");
 }
 
+/* The GBA's own rules refuse the offer (FireRed/LeafGreen): rows of their own, after the pickup
+ * rows, only while a GBA is linked. The rules outlive the link: unlinked, they may be another
+ * cartridge's, so the Waiting rows show instead. */
+static const char* const ROW_NATDEX[GEN3_GUIDE_LINES] = {
+    "Can't offer it: GBA",
+    "has no National Dex.",
+    "Get it, or pick 1-151",
+};
+static const char* const ROW_FATEFUL[GEN3_GUIDE_LINES] = {
+    "Can't offer it: FRLG",
+    "needs Fateful: Yes on",
+    "Mew/Deoxys: edit it.",
+};
+#define GUIDE_ROW(st, r, pf, row) GUIDE((st), (r), (pf), (row)[0], (row)[1], (row)[2])
+
+TEST(test_guide_frlg_rows) {
+    Gen3ClubStatus st;
+    const Gen3Refuse nd = Gen3RefuseNationalDex;
+    const Gen3Refuse fa = Gen3RefuseFateful;
+    const Gen3PickupFail ok = Gen3PickupOk;
+
+    /* Linked: the trade menu's way in, the room, the menu, a close */
+    for(int phase = Gen3ClubPhaseLinked; phase <= Gen3ClubPhaseSave; phase++) {
+        if(phase == Gen3ClubPhaseError) continue;
+        status_reset(&st, (Gen3ClubPhase)phase);
+        GUIDE_ROW(&st, nd, ok, ROW_NATDEX);
+        GUIDE_ROW(&st, fa, ok, ROW_FATEFUL);
+    }
+    /* Seated: no "stay seated" variant */
+    status_reset(&st, Gen3ClubPhaseRoom);
+    st.gba_seated = true;
+    GUIDE_ROW(&st, nd, ok, ROW_NATDEX);
+    GUIDE_ROW(&st, fa, ok, ROW_FATEFUL);
+    /* Ahead of the menu's "Updating the trade menu" */
+    status_reset(&st, Gen3ClubPhaseMenu);
+    st.offer_stale = true;
+    st.trades_done = 1;
+    GUIDE_ROW(&st, nd, ok, ROW_NATDEX);
+    GUIDE_ROW(&st, fa, ok, ROW_FATEFUL);
+    /* A relink's gap is linked */
+    status_reset(&st, Gen3ClubPhaseWaiting);
+    st.relinking = true;
+    GUIDE_ROW(&st, nd, ok, ROW_NATDEX);
+    GUIDE_ROW(&st, fa, ok, ROW_FATEFUL);
+
+    /* No GBA linked: the Waiting rows, as with no refusal */
+    for(Gen3Refuse r = nd; r <= fa; r++) {
+        status_reset(&st, Gen3ClubPhaseWaiting);
+        GUIDE(&st, r, ok, "Go to the Cable Club:", "Pokemon Center 2F,", "right counter.");
+        st.last_result = Gen3TradeResultRolledBack;
+        GUIDE(&st, r, ok, "Link lost while the", "GBA saved. It keeps", "its old save.");
+    }
+
+    /* The rows above them still win */
+    status_reset(&st, Gen3ClubPhaseRoom);
+    ASSERT_TRUE(
+        guide_is(&st, true, false, nd, ok, "Plug in the cable", "(or swap its ends).", ""));
+    st.save_window = true;
+    GUIDE(&st, nd, ok, "The GBA is saving.", "Don't unplug or turn", "off. Back is locked.");
+    status_reset(&st, Gen3ClubPhaseMenu);
+    st.trade_pending = true;
+    GUIDE(&st, fa, ok, "Trading...", "Watch the GBA.", "");
+    status_reset(&st, Gen3ClubPhaseRoom);
+    st.gba_seated = true;
+    GUIDE(
+        &st,
+        nd,
+        Gen3PickupNoData,
+        "Can't take the traded",
+        "Pokemon: data file",
+        "unreadable. Retrying.");
+}
+
 /* Every line fits FontSecondary across 128 px (21 characters) for every combination */
 static unsigned long guide_calls;
 static bool guide_saw_confirm, guide_saw_next;
@@ -1388,6 +1682,22 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
             "  guide in a relink gap: phase %d result %d: \"%s\"\n",
             st->phase,
             st->last_result,
+            out[0]);
+        return false;
+    }
+    /* "unplug" only with no GBA linked; the GBA's own rules only with one linked (unlinked, they
+     * may be another cartridge's) */
+    const bool linked = st->phase != Gen3ClubPhaseWaiting || st->relinking;
+    const bool partner = offer == Gen3RefuseNationalDex || offer == Gen3RefuseFateful;
+    if((linked && strcmp(out[0], "Link ended. You can") == 0) ||
+       (!linked && strcmp(out[0], "Walk out on the GBA,") == 0) ||
+       (!linked && partner && strncmp(out[0], "Can't offer it", strlen("Can't offer it")) == 0)) {
+        printf(
+            "  guide, linked %d: phase %d relinking %d offer %d: \"%s\"\n",
+            linked,
+            st->phase,
+            st->relinking,
+            offer,
             out[0]);
         return false;
     }
@@ -1501,6 +1811,13 @@ int main(void) {
     RUN_BULK(test_sync_restart_like_init);
     RUN_BULK(test_sync_holds_while_editing);
     RUN_BULK(test_sync_bad_offer_unpublished);
+    RUN_BULK(test_sync_frlg_no_natdex);
+    RUN_BULK(test_sync_frlg_natdex);
+    RUN_BULK(test_sync_ruby_ignores_rules);
+    RUN_BULK(test_sync_unfateful_mew);
+    RUN_BULK(test_sync_partner_change);
+    RUN_BULK(test_sync_check_before_partner);
+    RUN_BULK(test_sync_frlg_keeps_pickup_block);
     RUN_BULK(test_enigma_fixture);
     RUN_BULK(test_sync_settled);
     RUN_BULK(test_trade_stop_allowed);
@@ -1509,6 +1826,7 @@ int main(void) {
     RUN_BULK(test_trade_back_action);
     RUN_BULK(test_trade_left_stop);
     RUN_BULK(test_guide_texts);
+    RUN_BULK(test_guide_frlg_rows);
     RUN_BULK(test_guide_line_lengths);
     RUN_BULK(test_guide_copy_reports_cut);
     TEST_EXIT();

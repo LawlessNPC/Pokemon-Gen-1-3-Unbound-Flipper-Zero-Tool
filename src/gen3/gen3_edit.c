@@ -423,6 +423,13 @@ void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value) {
     ed_note_change(ed, &before);
 }
 
+void gen3_edit_set_fateful(Gen3Editor* ed, bool on) {
+    Gen3Pkm before = ed->pkm;
+    gen3_pkm_set(&ed->pkm, Gen3FieldFateful, on ? 1 : 0);
+    ed_commit(ed);
+    ed_note_change(ed, &before);
+}
+
 /* want equals the current traits once normalised as gen3_pid_find does: gender ignored for a
  * fixed ratio, the slot for one ability, the letter unless Unown. Never for an unknown species,
  * which gen3_pid_find refuses. */

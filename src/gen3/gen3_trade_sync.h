@@ -30,7 +30,9 @@ typedef struct Gen3TradeSync {
     Gen3Trainer trainer; /* last trainer handed to the editor */
     bool offer_valid; /* offer holds the editor's Pokemon, game form; false: offer nothing */
     uint8_t offer[GEN3_PARTY_SIZE]; /* zeros unless offer_valid */
-    Gen3Refuse offer_refuse; /* why the editor's Pokemon can't be offered; None if it can */
+    /* Why the editor's Pokemon can't be offered (gen3_trade_offer_check), or, when offer_valid,
+     * why the GBA's own rules refuse it (gen3_partner_refuse: an FRLG GBA); None if neither */
+    Gen3Refuse offer_refuse;
     bool taken; /* the session took an offer: */
     bool taken_valid; /* the (offer_valid, offer) it holds */
     uint8_t taken_offer[GEN3_PARTY_SIZE];
@@ -41,6 +43,7 @@ typedef struct Gen3TradeSync {
     bool gone_valid;
     uint32_t gone_pid;
     uint32_t gone_ot_id;
+    uint8_t offer_traits; /* gen3_offer_traits(&ed->pkm) when offer_valid, else 0 */
 } Gen3TradeSync;
 
 void gen3_trade_sync_init(Gen3TradeSync* sync);
@@ -75,9 +78,14 @@ enum {
  *    a set_trainer that changes the editor's PID or OT ID moves gone_* with it.
  * 3. A BadData pickup is cleared once the editor's PID or OT ID differs from gone_*. Then
  *    offer_refuse = gen3_trade_offer_check(&ed->pkm), offer_valid = offer_refuse None and no
- *    failed pickup, offer = the game form when valid (only a Pokemon that passes the check is
- *    ever published: the club doesn't check, as it may not decrypt in a PRIMASK section). Offer
- *    if nothing was taken yet, or (offer_valid, offer) differs from what was taken. */
+ *    failed pickup (O2: the Pokemon traded away is never offered again), offer = the game form
+ *    when valid (only a Pokemon that passes the check is ever published: the club doesn't check,
+ *    as it may not decrypt in a PRIMASK section). When valid, offer_traits =
+ *    gen3_offer_traits(&ed->pkm), then offer_refuse = gen3_partner_refuse(&st->partner_rules,
+ *    offer_traits); else offer_traits = 0. A valid offer is published even while the GBA's rules
+ *    refuse it: the club decides, with its traits and the rules of the GBA linked at that moment.
+ *    Offer if nothing was taken yet, or (offer_valid, offer) differs from what was taken (the
+ *    traits follow from the offer, and a new GBA's rules alone offer nothing). */
 unsigned gen3_trade_sync_poll(
     Gen3TradeSync* sync,
     Gen3Editor* ed,
@@ -146,11 +154,16 @@ Gen3TradeBackAction gen3_trade_back_action(const Gen3ClubStatus* st, bool runnin
  * cable_ok: the cable reads right; offer_refuse and pickup_fail: the sync's. Unused lines are "".
  * The guide never reads left as "trade resolved", nor refused alone as "no offer" (an R8 DDEE
  * leaves it None). The outcome of a trade whose link was lost in the GBA's save (RolledBack,
- * Assumed) outranks left and leaving, which End trade during that trade brings too. Waiting with
- * relinking (a relink's gap) reads as linked: "Linking...", never the Waiting rows. Closing with
- * relinking (the club answered the GBA's 5FFF, and its link hasn't closed yet) keeps "Please
- * wait...", as every Closing does. Written through gen3_trade_guide_copy: false if a text, row or
- * reason, had to be cut to fit (test_guide_line_lengths: never). */
+ * Assumed) outranks left and leaving, which End trade during that trade brings too. After left,
+ * "unplug" only with no GBA linked: a GBA can walk back in while a pickup waits, and is linked
+ * then (the Flipper won't sit); unplugged, it would show a link error, so it walks out first. An
+ * offer the GBA's own rules refuse (NationalDex, Fateful) has rows of its own, below the pickup
+ * rows, shown only while a GBA is linked: the rules outlive the link, so unlinked they may be
+ * another cartridge's, and the Waiting rows show instead. Waiting with relinking (a relink's
+ * gap) reads as linked: "Linking...", never the Waiting rows. Closing with relinking (the club
+ * answered the GBA's 5FFF, and its link hasn't closed yet) keeps "Please wait...", as every
+ * Closing does. Written through gen3_trade_guide_copy: false if a text, row or reason, had to
+ * be cut to fit (test_guide_line_lengths: never). */
 bool gen3_trade_guide(
     const Gen3ClubStatus* st,
     bool started,

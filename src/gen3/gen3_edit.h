@@ -130,6 +130,10 @@ bool gen3_edit_default_moves(Gen3Editor* ed);
 void gen3_edit_set_ball(Gen3Editor* ed, uint8_t ball);
 /* raw byte: strain << 4 | days */
 void gen3_edit_set_pokerus(Gen3Editor* ed, uint8_t value);
+/* The fateful-encounter bit (Gen3FieldFateful, ribbons bit 31), on any species. FireRed/LeafGreen
+ * won't trade a Mew or Deoxys without it, and a .pk3 or a Ruby trade can bring one so; a species
+ * change sets it for them. Like every mutator, it keeps pristine when no byte changes. */
+void gen3_edit_set_fateful(Gen3Editor* ed, bool on);
 /* New PID with these traits (normalised as gen3_pid_find does); changes only the PID, the ability
  * bit, party stats and the checksum. If the normalised want already equals gen3_traits_of, true
  * and nothing changes (the PID and stored ability slot are kept). false (unchanged) only if

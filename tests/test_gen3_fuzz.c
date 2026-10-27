@@ -3,6 +3,7 @@
 #include "gen3_golden.h"
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
+#include <src/gen3/gen3_partner.h>
 #include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_rules.h>
 #include <src/gen3/gen3_trade_block.h>
@@ -12,10 +13,11 @@ _Static_assert(GEN3_RUBY_ITEMS_COUNT == 349 && GEN3_ITEM_ENIGMA_BERRY == 175, "D
 /* A deterministic random sequence of editor calls (out-of-range arguments included), 80- and
  * 100-byte imports, direct gen3_edit_load calls, GBA players (D7) and bulk reads that fail at
  * random after a good open; now and then a new editor replaces the old one. After every step the
- * editor's Pokemon must be game-valid (fuzz_valid), a call that refuses or fails must leave the
- * editor exactly as it was, and pristine must follow gen3_edit.h: cleared by a call that changed
- * the Pokemon's bytes, kept otherwise, and kept by set_trainer. The seed and step count are fixed,
- * so a failure reproduces; the step number is printed with it. Other seeds can be tried with
+ * editor's Pokemon must be game-valid (fuzz_valid, which also cross-checks the trade's offer
+ * check and gen3_offer_traits), a call that refuses or fails must leave the editor exactly as it
+ * was, and pristine must follow gen3_edit.h: cleared by a call that changed the Pokemon's bytes,
+ * kept otherwise, and kept by set_trainer. The seed and step count are fixed, so a failure
+ * reproduces; the step number is printed with it. Other seeds can be tried with
  * -DFUZZ_SEED=... -DFUZZ_STEPS=... (the coverage counts at the end are for this seed). */
 
 #ifndef FUZZ_SEED
@@ -71,6 +73,8 @@ static bool fuzz_reopen(void) {
 }
 
 /* ---- The invariant ---- */
+
+static int fz_unfateful_seen; /* fuzz_valid calls on a MEW or DEOXYS without the fateful bit */
 
 static bool is_mail(uint32_t item) {
     return item >= GEN3_ITEM_MAIL_FIRST && item <= GEN3_ITEM_MAIL_LAST;
@@ -129,6 +133,14 @@ static bool fuzz_valid(const Gen3Pkm* p) {
     CHECK(
         gen3_trade_offer_check(p) == (ruby_lacks ? Gen3RefuseItem : Gen3RefuseNone),
         "offer check (D8)");
+    /* The offer traits an FRLG partner checks, with the numbers, not the header's: NonKanto past
+     * #151 (or no national number), Unfateful for MEW (151) or DEOXYS (386) without the bit */
+    uint16_t national = gen3_national_from_internal(gen3_pkm_get(p, Gen3FieldSpecies));
+    bool unfateful = (national == 151 || national == 386) && !gen3_pkm_get(p, Gen3FieldFateful);
+    uint8_t traits = (national == 0 || national > 151 ? Gen3OfferNonKanto : 0) |
+                     (unfateful ? Gen3OfferUnfateful : 0);
+    CHECK(gen3_offer_traits(p) == traits, "offer traits");
+    fz_unfateful_seen += unfateful;
 
     /* The game form decrypts back to the same bytes */
     uint8_t game[GEN3_PARTY_SIZE];
@@ -178,10 +190,12 @@ static bool ot_eq(const Gen3Pkm* a, const Gen3Pkm* b) {
 /* ---- Inputs ---- */
 
 static uint16_t fz_national(void) {
-    switch(fz_below(6)) {
+    switch(fz_below(7)) {
     case 0:
     case 1:
         return GEN3_NATIONAL_UNOWN; /* for the shiny letter limits */
+    case 3: /* for the fateful rule (FRLG): set_fateful and imports can clear the bit */
+        return fz_below(2) ? GEN3_NATIONAL_MEW : GEN3_NATIONAL_DEOXYS;
     case 2:
         return (uint16_t)fz_below(400); /* 0 and past 386 included */
     default:
@@ -296,6 +310,7 @@ typedef struct {
     int pristine_trainer; /* set_trainer on a pristine editor, which takes the player's OT */
     int trainer_applied; /* use_trainer_ot that had an OT to change */
     int renewed; /* a new editor replaced the old one */
+    int fateful_changed; /* set_fateful that flipped the bit */
 } FuzzStats;
 
 static FuzzStats stats;
@@ -533,7 +548,7 @@ static bool step(Gen3Editor* ed) {
     bool set_trainer = false;
     bool renewed = false;
 
-    switch(fz_below(18)) {
+    switch(fz_below(19)) {
     case 0: {
         fz_what = "set_species";
         uint16_t national = fz_national();
@@ -669,6 +684,15 @@ static bool step(Gen3Editor* ed) {
         fz_what = "use_trainer_ot";
         if(!step_use_trainer(ed)) return false;
         break;
+    case 17: {
+        fz_what = "set_fateful";
+        bool on = fz_below(2);
+        bool was = gen3_pkm_get(&ed->pkm, Gen3FieldFateful);
+        gen3_edit_set_fateful(ed, on);
+        CHECK(gen3_pkm_get(&ed->pkm, Gen3FieldFateful) == on, "set_fateful bit");
+        if(was != on) stats.fateful_changed++;
+        break;
+    }
     default: {
         fz_what = "bulk";
         /* Reads fail now and then, often, or not at all; a closed source is opened again. A new
@@ -718,9 +742,10 @@ TEST(test_fuzz_invariant) {
         /* Mostly with the data: a closed source is opened again soon */
         if(!gen3_bulk_ready() && fz_below(4) == 0) ASSERT_TRUE(fuzz_reopen());
     }
-    /* Every path was taken (with this seed: 3497 unchanged, 7 no-shiny refusals, 4 shiny lost,
-     * 817 closed by a failed read, 312 + 327 imports, 685 loads, 1068 players set, 10 of them on
-     * a pristine editor, 663 player OTs applied, 87 new editors) */
+    /* Every path was taken (with this seed: 3376 unchanged, 6 no-shiny refusals, 5 shiny lost,
+     * 787 closed by a failed read, 312 + 307 imports, 667 loads, 1096 players set, 15 of them on
+     * a pristine editor, 664 player OTs applied, 111 new editors, 520 fateful bits flipped, and
+     * 656 checks of a Mew or Deoxys without it) */
     ASSERT_TRUE(stats.unchanged > 0);
     ASSERT_TRUE(stats.no_shiny > 0);
     ASSERT_TRUE(stats.shiny_lost > 0);
@@ -731,6 +756,8 @@ TEST(test_fuzz_invariant) {
     ASSERT_TRUE(stats.pristine_trainer > 0);
     ASSERT_TRUE(stats.trainer_applied > 0);
     ASSERT_TRUE(stats.renewed > 0);
+    ASSERT_TRUE(stats.fateful_changed > 0);
+    ASSERT_TRUE(fz_unfateful_seen > 0);
 }
 
 int main(void) {
