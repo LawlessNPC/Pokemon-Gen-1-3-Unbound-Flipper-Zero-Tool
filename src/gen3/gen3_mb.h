@@ -19,7 +19,8 @@
 #define GEN3_MB_PALETTE 0x93u /* logo palette: color 1, direction 0, speed 1 */
 #define GEN3_MB_HEADER_LEN 0xC0u
 #define GEN3_MB_MIN_LEN 0x1C0u
-/* our helper cap (the helper is about 6.5-8.5 KB); the BIOS allows 0x40000 */
+/* our helper cap (the helper is about 6.5-8.5 KB); the BIOS allows 0x40000. The helper's build
+ * has its own copy, MAX_LEN in gba/helper/Makefile; tests/test_helper_image.c checks they agree. */
 #define GEN3_MB_MAX_LEN 0x3000u
 /* Counted failures allowed; one more and the sender gives up, to ask for a power cycle with
  * Start+Select (multiboot-and-save.md §2.6). How the BIOS recovers is not documented:
@@ -140,7 +141,7 @@ typedef struct Gen3Mb {
     uint8_t rr; /* the slave's byte from 0x73rr */
     uint8_t junk; /* Detect: other replies since entering it */
     uint8_t tx_count; /* words in the frame in flight */
-    bool stale; /* Detect: the next reply answers a word sent before Detect began */
+    bool stale; /* Detect: the next unmarked reply answers a word sent before Detect began */
     bool palette_other; /* Palette: a reply other than a valid 0x7202 came back */
     bool attempting; /* a header word has gone out: the attempt budget runs */
     uint16_t pos; /* Header: next word of 98; Data: next payload halfword */

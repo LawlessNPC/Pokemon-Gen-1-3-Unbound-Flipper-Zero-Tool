@@ -17,7 +17,9 @@ OBJCOPY = $(CROSS)objcopy
 SIZE = $(CROSS)size
 PYTHON ?= python3
 GCC_VERSION = 12.3.1
-# GEN3_MB_MAX_LEN (src/gen3/gen3_mb.h): the Flipper's cap on the image
+# The helper side's one copy of the image cap, passed to fix_header.py. It must equal
+# GEN3_MB_MAX_LEN (src/gen3/gen3_mb.h), the Flipper sender's cap; tests/test_helper_image.c
+# checks that the two agree.
 MAX_LEN = 12288
 
 BUILD = build
@@ -62,8 +64,8 @@ $(BUILD)/helper.elf: $(OBJS) helper.ld
 $(BUILD)/helper.bin: $(BUILD)/helper.elf
 	$(OBJCOPY) -O binary $< $@
 
-$(BUILD)/helper.mb: $(BUILD)/helper.bin fix_header.py
-	$(PYTHON) -I fix_header.py $< $@
+$(BUILD)/helper.mb: $(BUILD)/helper.bin fix_header.py Makefile
+	$(PYTHON) -I fix_header.py $< $@ $(MAX_LEN)
 
 size: all
 	$(SIZE) $(BUILD)/helper.elf

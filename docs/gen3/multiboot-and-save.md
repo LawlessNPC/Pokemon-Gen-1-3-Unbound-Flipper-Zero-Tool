@@ -143,8 +143,8 @@ protocol table specialised to child 1 (`x = y = 0x02`), with afska's checks.
 
 | # | P sends | P expects | Repeat / on failure |
 |---|---|---|---|
-| 1 | `0x6200` | `0xFFFF` (no start bit: slave not in MultiPlay yet), then `0x0000` | repeat back to back, 1 per tick, until step 2. The first reply after starting, or after a restart wait, answers a word sent before it: ignore it |
-| 2 | `0x6200` | `0x7202`: `(r & 0xFFF0) == 0x7200` and `(r & 0xF) == 0x2` | after 255 replies that are neither `0x0000`, `0xFFFF` nor `0x72x2`, wait 70–240 ms and restart at 1, not counted as a failure (GBATEK "Repeat 15 times" and afska `DETECTION_TRIES = 16` pause sooner, for no stated reason; §2.6) |
+| 1 | `0x6200` | `0xFFFF` (no start bit: slave not in MultiPlay yet), then `0x0000` | repeat back to back, 1 per tick, until step 2. The first unmarked reply after starting, or after a restart wait, answers a word sent before it: ignore it. A marked reply (timed out, framing) doesn't count as that one |
+| 2 | `0x6200` | `0x7202`: `(r & 0xFFF0) == 0x7200` and `(r & 0xF) == 0x2` | after 255 replies that are neither `0x0000`, `0xFFFF` nor `0x7202`, wait 70–240 ms and restart at 1, not counted as a failure (GBATEK "Repeat 15 times" and afska `DETECTION_TRIES = 16` pause sooner, for no stated reason; §2.6) |
 | 3 | `0x6102` (`0x6100 \| client_bit`) | `0x7202` | else restart |
 | 4 | header halfword k, k = 0..0x5F, little-endian `hdr[2k] \| hdr[2k+1] << 8` | `((0x60 - k) << 8) \| 0x02`, so `0x6002` … `0x0102` | any mismatch: restart |
 | 5 | `0x6200` | `0x0002` | else restart |
@@ -222,7 +222,8 @@ header = 0xC0 zero bytes; payload = bytes `00 01 02 … FF` (L = 0x100, file
 
 ```c
 #define CB 0x02u /* client bit, child 1 */
-/* xfer(): one transfer, returns slot 1 (MLINK_NO_DATA + timeout bit if no start bit). */
+/* xfer(): one transfer, returns slot 1 (MLINK_NO_DATA + timeout bit if no start bit);
+ * marked(r): that transfer's timeout or framing bit is set. */
 
 bool mb_send(const uint8_t* img, uint32_t len /* 0x1C0..0x40000, len % 16 == 0 */) {
     uint16_t r;
@@ -233,7 +234,7 @@ fail:                                       /* a counted failure */
 restart:
     wait_ms(70 + rand_ms(0, 170));          /* afska: 4 + random(1..10) frames */
 detect:
-    xfer(0x6200);                           /* its reply answers an earlier word: ignore it */
+    do r = xfer(0x6200); while(marked(r));  /* its reply answers an earlier word: ignore it */
     for(junk = 0;;) {                       /* steps 1-2: back to back, 1 per tick */
         r = xfer(0x6200);
         if((r & 0xFFF0) == 0x7200 && (r & 0xF) == CB) break;
@@ -325,7 +326,7 @@ The sender takes images up to 12 KB (`GEN3_MB_MAX_LEN`, 0x3000).
 
 - Detection fails (no `7202`): wrong plug, GBA not held at Start+Select, or GBA
   off. Retry forever, back to back, with a 70–240 ms wait after every 255
-  replies that are neither `0x0000`, `0xFFFF` nor `0x72x2`. None of this counts
+  replies that are neither `0x0000`, `0xFFFF` nor `0x7202`. None of this counts
   as a failure, and waiting for the GBA before the first header word doesn't
   count against the attempt budget either. Show "power on the GBA holding
   Start+Select" after ~3 s.

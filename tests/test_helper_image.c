@@ -1,12 +1,15 @@
 #include "test.h"
 #include <stdbool.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <hp_link.h>
+#include <src/gen3/gen3_mb.h>
 
 /* The committed helper image, files/gen3_helper.mb, written only by make -C gba/helper install.
  * The tests run from tests/. */
 
 #define HELPER_IMAGE_PATH "../files/gen3_helper.mb"
+#define HELPER_MAKEFILE_PATH "../gba/helper/Makefile"
 #define HELPER_IMAGE_MAX 0x40000u /* the BIOS's limit; the sender's cap is lower */
 
 /* The 156-byte logo bitmap at 0x04..0x9F of every GBA cartridge header, which the BIOS checks
@@ -46,7 +49,22 @@ TEST(test_helper_image_logo) {
     ASSERT_MEM_EQ(image + 4, logo, sizeof(logo));
 }
 
+/* The helper's build caps the image at its Makefile's MAX_LEN, which it passes to fix_header.py;
+ * the sender caps it at GEN3_MB_MAX_LEN. The two must agree. */
+TEST(test_helper_cap_matches) {
+    FILE* f = fopen(HELPER_MAKEFILE_PATH, "r");
+    ASSERT_TRUE(f != NULL);
+    char line[256];
+    long max_len = -1;
+    while(fgets(line, sizeof(line), f)) {
+        if(strncmp(line, "MAX_LEN = ", 10) == 0) max_len = strtol(line + 10, NULL, 0);
+    }
+    fclose(f);
+    ASSERT_EQ(max_len, GEN3_MB_MAX_LEN);
+}
+
 int main(void) {
     RUN(test_helper_image_logo);
+    RUN(test_helper_cap_matches);
     TEST_EXIT();
 }

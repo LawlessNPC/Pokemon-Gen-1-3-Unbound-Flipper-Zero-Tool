@@ -1,12 +1,13 @@
 """Turns the helper's raw binary into a multiboot image (multiboot-and-save.md §4.5 steps 1-4).
 
-Usage: python3 -I fix_header.py in.bin out.mb
+Usage: python3 -I fix_header.py in.bin out.mb max_len
 
 1. Writes the logo at 0x04..0x9F.
 2. Writes the header complement at 0xBD.
 3. Pads with 0x00 to a multiple of 0x10 and to at least 0x1C0 bytes.
 4. Fails unless the logo's CRC-32 is 0xD0BEB55E, [0xB2] is 0x96, 0xC0 holds an ARM branch, and
-   the image fits the Flipper's cap (GEN3_MB_MAX_LEN, below the BIOS's 0x40000).
+   the image fits max_len: the Makefile's MAX_LEN, which equals the Flipper's cap GEN3_MB_MAX_LEN
+   (src/gen3/gen3_mb.h), below the BIOS's 0x40000.
 """
 
 import sys
@@ -21,7 +22,7 @@ LOGO = bytes.fromhex(
 )
 LOGO_CRC32 = 0xD0BEB55E
 MIN_LEN = 0x1C0
-MAX_LEN = 12288  # GEN3_MB_MAX_LEN (src/gen3/gen3_mb.h)
+BIOS_MAX_LEN = 0x40000
 
 
 def fail(msg):
@@ -30,8 +31,14 @@ def fail(msg):
 
 
 def main(argv):
-    if len(argv) != 3:
-        fail("usage: python3 -I fix_header.py in.bin out.mb")
+    if len(argv) != 4:
+        fail("usage: python3 -I fix_header.py in.bin out.mb max_len")
+    try:
+        max_len = int(argv[3], 0)
+    except ValueError:
+        fail("max_len %r is not a number" % argv[3])
+    if not MIN_LEN <= max_len <= BIOS_MAX_LEN or max_len % 0x10:
+        fail("max_len %d is not a multiple of 16 in 0x1C0..0x40000" % max_len)
     with open(argv[1], "rb") as f:
         img = bytearray(f.read())
     if len(img) < 0xE4:
@@ -52,8 +59,8 @@ def main(argv):
         fail("[0xB2] is 0x%02X, not 0x96" % img[0xB2])
     if img[0xC3] != 0xEA:
         fail("0xC0 holds 0x%08X, not an ARM branch" % int.from_bytes(img[0xC0:0xC4], "little"))
-    if len(img) > MAX_LEN:
-        fail("%d bytes, over the cap of %d" % (len(img), MAX_LEN))
+    if len(img) > max_len:
+        fail("%d bytes, over the cap of %d" % (len(img), max_len))
     with open(argv[2], "wb") as f:
         f.write(img)
 

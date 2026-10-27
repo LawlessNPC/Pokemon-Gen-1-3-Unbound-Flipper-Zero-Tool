@@ -127,9 +127,11 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
     case Gen3MbPhaseDetect:
         /* MultiPlay replies run one transfer behind (multiboot-and-save.md §2.2), so the first
          * reply here answers whatever was sent before Detect began, after gen3_mb_init or a wait:
-         * a 0x7202 left over from a palette wait would start a Hello that fails. */
+         * a 0x7202 left over from a palette wait would start a Hello that fails. A marked word
+         * may not be that reply (a timed-out transfer never reached the slave, whose stale word
+         * then goes out next), so the skip waits for an unmarked one; at worst it costs a tick. */
         if(mb->stale) {
-            mb->stale = false;
+            if(mb_valid(mb, rx, 0)) mb->stale = false;
             break;
         }
         if(!mb_valid(mb, rx, 0)) break; /* polling: a marked word is ignored */

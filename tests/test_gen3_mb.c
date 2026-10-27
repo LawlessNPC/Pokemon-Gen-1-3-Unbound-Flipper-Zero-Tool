@@ -617,6 +617,13 @@ TEST(test_mb_masked_word) {
     memset(&rx, 0, sizeof(rx));
     rx.count = 1;
     rx.word[0] = 0x7202;
+    gen3_mb_frame(&mb, &rx, &tx, MLINK_TICK_US); /* the stale reply */
+    ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+    rx.framing_mask = 1;
+    gen3_mb_frame(&mb, &rx, &tx, MLINK_TICK_US); /* polling: ignored */
+    ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+    ASSERT_EQ(tx.word[0], 0x6200);
+    rx.framing_mask = 0;
     gen3_mb_frame(&mb, &rx, &tx, MLINK_TICK_US);
     ASSERT_EQ(status().phase, Gen3MbPhaseHello);
     ASSERT_EQ(tx.count, 1);
@@ -661,6 +668,34 @@ TEST(test_mb_stale_detect_reply) {
         ASSERT_EQ(status().phase, Gen3MbPhaseWait);
         ASSERT_EQ(status().restarts, round + 1);
         for(int i = 0; i < 1000 && tx.count == 0; i++) reply_with(&tx, 0);
+    }
+}
+
+/* A marked first reply (timed out, or a framing error) doesn't use up the skip: the slave's SEND
+ * still holds the stale word, so the next unmarked reply is the stale one. */
+TEST(test_mb_stale_after_marked_reply) {
+    for(int framing = 0; framing < 2; framing++) {
+        make_image(image, 0x1C0);
+        gen3_mb_init(&mb, image, 0x1C0, BENCH_SEED);
+        MlinkTx tx;
+        gen3_mb_frame(&mb, NULL, &tx, 0);
+        ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+        MlinkRx rx;
+        memset(&rx, 0, sizeof(rx));
+        rx.count = tx.count;
+        rx.word[0] = 0x7202;
+        if(framing) {
+            rx.framing_mask = 1;
+        } else {
+            rx.timeout_mask = 1;
+        }
+        gen3_mb_frame(&mb, &rx, &tx, mlink_frame_us(MlinkModeStream, rx.count));
+        ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+        reply_with(&tx, 0x7202); /* the stale one */
+        ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+        ASSERT_TRUE(tx.count == 1 && tx.word[0] == 0x6200);
+        reply_with(&tx, 0x7202);
+        ASSERT_EQ(status().phase, Gen3MbPhaseHello);
     }
 }
 
@@ -934,6 +969,7 @@ int main(void) {
     RUN(test_mb_bad_crc_gives_up);
     RUN(test_mb_masked_word);
     RUN(test_mb_stale_detect_reply);
+    RUN(test_mb_stale_after_marked_reply);
     RUN(test_mb_bad_len);
     RUN(test_mb_wrong_handshake_reply);
     RUN(test_mb_wrong_length_reply);
