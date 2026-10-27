@@ -56,10 +56,11 @@
 #define MLINK_TIM_PRESCALER 0u
 #define MLINK_TIM_ARR 68671u
 
-/* Frame cadence in 0.1 us: +10730 per tick; when the sum reaches 167400 (16.740 ms = 59.74 Hz,
- * a hair faster than the GBA's 59.7275 Hz), subtract it and start a frame. That is 15.6 ticks
- * per frame; frames start on tick boundaries, 15 or 16 ticks apart. A 9-transfer burst takes
- * 9 ticks = 9.66 ms, inside the 16.74 ms frame. */
+/* Frame cadence in 0.1 us (frame mode only): +10730 per tick; when the sum reaches 167400
+ * (16.740 ms = 59.74 Hz, a hair faster than the GBA's 59.7275 Hz), subtract it and start a frame.
+ * That is 15.6 ticks per frame; frames start on tick boundaries, 15 or 16 ticks apart. A
+ * 9-transfer burst takes 9 ticks = 9.66 ms, inside the 16.74 ms frame. Stream mode has no
+ * cadence: a frame starts on the tick after the previous frame's callback. */
 #define MLINK_TICK_DECI_US 10730u
 #define MLINK_FRAME_DECI_US 167400u
 
@@ -87,6 +88,12 @@ _Static_assert(
         (MLINK_TIM_PRESCALER + 1u) * (MLINK_TIM_ARR + 1u),
     "one transfer must fit in one tick");
 _Static_assert(MLINK_BURST_LEN <= 16, "timeout_mask and framing_mask are 16 bits");
+_Static_assert(
+    MLINK_TICK_DECI_US == MLINK_TICK_US * 10u,
+    "MLINK_TICK_US (mlink_types.h) must match MLINK_TICK_DECI_US");
+_Static_assert(
+    MLINK_FRAME_DECI_US == MLINK_FRAME_US * 10u,
+    "MLINK_FRAME_US (mlink_types.h) must match MLINK_FRAME_DECI_US");
 
 /* One pin's 2-bit MODER field, for mlink_moder_write. */
 typedef struct {
@@ -102,6 +109,7 @@ struct MlinkHw {
     MlinkFrameCallback cb;
     void* ctx;
     bool running;
+    MlinkMode mode; /* set by mlink_hw_start_mode, read by the ISR */
     volatile bool cable_ok; /* written by the ISR at each frame start, read by any thread */
 
     /* Owned by the TIM2 ISR while running. */
@@ -122,9 +130,10 @@ static FURI_ALWAYS_INLINE uint16_t mlink_data_bit(uint32_t k) {
 #endif
 }
 
-static void mlink_load_tx(MlinkTx* dst, const MlinkTx* src) {
+/* count clamped to 1..MLINK_BURST_LEN in frame mode, 0..MLINK_BURST_LEN in stream mode. */
+static void mlink_load_tx(MlinkTx* dst, const MlinkTx* src, MlinkMode mode) {
     uint8_t count = src->count;
-    if(count < 1) count = 1;
+    if(count < 1 && mode == MlinkModeFrame) count = 1;
     if(count > MLINK_BURST_LEN) count = MLINK_BURST_LEN;
     *dst = *src;
     dst->count = count;
@@ -294,7 +303,7 @@ static void mlink_frame_done(MlinkHw* hw) {
     hw->in_frame = false;
     hw->next = hw->tx;
     hw->cb(hw->ctx, &hw->rx, &hw->next);
-    mlink_load_tx(&hw->tx, &hw->next);
+    mlink_load_tx(&hw->tx, &hw->next, hw->mode);
 }
 
 static void mlink_hw_isr(void* context) {
@@ -304,24 +313,30 @@ static void mlink_hw_isr(void* context) {
     /* Clear first, so a tick that comes due while this one runs long stays pending. */
     LL_TIM_ClearFlag_UPDATE(MLINK_TIM);
 
-    hw->frame_acc += MLINK_TICK_DECI_US;
-    if(!hw->in_frame) {
-        if(hw->frame_acc < MLINK_FRAME_DECI_US) {
-            /* Idle tick, no transfer: latch SI high for the next frame start. A GBA master's SO
-             * (on our SI) idles high but dips low in its own transfers, so one read per frame
-             * can miss it. Usually one pin read, nothing else. The tick that first latches it
-             * also releases SC and SO at once, so they stop fighting a GBA master within a tick
-             * (~1 ms) rather than at the next frame start (~15 ms): at most one release per
-             * frame, only while SI reads high. Safe: no transfer runs until a frame start, that
-             * start trips on the latch (its release repeats the same writes), and every start
-             * that passes drives SC and SO again. */
-            if(mlink_pin_read(hw->pins.si) && !hw->si_seen_high) {
-                hw->si_seen_high = 1;
-                mlink_lines_release(hw);
+    /* Frame mode's cadence and the idle ticks between its frames. Stream mode never touches
+     * frame_acc: every tick outside a frame starts one (multiboot-and-save.md §6.9). */
+    if(hw->mode == MlinkModeFrame) {
+        hw->frame_acc += MLINK_TICK_DECI_US;
+        if(!hw->in_frame) {
+            if(hw->frame_acc < MLINK_FRAME_DECI_US) {
+                /* Idle tick, no transfer: latch SI high for the next frame start. A GBA master's
+                 * SO (on our SI) idles high but dips low in its own transfers, so one read per
+                 * frame can miss it. Usually one pin read, nothing else. The tick that first
+                 * latches it also releases SC and SO at once, so they stop fighting a GBA master
+                 * within a tick (~1 ms) rather than at the next frame start (~15 ms): at most one
+                 * release per frame, only while SI reads high. Safe: no transfer runs until a
+                 * frame start, that start trips on the latch (its release repeats the same
+                 * writes), and every start that passes drives SC and SO again. */
+                if(mlink_pin_read(hw->pins.si) && !hw->si_seen_high) {
+                    hw->si_seen_high = 1;
+                    mlink_lines_release(hw);
+                }
+                return;
             }
-            return;
+            hw->frame_acc -= MLINK_FRAME_DECI_US;
         }
-        hw->frame_acc -= MLINK_FRAME_DECI_US;
+    }
+    if(!hw->in_frame) {
         hw->transfer = 0;
         hw->rx.count = hw->tx.count;
         for(uint8_t i = 0; i < MLINK_BURST_LEN; i++) {
@@ -339,7 +354,13 @@ static void mlink_hw_isr(void* context) {
         hw->cable_ok = cable_ok;
         if(!cable_ok) {
             mlink_lines_release(hw);
-            hw->rx.timeout_mask = (uint16_t)((1u << hw->rx.count) - 1u); /* count is 1..9 */
+            hw->rx.timeout_mask = (uint16_t)((1u << hw->rx.count) - 1u); /* count is 0..9 */
+            mlink_frame_done(hw);
+            return;
+        }
+        if(!hw->tx.count) {
+            /* Stream mode's idle tick (count 0, never in frame mode): no transfer and no line
+             * moves; the callback gets rx.count 0 and both masks 0. */
             mlink_frame_done(hw);
             return;
         }
@@ -420,6 +441,15 @@ MlinkCable mlink_hw_check_cable(MlinkHw* hw) {
 }
 
 bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx* first) {
+    return mlink_hw_start_mode(hw, MlinkModeFrame, cb, ctx, first);
+}
+
+bool mlink_hw_start_mode(
+    MlinkHw* hw,
+    MlinkMode mode,
+    MlinkFrameCallback cb,
+    void* ctx,
+    const MlinkTx* first) {
     furi_check(hw);
     furi_check(cb);
     furi_check(first);
@@ -438,12 +468,15 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
 
     hw->cb = cb;
     hw->ctx = ctx;
-    mlink_load_tx(&hw->tx, first);
+    hw->mode = mode;
+    mlink_load_tx(&hw->tx, first, mode);
     hw->next = hw->tx;
     memset(&hw->rx, 0, sizeof(hw->rx));
     hw->in_frame = false;
     hw->transfer = 0;
-    hw->frame_acc = 0; /* first frame after 16 ticks (17.2 ms) of idle lines */
+    /* Frame mode: first frame after 16 ticks (17.2 ms) of idle lines. Stream mode doesn't use it
+     * and starts its first frame on the first tick. */
+    hw->frame_acc = 0;
     hw->si_seen_high = 0;
     hw->cable_ok = true; /* checked above; the ISR re-checks SI at every frame start */
 

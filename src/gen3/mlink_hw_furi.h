@@ -8,20 +8,26 @@
  *
  * Every TIM2 tick (1073 us start to start, leaving the GBA's ~751.5 us between transfers) may run
  * one 16-bit multiplayer transfer, bit-banged at 115200 baud.
- * Transfers come in frames at the GBA frame rate: transfer t of a frame runs on tick t of that
- * frame, t < tx.count. After a frame's last transfer the frame callback runs, in the TIM2
- * interrupt with interrupts enabled. It gets that frame's result and fills the next frame's tx.
+ * Transfers come in frames: transfer t of a frame runs on tick t of that frame, t < tx.count.
+ * After a frame's last transfer the frame callback runs, in the TIM2 interrupt with interrupts
+ * enabled. It gets that frame's result and fills the next frame's tx. The mode (MlinkMode) sets
+ * when frames start:
+ * - frame mode (mlink_hw_start; the Cable Club link): at the GBA frame rate, every 15 or 16
+ *   ticks, with idle ticks between frames; count 1..MLINK_BURST_LEN;
+ * - stream mode (multiboot and the helper protocol, multiboot-and-save.md §6.9): on the tick
+ *   after the previous frame's callback, with no frame-rate gate; count 0..MLINK_BURST_LEN. A
+ *   count-0 frame runs no transfer: its callback runs on its start tick.
  *
- * Cable guard: SI is read on every idle tick (one that runs no transfer) and latched if high, and
- * read again at each frame start, before any line moves. High means the cable is out or reversed
- * (a reversed cable can read low until the GBA opens its link, so a check at start is not enough;
- * a GBA master's SO, on our SI, dips low during its own transfers, so one read per frame can miss
- * it). The idle tick that first latches it releases SC and SO to input with pull-up at once (SD
- * already is, between transfers). If SI is high at the frame start or was latched since the
- * previous one, the frame runs no transfer at all: SC and SO are released (again), and the
- * callback gets the frame at once, every word MLINK_NO_DATA and every timeout_mask bit set, as if
- * the GBA never answered. The next frame that runs transfers first makes SC and SO push-pull
- * outputs again, driven high.
+ * Cable guard: in frame mode SI is read on every idle tick between frames (one that runs no
+ * transfer) and latched if high; in both modes it is read at each frame start, before any line
+ * moves. High means the cable is out or reversed (a reversed cable can read low until the GBA
+ * opens its link, so a check at start is not enough; a GBA master's SO, on our SI, dips low
+ * during its own transfers, so one read per frame can miss it). The idle tick that first latches
+ * it releases SC and SO to input with pull-up at once (SD already is, between transfers). If SI
+ * is high at the frame start or was latched since the previous one, the frame runs no transfer at
+ * all: SC and SO are released (again), and the callback gets the frame at once, every word
+ * MLINK_NO_DATA and every timeout_mask bit set, as if the GBA never answered. The next frame that
+ * runs transfers first makes SC and SO push-pull outputs again, driven high.
  *
  * alloc/free/check_cable/start/stop are app-context calls; use them from one thread, never from
  * the frame callback. mlink_hw_cable_ok may be called from any thread. */
@@ -63,6 +69,18 @@ MlinkCable mlink_hw_check_cable(MlinkHw* hw);
  * reversed, or the driver is already running. first is the first frame's tx; count is clamped to
  * 1..MLINK_BURST_LEN. */
 bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx* first);
+
+/* mlink_hw_start with a mode. MlinkModeFrame is exactly mlink_hw_start. MlinkModeStream: a frame
+ * starts on the first tick after start and on every tick after a frame's callback (no frame-rate
+ * gate); transfer t on tick t; count 0 makes an idle tick whose callback gets rx.count 0, masks 0.
+ * The cable guard still reads SI at every frame start (there are no idle ticks between frames to
+ * latch on). Same failure rules as mlink_hw_start. */
+bool mlink_hw_start_mode(
+    MlinkHw* hw,
+    MlinkMode mode,
+    MlinkFrameCallback cb,
+    void* ctx,
+    const MlinkTx* first);
 
 /* The cable guard's latest decision: true from mlink_hw_start (its own check passed) until a frame
  * start finds SI high (read then, or latched on an idle tick since the previous frame start), and
