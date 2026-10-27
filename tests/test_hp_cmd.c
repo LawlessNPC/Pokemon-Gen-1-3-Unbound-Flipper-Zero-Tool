@@ -804,15 +804,18 @@ TEST(test_hp_write_needs_defer) {
 TEST(test_hp_commit_needs_program) {
     ASSERT_TRUE(setup());
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
-    for(uint8_t k = 0; k < 14; k++) {
-        ASSERT_EQ(copy_sector(k, 14 + (k + 1) % 14, DEFER, 5), HP_ST_OK);
+    /* the first arming programs sectors 15..27 */
+    for(uint8_t k = 0; k < 13; k++) {
+        ASSERT_EQ(copy_sector(k, 15 + k, DEFER, 5), HP_ST_OK);
     }
-    /* a new session and a new arming: the 14 commits are all refused */
+    /* a new session and a new arming, which programs sector 14 only: the commits of 15..27 are
+     * all refused, so what the arming programmed is known per sector */
     ASSERT_EQ(cmd(HP_CMD_HELLO, NULL, 0), HP_ST_OK);
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
+    ASSERT_EQ(copy_sector(13, 14, DEFER, 5), HP_ST_OK);
     memset(&gba.counts, 0, sizeof(gba.counts));
     snapshot();
-    for(uint8_t s = 14; s < 28; s++) {
+    for(uint8_t s = 15; s < 28; s++) {
         ASSERT_EQ(cmd1(HP_CMD_COMMIT_SECTOR, s), HP_ST_REFUSED);
         ASSERT_EQ(p[0], HP_REFUSE_NOT_PROGRAMMED);
         ASSERT_EQ(p[1], s);

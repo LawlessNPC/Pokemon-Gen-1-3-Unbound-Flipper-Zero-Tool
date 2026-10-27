@@ -332,15 +332,45 @@ TEST(test_hlink_too_long) {
     req.resp_max_words = 2;
     const uint8_t skip = send(&req);
     memset(resp, 0xEE, sizeof(resp));
-    /* Decided at w2, in the same frame, before any payload word lands */
+    /* n = 4 over resp_max 2: the packet is read out to its end, with no payload word stored, so
+     * that the helper is hunting again for the next request; only then TooLong */
     const uint16_t rx[MLINK_BURST_LEN] = {
         RECV, RECV, RECV, RECV, RECV, SOF, 0x0100, 0x0004, 0x0001};
     ASSERT_EQ(skip, 5);
     MlinkTx tx = frame(&h, rx, MLINK_BURST_LEN, 0, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkReceiving);
+    ASSERT_TRUE(idle_tx(&tx));
+    reply(0, hello_ok + 4, 4, -1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkReceiving);
+    tx = reply(0, hello_ok + 8, 1, -1);
     ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
     ASSERT_EQ(fail_of(), Gen3HlinkFailTooLong);
     ASSERT_EQ(tx.count, 0);
-    ASSERT_EQ(resp[0], 0xEE);
+    for(uint32_t i = 0; i < 8; i++) ASSERT_EQ(resp[i], 0xEE);
+    /* A HELLO right after it goes out at the next READY and gets its response */
+    gen3_hlink_submit(&h, &hello);
+    uint16_t ready[MLINK_BURST_LEN];
+    fill(ready, READY, MLINK_BURST_LEN);
+    frame(&h, ready, 0, 0, MLINK_TICK_US);
+    tx = frame(&h, ready, MLINK_BURST_LEN, 0, FRAME_US);
+    ASSERT_EQ(tx.word[0], SOF);
+    reply(skip, hello_ok, 9, -1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkDone);
+    ASSERT_EQ(resp[0], 0x01);
+    /* A packet too long for resp_max is still Wire, BadCrc or Seq first: those are resent */
+    send(&req);
+    reply(skip, hello_ok, 9, 5);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailWire);
+    send(&req);
+    memcpy(script, hello_ok, sizeof(hello_ok));
+    script[8] ^= 1u;
+    reply(skip, script, 9, -1);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailBadCrc);
+    send(&req);
+    const uint16_t other_seq[] = {
+        SOF, 0x0200, 0x0004, 0x0001, 0x0001, 0x0810, 0x0103, 0x699D, 0x2F84};
+    reply(skip, other_seq, 9, -1);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailSeq);
     /* n = 2 fits resp_max 2 */
     send(&req);
     reply(skip, err_resp, 7, -1);
@@ -351,7 +381,8 @@ TEST(test_hlink_too_long) {
     gen3_hlink_result(&h, &status, &n, &fail);
     ASSERT_EQ(status, 0x04);
     ASSERT_EQ(n, 2);
-    /* Past the protocol's limit, whatever resp_max_words says */
+    /* Past the protocol's limit, whatever resp_max_words says: at w2 at once, since there is no
+     * length to read out to */
     req.resp_max_words = 0xFFFF;
     send(&req);
     const uint16_t huge[] = {SOF, 0x0100, GEN3_HLINK_MAX_PAYLOAD + 1u};

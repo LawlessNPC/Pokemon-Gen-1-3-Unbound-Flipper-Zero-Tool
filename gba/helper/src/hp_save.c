@@ -11,6 +11,10 @@
 
 _Static_assert(HP_SAVE_DATA_LEN % HP_SAVE_CHUNK == 0, "whole chunks");
 
+/* Keyed on the code's first three letters only, so every region of a game maps to its layout.
+ * Only the English codes can ever be armed, though: the write checks (hp_core.c) require the
+ * cart's write_game (hp_cart_write_game: AXVE, AXPE, BPRE, BPGE) before they look at the layout.
+ * The Japanese games' layouts have not been checked against pret. */
 HpSaveGame hp_save_game(const uint8_t code[4]) {
     if(code[0] == 'A' && code[1] == 'X' && (code[2] == 'V' || code[2] == 'P')) {
         return HpSaveGameRS;

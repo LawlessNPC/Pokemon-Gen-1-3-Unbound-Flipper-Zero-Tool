@@ -86,9 +86,11 @@ typedef enum {
      * it at once, as the length is then unknown. */
     Gen3HlinkFailWire,
     Gen3HlinkFailSeq, /* a valid response for another seq */
-    /* The response's n is over resp_max_words or GEN3_HLINK_MAX_PAYLOAD (decided at w2), or the
-     * request has more than GEN3_HLINK_MAX_ARGS args or GEN3_HLINK_MAX_PAYLOAD payload words (at
-     * once, with nothing sent) */
+    /* The response's n is over resp_max_words: the packet is read out first, with no payload word
+     * stored, so that the helper is hunting again, and a packet that also fails Wire, BadCrc or Seq
+     * is reported as that. Or its n is over GEN3_HLINK_MAX_PAYLOAD (at w2, at once: there is no
+     * length to read out to). Or the request has more than GEN3_HLINK_MAX_ARGS args or
+     * GEN3_HLINK_MAX_PAYLOAD payload words (at once, with nothing sent). */
     Gen3HlinkFailTooLong,
 } Gen3HlinkFail;
 
@@ -100,7 +102,11 @@ typedef struct {
     uint8_t nargs;
     const uint8_t* data; /* payload after args, LE bytes (WRITE_SECTOR's 4 KB image) */
     uint16_t data_words;
-    uint8_t* resp; /* response payload lands here as LE bytes */
+    /* The response's payload lands here as LE bytes, resp_max_words words at most. After a
+     * BadCrc, Wire or Seq failure part of it may have been overwritten. */
+    uint8_t* resp;
+    /* At least 2 for every request, whatever the OK response's length: a response with any status
+     * but OK carries 2 words (multiboot-and-save.md §6.4), and a shorter limit fails it TooLong. */
     uint16_t resp_max_words;
     /* BUSY budget in µs, 0 for GEN3_HLINK_BUSY_US; the client sets the longer ones of
      * multiboot-and-save.md §6.5 */
@@ -131,6 +137,7 @@ typedef struct Gen3Hlink {
     bool ready; /* Sending: a READY came back, so the request goes out */
     bool busy; /* this wait saw a BUSY */
     bool wire; /* Receiving: a word of this packet came back invalid */
+    bool too_long; /* Receiving: its n is over resp_max_words, so its payload isn't stored */
     Gen3HlinkFail fail; /* result */
 } Gen3Hlink;
 
@@ -153,7 +160,8 @@ void gen3_hlink_frame(Gen3Hlink* h, const MlinkRx* rx, MlinkTx* tx, uint32_t ela
 /* App side: the state, then a full fence (see above). */
 Gen3HlinkState gen3_hlink_state(const Gen3Hlink* h);
 /* App side, after gen3_hlink_state gave Done or Failed. Done: status is the response's (w1 &
- * 0xFF), resp_words its n and fail None; after a sync, 0, 0 and None. Failed: 0, 0 and why. */
+ * 0xFF), resp_words its n and fail None; after a sync, 0, 0 and None. Failed: 0, 0 and why. None
+ * of the pointers may be NULL. */
 void gen3_hlink_result(
     const Gen3Hlink* h,
     uint8_t* status,

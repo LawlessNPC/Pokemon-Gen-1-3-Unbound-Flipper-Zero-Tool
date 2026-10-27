@@ -113,6 +113,22 @@ void fake_gba_power_cut_after(FakeGba* g, uint32_t ops) {
     g->cut_ops = ops;
 }
 
+void fake_gba_power_cycle(FakeGba* g) {
+    g->frozen = false;
+    g->cut_armed = false;
+    g->cut_ops = 0;
+    g->mode = FAKE_MODE_READ;
+    g->seq = FAKE_SEQ_IDLE;
+    g->bank = 0;
+    g->id_settling = false;
+    g->late_left = 0;
+    g->weak_poll = false;
+    g->status = HpStatusReady;
+    g->timer_reads = 0;
+    g->busy_us = 0;
+    g->rom_bytes = 0;
+}
+
 void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out) {
     *out = g->counts;
 }

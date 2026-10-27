@@ -157,6 +157,11 @@ void fake_gba_weak_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t tim
  * still counted), every read is that operation's busy status (DQ7 the complement of its data, DQ6
  * toggling, DQ5 clear), and the array stays as it was before that operation. */
 void fake_gba_power_cut_after(FakeGba* g, uint32_t ops);
+/* The GBA is switched off and on again with the cart still in: the chip leaves a power cut's
+ * freeze, forgets a power cut still to come, and is back in read mode, out of any command sequence,
+ * in bank 0; the status is Ready and the modelled time starts again. The array, the cart, the chip's
+ * id, the faults the test injected and the counts stay. */
+void fake_gba_power_cycle(FakeGba* g);
 void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out);
 /* Time the GBA spent since the last call, in µs, as the fake models it: 300,000 per erase, 25 per
  * byte program, 1 per flash read (a sector CRC is 4096), and ROM reads at 7,000,000 per 16 MiB

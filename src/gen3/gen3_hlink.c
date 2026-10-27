@@ -50,6 +50,7 @@ static void hlink_reset(Gen3Hlink* h) {
     h->ready = false;
     h->busy = false;
     h->wire = false;
+    h->too_long = false;
     h->fail = Gen3HlinkFailNone;
 }
 
@@ -134,7 +135,8 @@ static bool
     return true;
 }
 
-/* Response word h->pos (1 = w1): one CRC update per word, the payload straight into resp. */
+/* Response word h->pos (1 = w1): one CRC update per word, the payload straight into resp, unless
+ * it is longer than resp_max_words: then it is read out to its end without being stored. */
 static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid) {
     const uint16_t k = h->pos++;
     if(!valid) {
@@ -148,27 +150,33 @@ static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid) {
     if(k == 1) {
         h->rw1 = w;
     } else if(k == 2) {
-        if(w > h->req.resp_max_words || w > GEN3_HLINK_MAX_PAYLOAD) {
-            hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailTooLong);
+        if(w > GEN3_HLINK_MAX_PAYLOAD) {
+            hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailTooLong); /* no length to read out to */
             return false;
         }
         h->rn = w;
+        h->too_long = w > h->req.resp_max_words;
     } else if(k < crc_at) {
-        uint8_t* d = h->req.resp + 2u * (k - HLINK_HEAD_WORDS);
-        d[0] = (uint8_t)w;
-        d[1] = (uint8_t)(w >> 8);
+        if(!h->too_long) {
+            uint8_t* d = h->req.resp + 2u * (k - HLINK_HEAD_WORDS);
+            d[0] = (uint8_t)w;
+            d[1] = (uint8_t)(w >> 8);
+        }
     } else if(k == crc_at) {
         h->crc_lo = w;
         return true;
     } else {
         /* The last word. A timed-out word reads 0xFFFF, which is also erased flash, so a wire
-         * fault wins over a CRC that matches; the seq counts only in a packet that is sound. */
+         * fault wins over a CRC that matches; the seq and the length count only in a packet that
+         * is sound, and a sound one for another seq is a stale response, not a long one. */
         if(h->wire) {
             hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailWire);
         } else if((h->crc_lo | (uint32_t)w << 16) != ~h->crc) {
             hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailBadCrc);
         } else if((uint8_t)(h->rw1 >> 8) != h->req.seq) {
             hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailSeq);
+        } else if(h->too_long) {
+            hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailTooLong);
         } else {
             h->status = (uint8_t)h->rw1;
             h->resp_words = h->rn;
@@ -203,6 +211,7 @@ static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid) {
             h->state = Gen3HlinkReceiving;
             h->pos = 1;
             h->rn = 0;
+            h->too_long = false;
             h->crc = HLINK_CRC_INIT;
             return true;
         }
