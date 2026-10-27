@@ -1178,21 +1178,37 @@ the word after the false `SOF`.
 | 0x01 | `HELLO` | — | proto version (1), helper build id, max payload words, `[0x020000C4] \| [0x020000C5] << 8` (boot mode 3, slave id 1) | |
 | 0x02 | `CART_INFO` | — | 96 words cart header; flags (logo == own header, `0x96` ok, complement ok); ROM size (2 words, §3.7); save-library string kind and offset | |
 | 0x03 | `SAVE_PROBE` | — | flash ID; class (0 = 128 KB MX-style, 1 = 64 KB, 2 = SRAM-like, 3 = none/unknown); `pre0, pre1`, ID bytes; SRAM-probe result | runs §3.3 once and caches the result; later calls return the cache |
-| 0x04 | `ARM_WRITE` | magic `0x5752`, expected flash ID, target slot T, active counter N (2 words) | status | H re-reads the footers: slot 1−T must hold 14 sectors with valid signature, full-length checksum (§5.3), counter N, N % 2 = 1−T. Otherwise `REFUSED`. Arms writes for the 14 sectors of slot T only |
-| 0x05 | `DISARM` | — | status | also automatic after the 14th `COMMIT_SECTOR`, any flash error, or `HELLO` |
+| 0x04 | `ARM_WRITE` | magic `0x5752`, expected flash ID, target slot T, mode, active counter N (2 words) | status | First ends any arming and clears `erased_ok` (below), whatever the outcome. A wrong magic, T > 1 or mode > 1 is `BAD_ARG`; an expected ID other than the probed one is `REFUSED`. H re-reads the footers. Mode 0 (a write): slot 1−T must hold 14 sectors with valid signature, full-length checksum (§5.3), ids 0–13 once each, one counter N, N % 2 = 1−T, and be the slot the game loads (§5.5 over both slots, full-length checksums). Mode 1 (a restore onto an empty or corrupt save): no slot the game would load, and neither slot as mode 0 requires. Otherwise `REFUSED`. Arms writes for the 14 sectors of slot T only |
+| 0x05 | `DISARM` | — | status | also automatic once all 14 sectors of slot T are completed (below), on any flash error, `HELLO`, and every `ARM_WRITE` |
 | 0x10 | `READ_SECTOR` | sector 0..31 | 2048 words | |
 | 0x11 | `READ_FOOTERS` | — | 32 × 8 words: bytes 0xFF4..0xFFF (6 words), full-length checksum (1 word), 0 | ≈ 260 transfers; enough for §5.5 except the exact-size check |
 | 0x12 | `SECTOR_CRC32` | sector | 2 words | read-back verify without re-reading over the link |
 | 0x18 | `ERASE_SECTOR` | sector | status, fail code | armed and in slot T only |
 | 0x19 | `WRITE_SECTOR` | sector, flags (bit 0 `DEFER_COMMIT`), 2048 words image | status, fail code, fail offset | the CRC must pass **before** any flash access. Erase first, unless this session erased the sector OK and nothing has programmed it since (the session's `erased_ok` mask: a successful erase sets the sector's bit; any program or commit to it clears it; so do start-up and `HELLO`). A sector that merely reads all 0xFF is erased again: an erase cut short by a power loss can leave cells that read 0xFF but aren't fully erased. Program in ascending order (skipping 0xFF8 if deferred), then verify. Up to 3 tries; a failed try erases again |
-| 0x1A | `COPY_SECTOR` | src sector, dst sector, flags, new counter (2 words) | status, fail code, fail offset | H reads src into RAM, patches the counter at 0xFFC, then proceeds as `WRITE_SECTOR` |
+| 0x1A | `COPY_SECTOR` | src sector, dst sector, flags, new counter (2 words) | status, fail code, fail offset | src must be in slot 1−T (else `BAD_ARG`). H reads src into RAM, patches the counter at 0xFFC, then proceeds as `WRITE_SECTOR` |
 | 0x1B | `COMMIT_SECTOR` | sector | status | programs 0xFF8 = `0x25` only if it reads `0xFF` and 0xFF9..0xFFB read `20 01 08`; then verifies 0xFF8..0xFFB = `0x08012025` |
-| 0x20 | `ROM_READ` | address (2), words (≤ 2048) | data | address within 0x08000000..0x09FFFFFF |
-| 0x21 | `ROM_SHA1` | address (2), length (2) | 10 words | `H_BUSY` while hashing |
-| 0x22 | `ROM_CRC32` | address (2), length (2) | 2 words | faster than SHA-1 |
+| 0x20 | `ROM_READ` | address (2), words (1..2048) | data | the whole range within 0x08000000..0x09FFFFFF, address even |
+| 0x21 | `ROM_SHA1` | address (2), length (2) | 10 words | `H_BUSY` while hashing. Not implemented by the helper |
+| 0x22 | `ROM_CRC32` | address (2), length (2: 2..0x40000, even) | 2 words | faster than SHA-1; the same range rule as `ROM_READ` |
+
+The flash reads (0x10–0x12) answer `UNSUPPORTED` unless `SAVE_PROBE` ran and
+found a 128 KB flash: on an SRAM the bank command would land as data.
 
 All write-class commands (0x18–0x1B) also refuse sectors 28–31, and refuse
-everything when §3.6 checks 1–4 failed.
+everything when §3.6 checks 1–4 failed: `CART_INFO` must have run and found
+the logo, `0x96`, the complement, one of `AXVE AXPE BPRE BPGE`, `FLASH1M_V`
+and no other library string; `SAVE_PROBE` must have found a 128 KB flash with
+ID `0x09C2` or `0x1362` (never `0xD4BF`, which only German Sapphire version 0
+takes as 128 KB, and which is never written). Then `NOT_ARMED`, or `REFUSED`
+for a sector outside slot T.
+
+A sector is **completed** when this helper gives it a valid signature: a
+`COMMIT_SECTOR`, or a `WRITE_SECTOR`/`COPY_SECTOR` without `DEFER_COMMIT`.
+That is refused while another sector of slot T holds a valid signature that it
+didn't get in the current arming (`REFUSED`, fail offset = that sector). Slot T
+can therefore become a valid slot, and the game's choice (§5.5), only as a whole
+save written by the current arming, and the helper disarms at that moment. The
+§5.8 order (erase all 14, program all 14 deferred, commit all 14) always passes.
 
 ## 6.4 Status codes
 
@@ -1209,12 +1225,18 @@ everything when §3.6 checks 1–4 failed.
 | 0x08 | `VERIFY_FAIL` (+ offset) |
 | 0x09 | `NOT_ERASED` (commit byte already programmed) |
 
+`REFUSED`'s fail code tells which check refused, for the log: 1 the cart, 2 the
+chip, 3 `ARM_WRITE`'s flash ID, 4 the slots, 5 a sector outside slot T, 6 another
+sector of slot T still valid (§6.3).
+
 ## 6.5 Busy, retries, duplicates
 
-- Each new command gets the next `seq` (8 bits). H keeps the last `seq` and the
-  status of the last write-class command. A repeated `seq` of a write-class
-  command returns the stored status **without executing again**. Reads simply
-  re-execute.
+- Each new command gets the next `seq` (8 bits). H remembers the CRC-32 and the
+  response of the last packet it executed. A byte-identical packet right after
+  it, whose command is write-class (`ARM_WRITE`, 0x18–0x1B), gets that response
+  again **without executing again**. Any other valid packet replaces the
+  memory, so a `seq` that wraps can never alias; a packet with a bad CRC isn't
+  one and changes nothing. Reads simply re-execute.
 - P timeouts:
   - No `SOF` within 32 transfers after the request's last word, while H sends
     neither `H_BUSY` nor a packet: resend.
@@ -1274,7 +1296,8 @@ Flipper's BLE/USB **(inferred, M18)**.
   finishes erase, program and verify (≤ ~0.5 s typical, ≤ 2.04 s per erase
   attempt worst case) whether or not the Flipper still clocks. It then waits,
   holding `H_BUSY` until the next transfer, and sends the result. A Flipper
-  that comes back re-sends the same `seq` and gets the stored status. **A link
+  that comes back re-sends the same packet and gets the stored response
+  (§6.5). **A link
   drop therefore never leaves a half-written sector.** Only power loss or cart
   removal during those windows can. The red backdrop (§4.8) tells the user not
   to power off.

@@ -52,10 +52,8 @@
 #define HP_SIG2 0x01u
 #define HP_SIG3 0x08u
 
-/* The 128 KB IDs the game accepts (pokeruby: src/libs/agb_flash_1m.c: sSetupInfos), then the
- * 64 KB ones (multiboot-and-save.md §3.4) */
-#define HP_ID_MX 0x09C2u /* MX29L010 */
-#define HP_ID_SANYO 0x1362u /* LE26FV10N1TS */
+/* Besides HP_ID_MX and HP_ID_SANYO (hp_flash.h), the IDs the probe knows: the 64 KB ones
+ * (multiboot-and-save.md §3.4) */
 #define HP_ID_SST 0xD4BFu /* also German Sapphire version 0's MX29L010 entry (agb_flash_mx.c) */
 #define HP_ID_MX64 0x1CC2u
 #define HP_ID_PANASONIC 0x1B32u

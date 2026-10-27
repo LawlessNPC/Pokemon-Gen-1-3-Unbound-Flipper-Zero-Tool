@@ -15,22 +15,8 @@ static FakeGba gba;
 static Hp hp;
 static uint8_t hdr[0xC0];
 
-/* A cart header: an ARM branch, the helper's own logo, title, code, maker 01, 0x96, version and
- * the complement (multiboot-and-save.md §2.1). */
 static void make_header(const char* title, const char* code, uint8_t version) {
-    memset(hdr, 0, sizeof(hdr));
-    hdr[0] = 0x2E;
-    hdr[3] = 0xEA;
-    memcpy(hdr + 4, gba.own + 4, 156);
-    memcpy(hdr + 0xA0, title, strlen(title));
-    memcpy(hdr + 0xAC, code, 4);
-    hdr[0xB0] = '0';
-    hdr[0xB1] = '1';
-    hdr[0xB2] = 0x96;
-    hdr[0xBC] = version;
-    uint8_t chk = 0;
-    for(uint32_t i = 0xA0; i <= 0xBC; i++) chk -= hdr[i];
-    hdr[0xBD] = (uint8_t)(chk - 0x19);
+    helper_cmd_header(hdr, gba.own, title, code, version);
 }
 
 /* Ruby: 16 MiB, FLASH1M_V103 at 0x3B0000, an MX chip. */

@@ -40,6 +40,20 @@
 #define HP_ST_VERIFY_FAIL 0x08u
 #define HP_ST_NOT_ERASED 0x09u
 
+/* REFUSED's fail code: which check refused, for the Flipper's log. Its fail offset is the sector
+ * concerned, or 0. */
+#define HP_REFUSE_CART 1u /* CART_INFO hasn't run, or the cart isn't a game the helper writes */
+#define HP_REFUSE_CHIP 2u /* SAVE_PROBE hasn't run, or the chip isn't one the helper writes */
+#define HP_REFUSE_ID 3u /* ARM_WRITE's flash id isn't the probed one */
+#define HP_REFUSE_SLOT 4u /* the save's slots don't allow ARM_WRITE's target and mode */
+#define HP_REFUSE_SECTOR 5u /* a sector outside the armed slot, Hall of Fame and after included */
+#define HP_REFUSE_VALID 6u /* another sector of the armed slot still holds a valid signature */
+
+/* ARM_WRITE's first word, "WR" */
+#define HP_ARM_MAGIC 0x5752u
+/* WRITE_SECTOR's and COPY_SECTOR's flags: leave 0xFF8 erased for COMMIT_SECTOR */
+#define HP_FLAG_DEFER_COMMIT 0x0001u
+
 /* CART_INFO's flags word */
 #define HP_CART_LOGO_OK 0x0001u
 #define HP_CART_FIXED_OK 0x0002u
@@ -73,8 +87,22 @@ struct Hp {
     bool cart_scanned;
     HpProbe probe;
     bool probed;
-    /* The sectors this session erased OK and hasn't programmed since; HELLO starts a new session */
+    /* The sectors this session erased OK and hasn't programmed since; HELLO and ARM_WRITE start
+     * afresh */
     HpFlash flash;
+    /* ARM_WRITE allowed writes to the 14 sectors of slot arm_slot (multiboot-and-save.md §6.3) */
+    bool armed;
+    uint8_t arm_slot;
+    /* Bit k: since the arming, sector 14 * arm_slot + k got its valid signature from this helper
+     * (COMMIT_SECTOR, or a write without DEFER_COMMIT) and hasn't been erased or written since */
+    uint16_t completed;
+    /* WRITE_SECTOR's image, COPY_SECTOR's copy, READ_SECTOR's data */
+    uint8_t sector_buf[HP_FLASH_SECTOR_LEN];
+    /* The last packet executed (plan 5 D3): its CRC, and its response's length; the response
+     * itself stays in resp until the next one executes */
+    bool last_valid;
+    uint32_t last_crc;
+    uint16_t last_len;
 };
 
 void hp_init(Hp* hp);
@@ -91,5 +119,8 @@ void hp_init(Hp* hp);
  * new packet instead. */
 uint16_t hp_step(Hp* hp, uint16_t in, uint8_t flags);
 bool hp_exec_pending(const Hp* hp);
-/* Runs the pending command and queues its response; returns the response's first word, HP_SOF. */
+/* Runs the pending command and queues its response; returns the response's first word, HP_SOF.
+ * A write-class command (ARM_WRITE, ERASE_SECTOR .. COMMIT_SECTOR) whose packet is byte-identical
+ * to the last one executed is not run again: P resent it because the response went missing, and
+ * gets that response again (plan 5 D3). */
 uint16_t hp_execute(Hp* hp);

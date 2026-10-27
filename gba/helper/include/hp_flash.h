@@ -15,6 +15,12 @@
 #define HP_FLASH_SECTOR_LEN 4096u
 #define HP_FLASH_SECTORS 32u
 
+/* The 128 KB chips the games accept (pokeruby: src/libs/agb_flash_1m.c: sSetupInfos), and the only
+ * ones the helper writes. The game also takes 0xD4BF as a 128 KB chip on German Sapphire version 0,
+ * which is never written. */
+#define HP_ID_MX 0x09C2u /* MX29L010 */
+#define HP_ID_SANYO 0x1362u /* LE26FV10N1TS */
+
 /* SAVE_PROBE's class (multiboot-and-save.md §6.3); the values are its wire values. */
 typedef enum {
     HpChipFlash128, /* a 128 KB MX-style flash the game itself accepts */

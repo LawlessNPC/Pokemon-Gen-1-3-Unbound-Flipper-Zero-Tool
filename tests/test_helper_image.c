@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <hp_link.h>
+#include <hp_version.h>
 #include <src/gen3/gen3_mb.h>
 
 /* The committed helper image, files/gen3_helper.mb, written only by make -C gba/helper install.
@@ -41,6 +42,16 @@ static bool image_load(void) {
     return true;
 }
 
+/* The image as the sender takes it: within its cap, a multiple of 16 bytes, the header checks pass
+ * with the helper's protocol version as the version byte, and the title is the helper's. */
+TEST(test_helper_image) {
+    ASSERT_TRUE(image_load());
+    ASSERT_TRUE(image_len <= GEN3_MB_MAX_LEN);
+    ASSERT_EQ(image_len % 16, 0);
+    ASSERT_EQ(gen3_mb_image_check(image, image_len, HP_PROTO_VERSION), Gen3MbImageOk);
+    ASSERT_MEM_EQ(image + 0xA0, "FLIPPERGEN3 ", 12);
+}
+
 /* The sender checks only the logo's first word; the BIOS compares all 156 bytes. */
 TEST(test_helper_image_logo) {
     ASSERT_EQ((uint32_t)~hp_crc32_bytes(0xFFFFFFFFu, logo, sizeof(logo)), 0xD0BEB55Eu);
@@ -64,6 +75,7 @@ TEST(test_helper_cap_matches) {
 }
 
 int main(void) {
+    RUN(test_helper_image);
     RUN(test_helper_image_logo);
     RUN(test_helper_cap_matches);
     TEST_EXIT();

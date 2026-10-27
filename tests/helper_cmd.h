@@ -2,6 +2,7 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 #include <hp_core.h>
 #include <hp_link.h>
 
@@ -11,6 +12,29 @@
 
 #define HELPER_CMD_BAD 0xFFFFu /* helper_cmd_run: the core or its response misbehaved */
 #define HELPER_CMD_RESP_MAX (HP_MAX_PAYLOAD + 4u) /* words after a response's SOF, at most */
+
+/* A cart header (multiboot-and-save.md §2.1): an ARM branch, the logo from own (the helper's own
+ * header, which the BIOS checked), title, code, maker 01, 0x96, version and the complement. */
+static inline void helper_cmd_header(
+    uint8_t out[0xC0],
+    const uint8_t* own,
+    const char* title,
+    const char* code,
+    uint8_t version) {
+    memset(out, 0, 0xC0);
+    out[0] = 0x2E;
+    out[3] = 0xEA;
+    memcpy(out + 4, own + 4, 156);
+    memcpy(out + 0xA0, title, strlen(title));
+    memcpy(out + 0xAC, code, 4);
+    out[0xB0] = '0';
+    out[0xB1] = '1';
+    out[0xB2] = 0x96;
+    out[0xBC] = version;
+    uint8_t chk = 0;
+    for(uint32_t i = 0xA0; i <= 0xBC; i++) chk -= out[i];
+    out[0xBD] = (uint8_t)(chk - 0x19);
+}
 
 /* Steps the core through n words with no flags; returns the last step's word. */
 static inline uint16_t helper_cmd_feed(Hp* hp, const uint16_t* words, uint32_t n) {

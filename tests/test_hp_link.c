@@ -180,8 +180,8 @@ TEST(test_hp_false_sof) {
     ASSERT_TRUE(hello_served());
 }
 
-/* A known command not implemented yet answers UNSUPPORTED, with the fail code and offset words
- * every non-OK response carries (n 2). */
+/* A flash read before SAVE_PROBE has found a 128 KB flash answers UNSUPPORTED, with the fail code
+ * and offset words every non-OK response carries (n 2). */
 TEST(test_hp_unsupported) {
     setup();
     uint16_t req[8];
@@ -196,8 +196,9 @@ TEST(test_hp_unsupported) {
 }
 
 /* Each command's fixed request length (n) is accepted, the longest included. With no cart and no
- * save chip, CART_INFO and SAVE_PROBE answer OK (102 and 5 words); the commands not implemented yet
- * answer UNSUPPORTED (2 words). */
+ * save chip, and these arguments (0, 0x9E37, ...): CART_INFO and SAVE_PROBE answer OK (102 and 5
+ * words) and DISARM OK (0 words); ARM_WRITE (magic 0) and the ROM reads (address 0x9E370000) a bad
+ * argument; the flash reads UNSUPPORTED and the writes REFUSED (2 words each). */
 TEST(test_hp_request_lengths) {
     static const struct {
         uint8_t code;
@@ -207,17 +208,17 @@ TEST(test_hp_request_lengths) {
     } cmds[] = {
         {HP_CMD_CART_INFO, 0, HP_ST_OK, 102},
         {HP_CMD_SAVE_PROBE, 0, HP_ST_OK, 5},
-        {HP_CMD_ARM_WRITE, 6, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_DISARM, 0, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_ARM_WRITE, 6, HP_ST_BAD_ARG, 2},
+        {HP_CMD_DISARM, 0, HP_ST_OK, 0},
         {HP_CMD_READ_SECTOR, 1, HP_ST_UNSUPPORTED, 2},
         {HP_CMD_READ_FOOTERS, 0, HP_ST_UNSUPPORTED, 2},
         {HP_CMD_SECTOR_CRC32, 1, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_ERASE_SECTOR, 1, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_WRITE_SECTOR, 2050, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_COPY_SECTOR, 5, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_COMMIT_SECTOR, 1, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_ROM_READ, 3, HP_ST_UNSUPPORTED, 2},
-        {HP_CMD_ROM_CRC32, 4, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_ERASE_SECTOR, 1, HP_ST_REFUSED, 2},
+        {HP_CMD_WRITE_SECTOR, 2050, HP_ST_REFUSED, 2},
+        {HP_CMD_COPY_SECTOR, 5, HP_ST_REFUSED, 2},
+        {HP_CMD_COMMIT_SECTOR, 1, HP_ST_REFUSED, 2},
+        {HP_CMD_ROM_READ, 3, HP_ST_BAD_ARG, 2},
+        {HP_CMD_ROM_CRC32, 4, HP_ST_BAD_ARG, 2},
     };
     static uint16_t args[2050];
     static uint16_t req[2055];
