@@ -2,6 +2,8 @@
 
 #include <stdbool.h>
 #include <stdint.h>
+#include "hp_cart.h"
+#include "hp_flash.h"
 #include "hp_link.h"
 
 /* The helper's protocol core, portable C: the packet layer and the commands
@@ -38,6 +40,13 @@
 #define HP_ST_VERIFY_FAIL 0x08u
 #define HP_ST_NOT_ERASED 0x09u
 
+/* CART_INFO's flags word */
+#define HP_CART_LOGO_OK 0x0001u
+#define HP_CART_FIXED_OK 0x0002u
+#define HP_CART_COMPLEMENT_OK 0x0004u
+#define HP_CART_OTHER_LIB 0x0008u
+#define HP_CART_WRITE_GAME 0x0010u
+
 /* hp_step flags */
 #define HP_STEP_ERR 1u /* SIOCNT's error bit was set for this word */
 #define HP_STEP_TIMEOUT 2u /* no transfer for 200 ms (TM3 >= 196): `in` is not a word */
@@ -58,6 +67,12 @@ struct Hp {
     uint16_t tx_len; /* words of the response going out; 0: none */
     uint16_t tx_pos; /* the next of them for hp_step */
     uint16_t resp[3u + HP_MAX_PAYLOAD + 2u]; /* SOF, seq << 8 | status, n, payload, CRC */
+    /* What the cart checks found (multiboot-and-save.md §6.3): CART_INFO scans again each time;
+     * SAVE_PROBE probes once, and later calls answer from here. */
+    HpCart cart;
+    bool cart_scanned;
+    HpProbe probe;
+    bool probed;
 };
 
 void hp_init(Hp* hp);

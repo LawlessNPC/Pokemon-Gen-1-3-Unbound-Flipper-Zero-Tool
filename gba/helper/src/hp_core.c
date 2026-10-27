@@ -130,6 +130,47 @@ static uint16_t hp_fail(Hp* hp, uint8_t status, uint16_t code, uint16_t off) {
     return hp_respond(hp, status, 2);
 }
 
+/* CART_INFO: 96 header words; flags; ROM size (2 words); library kind; its offset (2 words). */
+static uint16_t hp_cart_info(Hp* hp) {
+    hp_cart_scan(&hp->cart);
+    hp->cart_scanned = true;
+    const HpCart* c = &hp->cart;
+    uint16_t* p = hp->resp + 3;
+    for(uint32_t k = 0; k < 96; k++) p[k] = hp_hal_rom16(2u * k);
+    p[96] =
+        (uint16_t)((c->logo_ok ? HP_CART_LOGO_OK : 0u) | (c->fixed_ok ? HP_CART_FIXED_OK : 0u) |
+                   (c->complement_ok ? HP_CART_COMPLEMENT_OK : 0u) |
+                   (c->other_lib ? HP_CART_OTHER_LIB : 0u) |
+                   (c->write_game ? HP_CART_WRITE_GAME : 0u));
+    p[97] = (uint16_t)c->rom_size;
+    p[98] = (uint16_t)(c->rom_size >> 16);
+    p[99] = (uint16_t)c->lib;
+    p[100] = (uint16_t)c->lib_off;
+    p[101] = (uint16_t)(c->lib_off >> 16);
+    return hp_respond(hp, HP_ST_OK, 102);
+}
+
+/* SAVE_PROBE: flash ID; class; pre0 | pre1 << 8; id0 | id1 << 8; SRAM. The game code and version
+ * come from the cart header itself, whether CART_INFO ran or not. */
+static uint16_t hp_save_probe(Hp* hp) {
+    if(!hp->probed) {
+        const uint16_t c01 = hp_hal_rom16(0xAC);
+        const uint16_t c23 = hp_hal_rom16(0xAE);
+        const uint8_t code[4] = {
+            (uint8_t)c01, (uint8_t)(c01 >> 8), (uint8_t)c23, (uint8_t)(c23 >> 8)};
+        hp_flash_probe(&hp->probe, code, (uint8_t)hp_hal_rom16(0xBC));
+        hp->probed = true;
+    }
+    const HpProbe* pr = &hp->probe;
+    uint16_t* p = hp->resp + 3;
+    p[0] = pr->id;
+    p[1] = (uint16_t)pr->cls;
+    p[2] = (uint16_t)(pr->pre0 | pr->pre1 << 8);
+    p[3] = (uint16_t)(pr->id0 | pr->id1 << 8);
+    p[4] = pr->sram ? 1u : 0u;
+    return hp_respond(hp, HP_ST_OK, 5);
+}
+
 static uint16_t hp_hello(Hp* hp) {
     const uint8_t* own = hp_hal_own_header();
     uint16_t* p = hp->resp + 3;
@@ -146,6 +187,10 @@ uint16_t hp_execute(Hp* hp) {
     switch(hp->code) {
     case HP_CMD_HELLO:
         return hp_hello(hp);
+    case HP_CMD_CART_INFO:
+        return hp_cart_info(hp);
+    case HP_CMD_SAVE_PROBE:
+        return hp_save_probe(hp);
     default:
         return hp_fail(hp, HP_ST_UNSUPPORTED, 0, 0);
     }

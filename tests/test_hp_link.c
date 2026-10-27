@@ -219,25 +219,29 @@ TEST(test_hp_unsupported) {
     ASSERT_EQ(HP_ST_UNSUPPORTED, 0x03);
 }
 
-/* Each command's fixed request length (n) is accepted, the longest included. */
+/* Each command's fixed request length (n) is accepted, the longest included. With no cart and no
+ * save chip, CART_INFO and SAVE_PROBE answer OK (102 and 5 words); the commands not implemented yet
+ * answer UNSUPPORTED (2 words). */
 TEST(test_hp_request_lengths) {
     static const struct {
         uint8_t code;
         uint16_t n;
+        uint8_t status;
+        uint16_t resp_n;
     } cmds[] = {
-        {HP_CMD_CART_INFO, 0},
-        {HP_CMD_SAVE_PROBE, 0},
-        {HP_CMD_ARM_WRITE, 6},
-        {HP_CMD_DISARM, 0},
-        {HP_CMD_READ_SECTOR, 1},
-        {HP_CMD_READ_FOOTERS, 0},
-        {HP_CMD_SECTOR_CRC32, 1},
-        {HP_CMD_ERASE_SECTOR, 1},
-        {HP_CMD_WRITE_SECTOR, 2050},
-        {HP_CMD_COPY_SECTOR, 5},
-        {HP_CMD_COMMIT_SECTOR, 1},
-        {HP_CMD_ROM_READ, 3},
-        {HP_CMD_ROM_CRC32, 4},
+        {HP_CMD_CART_INFO, 0, HP_ST_OK, 102},
+        {HP_CMD_SAVE_PROBE, 0, HP_ST_OK, 5},
+        {HP_CMD_ARM_WRITE, 6, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_DISARM, 0, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_READ_SECTOR, 1, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_READ_FOOTERS, 0, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_SECTOR_CRC32, 1, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_ERASE_SECTOR, 1, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_WRITE_SECTOR, 2050, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_COPY_SECTOR, 5, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_COMMIT_SECTOR, 1, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_ROM_READ, 3, HP_ST_UNSUPPORTED, 2},
+        {HP_CMD_ROM_CRC32, 4, HP_ST_UNSUPPORTED, 2},
     };
     static uint16_t args[2050];
     static uint16_t req[2055];
@@ -248,8 +252,9 @@ TEST(test_hp_request_lengths) {
         for(uint32_t i = 0; i + 1 < len; i++) ASSERT_EQ(hp_step(&hp, req[i], 0), HP_RECV);
         ASSERT_EQ(hp_step(&hp, req[len - 1], 0), HP_BUSY);
         ASSERT_EQ(hp_execute(&hp), HP_SOF);
-        ASSERT_EQ(hp_step(&hp, 0x0000, 0), (uint16_t)(c << 8 | HP_ST_UNSUPPORTED));
-        for(int i = 0; i < 5; i++) hp_step(&hp, 0x0000, 0);
+        ASSERT_EQ(hp_step(&hp, 0x0000, 0), (uint16_t)(c << 8 | cmds[c].status));
+        ASSERT_EQ(hp_step(&hp, 0x0000, 0), cmds[c].resp_n);
+        for(uint32_t i = 0; i < cmds[c].resp_n + 2u; i++) hp_step(&hp, 0x0000, 0);
         ASSERT_EQ(hp_step(&hp, 0x0000, 0), HP_READY);
         /* one word more or less is dropped at w2 */
         const uint16_t head[3] = {HP_SOF, req[1], (uint16_t)(cmds[c].n + 1)};

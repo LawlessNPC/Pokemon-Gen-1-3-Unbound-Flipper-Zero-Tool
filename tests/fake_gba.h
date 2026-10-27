@@ -1,14 +1,67 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <hp_hal.h>
 
 /* Test-only model of the GBA the helper's portable core runs on, behind hp_hal.h: its own header,
- * the TM3 timer and the status backdrop. The hp_hal_* functions act on the FakeGba that
- * fake_gba_init initialised last. It shares nothing with the Flipper's code. Never a stack local
- * in a test: static or heap. */
+ * the cart ROM, the save chip, the timer and the status backdrop. The hp_hal_* functions act on
+ * the FakeGba that fake_gba_init initialised last. It shares nothing with the Flipper's code.
+ * Never a stack local in a test (128 KB of flash): static or heap.
+ *
+ * The flash chip is a JEDEC command state machine (multiboot-and-save.md §3.4), written to be no
+ * more lenient than a real part:
+ * - AA@5555, 55@2AAA, then cmd@5555: 0x90 ID mode, 0xF0 read mode, 0x80 (then AA@5555, 55@2AAA
+ *   and 30 at a sector's first byte, or 10@5555 for a chip erase), 0xA0 (the next write programs
+ *   one byte: new = old & v) and 0xB0 (the next write, at 0000, selects bank 0 or 1);
+ * - 0xF0 written anywhere returns it to read mode (from ID mode or a failure too); any other write
+ *   outside a sequence is ignored, and a wrong write inside one ends the sequence
+ *   (multiboot-and-save.md M8);
+ * - in ID mode, 0000 reads the maker and 0001 the device, but only after hp_hal_id_delay;
+ * - erase and program complete at once. An injected failure leaves the bytes unchanged and puts
+ *   the chip in its status mode until a 0xF0: every read then returns the old byte with DQ5 (bit 5)
+ *   set and DQ7 (bit 7) the complement of the data being written, as JEDEC data polling does, so a
+ *   status read never equals the expected byte.
+ * Command sequences are decoded, and counted, for every kind of save chip; only FakeSaveFlash acts
+ * on them. */
 
 #define FAKE_GBA_OWN_LEN 0x100u
+#define FAKE_GBA_HEADER_LEN 0xC0u
+#define FAKE_GBA_FLASH_LEN 131072u
+#define FAKE_GBA_SRAM_LEN 65536u
+#define FAKE_GBA_SECTORS 32u
+#define FAKE_GBA_STRINGS 8u
+#define FAKE_GBA_STRING_MAX 16u
+#define FAKE_GBA_TRACE 64u
+
+typedef enum {
+    FakeSaveFlash, /* a JEDEC flash chip with the id given to fake_gba_save */
+    FakeSaveSram, /* a plain 64 KB SRAM: every write lands */
+    FakeSaveNone, /* nothing: reads 0xFF, writes vanish */
+    FakeSaveRomLike, /* reads the array, ignores every write: ID mode changes nothing */
+} FakeSaveKind;
+
+typedef enum {
+    FakeGbaOpWrite, /* hp_hal_flash_write(off, val) */
+    FakeGbaOpRead, /* hp_hal_flash_read(off) returned val */
+    FakeGbaOpDelay, /* hp_hal_id_delay() */
+} FakeGbaOpKind;
+
+typedef struct {
+    FakeGbaOpKind kind;
+    uint16_t off;
+    uint8_t val;
+} FakeGbaOp;
+
+typedef struct {
+    uint32_t erases; /* sector erase commands, failed ones included */
+    uint32_t programs; /* byte program commands, commit bytes included */
+    uint32_t commits; /* byte programs of a sector's offset 0xFF8, its signature's first byte */
+    uint32_t bank_selects;
+    uint32_t chip_erases;
+    uint32_t sram_writes; /* writes that landed in a FakeSaveSram */
+    uint32_t id_entries; /* ID-mode commands */
+} FakeGbaCounts;
 
 typedef struct FakeGba FakeGba;
 
@@ -16,11 +69,81 @@ struct FakeGba {
     /* The helper's image from 0x02000000: the header at 0x00..0xBF, then the multiboot entries,
      * where the BIOS writes the boot mode at 0xC4 and the slave id at 0xC5 */
     uint8_t own[FAKE_GBA_OWN_LEN];
-    uint16_t timer_units; /* what hp_hal_timer_units returns; hp_hal_timer_start zeroes it */
     HpStatus status; /* the last hp_hal_status */
+
+    /* Cart ROM: the header, then the pattern halfword ((off * 31) >> 3) & 0xFFFF at even off,
+     * with the strings laid over it; past rom_size, open bus (off / 2) & 0xFFFF, or with
+     * rom_mirror the ROM again */
+    uint8_t header[FAKE_GBA_HEADER_LEN];
+    uint32_t rom_size; /* 0: no cart */
+    bool rom_mirror;
+    uint32_t strings;
+    uint32_t string_off[FAKE_GBA_STRINGS];
+    uint8_t string_len[FAKE_GBA_STRINGS];
+    char string[FAKE_GBA_STRINGS][FAKE_GBA_STRING_MAX];
+
+    /* The save chip */
+    FakeSaveKind save;
+    uint16_t chip_id; /* device << 8 | maker */
+    uint8_t flash[FAKE_GBA_FLASH_LEN]; /* Flash: 2 banks of 64 KB; Sram, RomLike: the first 64 KB */
+    uint8_t bank; /* tests may set it, to leave the chip in a bank */
+    uint8_t mode; /* read, ID or status (after a failure) */
+    uint8_t seq; /* how far a command sequence has got */
+    bool id_settling; /* ID mode was entered and hp_hal_id_delay hasn't run since */
+    uint8_t fail_want; /* in status mode: the byte the failed operation was writing */
+    uint8_t fail_erase[FAKE_GBA_SECTORS];
+    uint8_t fail_program_sector;
+    uint16_t fail_program_off;
+    uint8_t fail_program_times;
+    bool cut_armed;
+    uint32_t cut_ops; /* erases + byte programs still allowed before the chip freezes */
+    bool frozen; /* the power cut came */
+    uint8_t late_reads; /* tests set it: the next erase or program to complete shows this many
+                         * status reads, DQ5 set, before its data, as if it finished just as DQ5
+                         * rose */
+    uint8_t late_left;
+    uint8_t late_want;
+
+    /* Observations */
+    FakeGbaCounts counts;
+    uint32_t ops_not_red; /* erases and byte programs issued while the status wasn't Writing */
+    uint16_t last_write_off;
+    uint8_t last_write_val;
+    uint32_t trace_len; /* tests zero it to start a trace; the first FAKE_GBA_TRACE ops are kept */
+    bool trace_no_reads; /* trace writes and delays only */
+    FakeGbaOp trace[FAKE_GBA_TRACE];
+
+    /* Time */
+    uint32_t timer_reads; /* flash reads since hp_hal_timer_start */
+    uint64_t busy_us;
+    uint64_t rom_bytes; /* ROM bytes read since the last fake_gba_take_busy_us */
 };
 
-/* The own header gets a test logo (a fixed 156-byte pattern, not the real one) at 0x04..0x9F,
- * 3 (MultiPlay) at 0xC4 and 1 (slave id) at 0xC5; the timer reads 0; the status is Ready. */
+/* The own header gets a test logo at 0x04..0x9F (a fixed 156-byte pattern, not the real logo, but
+ * starting with its first word 0x51AEFF24), 3 (MultiPlay) at 0xC4 and 1 (slave id) at 0xC5; the
+ * status is Ready. No cart (every ROM read is open bus) and no save chip (FakeSaveNone); the flash
+ * array is all 0xFF. */
 void fake_gba_init(FakeGba* g);
 FakeGba* fake_gba_current(void);
+
+/* Inserts a cart: its 0xC0-byte header, then the pattern up to rom_size; clears the strings. */
+void fake_gba_rom(FakeGba* g, const uint8_t header[0xC0], uint32_t rom_size);
+/* Places a library string (without its NUL) at off, over the pattern. */
+void fake_gba_rom_string(FakeGba* g, uint32_t off, const char* s);
+/* Sets the save chip, with id = device << 8 | maker for FakeSaveFlash, in read mode and bank 0.
+ * The array is left as it is. */
+void fake_gba_save(FakeGba* g, FakeSaveKind kind, uint16_t id);
+/* The array: 131072 bytes (Flash) or 65536 (Sram, RomLike) */
+uint8_t* fake_gba_flash(FakeGba* g);
+/* The next `times` erase commands for that sector fail. */
+void fake_gba_fail_erase(FakeGba* g, uint8_t sector, uint8_t times);
+/* The next `times` byte programs at that sector's offset fail. */
+void fake_gba_fail_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t times);
+/* From now, the next `ops` erases + byte programs complete; then the chip freezes: it acts on no
+ * later write (they are still counted), and reads return the array as it was. */
+void fake_gba_power_cut_after(FakeGba* g, uint32_t ops);
+void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out);
+/* Time the GBA spent since the last call, in µs, as the fake models it: 300,000 per erase, 25 per
+ * byte program, 1 per flash read (a sector CRC is 4096), and ROM reads at 1,500,000 per 16 MiB
+ * (a whole-ROM scan). Resets to 0. */
+uint32_t fake_gba_take_busy_us(FakeGba* g);

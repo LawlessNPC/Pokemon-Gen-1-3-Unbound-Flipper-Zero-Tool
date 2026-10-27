@@ -20,11 +20,12 @@
 #define HP_TM2_START 0x0082u /* enable, prescaler 256 */
 #define HP_TM3_START 0x0084u /* enable, count-up */
 
-uint16_t hp_hal_rom16(uint32_t off) {
+/* From IWRAM, as the ROM scan's inner loop calls them once per word: ARM to ARM, no veneer. */
+HP_IWRAM uint16_t hp_hal_rom16(uint32_t off) {
     return *(volatile const uint16_t*)(HP_ROM_BASE + off);
 }
 
-uint32_t hp_hal_rom32(uint32_t off) {
+HP_IWRAM uint32_t hp_hal_rom32(uint32_t off) {
     return *(volatile const uint32_t*)(HP_ROM_BASE + off);
 }
 
