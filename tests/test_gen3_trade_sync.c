@@ -1653,6 +1653,8 @@ TEST(test_guide_frlg_rows) {
 /* Every line fits FontSecondary across 128 px (21 characters) for every combination */
 static unsigned long guide_calls;
 static bool guide_saw_confirm, guide_saw_next;
+/* A "Link lost ..." row shown with a partner refusal (one only the unlinked sweep reaches) */
+static bool guide_saw_partner_lost;
 
 /* One sweep call: gen3_trade_guide cut no text, and line 1 says something */
 static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFail pf) {
@@ -1703,6 +1705,7 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
     }
     guide_saw_confirm |= strcmp(out[0], "Confirm the trade") == 0;
     guide_saw_next |= strcmp(out[0], "Edit it (OK), or pick") == 0;
+    guide_saw_partner_lost |= partner && strncmp(out[0], "Link lost", strlen("Link lost")) == 0;
     return true;
 }
 
@@ -1711,8 +1714,14 @@ static bool guide_fits(const Gen3ClubStatus* st, Gen3Refuse offer, Gen3PickupFai
  * offer_stale, resit_needed, gba_seated, relinking} x menu x trades_done (0, 1), then
  * (a) refused x last_result with no pickup failure and no offer refusal, and
  * (b) offer_refuse x pickup_fail with refused and last_result None.
- * A pickup failure or an offer refusal decides the guide before any row that reads refused or
- * last_result, so (a) and (b) together reach every row of the full cross product. */
+ * While a GBA is linked (a phase other than Waiting, or relinking), a pickup failure or an offer
+ * refusal decides the guide before any row that reads refused or last_result, so there (a) and
+ * (b) stand for the full cross product. With no GBA linked they don't: last_result decides
+ * whether the latest trade was lost in the GBA's save, ahead of the pickup and offer rows, and a
+ * partner refusal (NationalDex, Fateful) falls through to the Waiting rows, which read
+ * last_result. So a second sweep, counted on its own, covers every unlinked status:
+ * (c) Waiting, not relinking, x last_error x the other seven flags x menu x trades_done, then
+ * offer_refuse x pickup_fail x last_result, with refused None (no unlinked row reads it). */
 TEST(test_guide_line_lengths) {
     Gen3ClubStatus st;
     guide_calls = 0;
@@ -1759,6 +1768,42 @@ TEST(test_guide_line_lengths) {
     ASSERT_EQ(guide_calls, 11ul * 5 * 256 * 4 * 2 * (9 * 5 + 9 * 3));
     ASSERT_TRUE(guide_saw_confirm);
     ASSERT_TRUE(guide_saw_next);
+
+    /* (c) No GBA linked */
+    guide_calls = 0;
+    guide_saw_partner_lost = false;
+    for(int err = Gen3ClubErrorNone; err <= Gen3ClubErrorUnexpected; err++) {
+        for(unsigned flags = 0; flags < (1u << 7); flags++) {
+            for(int menu = Gen3ClubMenuIdle; menu <= Gen3ClubMenuLeaving; menu++) {
+                for(uint32_t done = 0; done <= 1; done++) {
+                    status_reset(&st, Gen3ClubPhaseWaiting);
+                    st.last_error = (Gen3ClubError)err;
+                    st.save_window = flags & 1;
+                    st.left = flags & 2;
+                    st.leaving = flags & 4;
+                    st.trade_pending = flags & 8;
+                    st.offer_stale = flags & 16;
+                    st.resit_needed = flags & 32;
+                    st.gba_seated = flags & 64;
+                    st.menu = (Gen3ClubMenu)menu;
+                    st.trades_done = done;
+                    for(int offer = Gen3RefuseNone; offer <= Gen3RefuseFateful; offer++) {
+                        for(int pf = Gen3PickupOk; pf <= Gen3PickupBadData; pf++) {
+                            for(int res = Gen3TradeResultNone; res <= Gen3TradeResultAssumed;
+                                res++) {
+                                st.last_result = (Gen3TradeResult)res;
+                                ASSERT_TRUE(
+                                    guide_fits(&st, (Gen3Refuse)offer, (Gen3PickupFail)pf));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ASSERT_EQ(guide_calls, 5ul * 128 * 4 * 2 * (9 * 3 * 5));
+    /* With no GBA linked, a partner refusal leaves the Waiting rows to say how a trade was lost */
+    ASSERT_TRUE(guide_saw_partner_lost);
 }
 
 /* The sweep's check can fail: a text over 21 characters is cut to 21, and reported */

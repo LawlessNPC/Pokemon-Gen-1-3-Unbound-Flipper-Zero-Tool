@@ -11,9 +11,13 @@
 #include <src/gen3/gen3_text.h>
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
-/* Gen III editor menu. Each row's item index is the scene it opens, except "OT: use <NAME>"
- * (PokemonSceneNum), which applies the GBA player's OT in place. The spaces after each label line
- * the values up at the same pixel column in the submenu font, as in pokemon_gen.c. */
+/* Gen III editor menu. Each row's item index is the scene it opens, except two rows that change
+ * the Pokemon in place, whose indexes are no scene ids: "OT: use <NAME>" (PokemonSceneNum), which
+ * applies the GBA player's OT, and "Fateful" (GEN3_EDIT_ROW_FATEFUL), which flips the
+ * fateful-encounter bit of a Mew or Deoxys. The spaces after each label line the values up at the
+ * same pixel column in the submenu font, as in pokemon_gen.c. */
+
+#define GEN3_EDIT_ROW_FATEFUL (PokemonSceneNum + 1)
 
 /* The "Shiny lost" notice from "OT: use <NAME>" is up over this menu (D7) */
 static bool gen3_edit_notice_up = false;
@@ -110,6 +114,18 @@ void pokemon_scene_gen3_edit_on_enter(void* context) {
     gen3_item_name_get((uint16_t)gen3_pkm_get(p, Gen3FieldBall), item_name);
     snprintf(buf, sizeof(buf), "Ball:               %s", item_name);
     gen3_edit_add(pokemon_fap, buf, PokemonSceneGen3Ball);
+
+    /* FireRed/LeafGreen won't trade a Mew or Deoxys without the fateful-encounter bit, and a .pk3
+     * or a trade from Ruby can bring one without it. A species change sets the bit; this row
+     * sets or clears it. */
+    if(national == GEN3_NATIONAL_MEW || national == GEN3_NATIONAL_DEOXYS) {
+        snprintf(
+            buf,
+            sizeof(buf),
+            "Fateful:        %s",
+            gen3_pkm_get(p, Gen3FieldFateful) ? "Yes" : "No");
+        gen3_edit_add(pokemon_fap, buf, GEN3_EDIT_ROW_FATEFUL);
+    }
 
     item = (uint16_t)gen3_pkm_get(p, Gen3FieldHeldItem);
     if(item) gen3_item_name_get(item, item_name);
@@ -211,6 +227,14 @@ bool pokemon_scene_gen3_edit_on_event(void* context, SceneManagerEvent event) {
         } else {
             pokemon_scene_gen3_edit_on_enter(pokemon_fap);
         }
+        return true;
+    case GEN3_EDIT_ROW_FATEFUL:
+        /* Flipped in place. The row stays, and the item callback already stored it as the scene
+         * state, so the highlight stays on it. */
+        gen3_edit_set_fateful(
+            pokemon_fap->gen3_editor,
+            !gen3_pkm_get(&pokemon_fap->gen3_editor->pkm, Gen3FieldFateful));
+        pokemon_scene_gen3_edit_on_enter(pokemon_fap);
         return true;
     default:
         /* Not one of this menu's rows */

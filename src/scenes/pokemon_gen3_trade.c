@@ -126,8 +126,11 @@ void gen3_trade_tick(PokemonFap* pokemon_fap) {
 
         const unsigned r =
             gen3_trade_sync_poll(sync, ed, st, gen3_trade_received, received_count, editing);
+        /* The offer goes with the traits the poll computed from the editor's decrypted
+         * Pokemon: the club may not decrypt in the hand-off's PRIMASK section */
         if((r & Gen3SyncOffer) &&
-           gen3_session_set_offer(s, sync->offer_valid ? sync->offer : NULL, sync->trades_seen)) {
+           gen3_session_set_offer_traits(
+               s, sync->offer_valid ? sync->offer : NULL, sync->trades_seen, sync->offer_traits)) {
             gen3_trade_sync_offer_taken(sync);
         }
         /* O1: back from editing. After the offer above, so the club sees the new offer before

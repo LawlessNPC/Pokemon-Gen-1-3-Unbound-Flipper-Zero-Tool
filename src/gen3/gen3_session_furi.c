@@ -269,13 +269,19 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool
  * worst with the firmware's byte-loop memcpy. That only delays the start of a transfer the TIM2
  * tick would begin meanwhile; the bit timing and the frame cadence are unaffected. */
 
-bool gen3_session_set_offer(Gen3Session* s, const uint8_t* offer, uint32_t trades_seen) {
+bool gen3_session_set_offer_traits(
+    Gen3Session* s,
+    const uint8_t* offer,
+    uint32_t trades_seen,
+    uint8_t traits) {
     furi_check(s);
     if(!s->running) return false;
 
+    /* The traits come in computed: the decrypt they need ran on the app thread, before this */
     const uint32_t primask = __get_PRIMASK();
     __disable_irq();
-    const bool ok = gen3_club_set_offer(&s->club, offer, trades_seen); /* 100 B + has_offer */
+    /* 100 B + has_offer + traits: 102 B */
+    const bool ok = gen3_club_set_offer_traits(&s->club, offer, trades_seen, traits);
     __set_PRIMASK(primask);
     return ok;
 }

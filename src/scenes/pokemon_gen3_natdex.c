@@ -8,7 +8,9 @@
 
 /* "Unlock National Dex?" (D10): the confirm to turn the per-run setting on. Turning it off needs
  * none (the Gen III menu does it at once). The next 0x1144 block the Flipper sends carries the
- * flag, and the GBA keeps its National Dex for good. */
+ * flag, and a Ruby or Sapphire GBA keeps its National Dex for good. FireRed/LeafGreen never read
+ * it (fr: trade_scene.c: TryEnableNationalDexFromLinkPartner has Ruby's check commented out),
+ * and the dialog says so. */
 
 static void gen3_natdex_dialog_callback(DialogExResult result, void* context) {
     PokemonFap* pokemon_fap = context;
@@ -24,7 +26,7 @@ void pokemon_scene_gen3_natdex_on_enter(void* context) {
     dialog_ex_set_header(dialog_ex, "Unlock National Dex?", 64, 0, AlignCenter, AlignTop);
     dialog_ex_set_text(
         dialog_ex,
-        "The next trade unlocks\nthe GBA's National Dex\nfor good.",
+        "Ruby/Sapphire only.\nThe next trade unlocks\nit for good.",
         64,
         12,
         AlignCenter,

@@ -93,7 +93,7 @@ unsigned gen3_trade_sync_poll(
     const uint8_t received[GEN3_PARTY_SIZE],
     uint32_t received_count,
     bool editing);
-/* The session accepted the offer (or "none"): gen3_session_set_offer returned true. */
+/* The session accepted the offer (or "none"): gen3_session_set_offer_traits returned true. */
 void gen3_trade_sync_offer_taken(Gen3TradeSync* sync);
 
 /* ---- Ending a trade session (D1, D9, D10, R6) ---- */

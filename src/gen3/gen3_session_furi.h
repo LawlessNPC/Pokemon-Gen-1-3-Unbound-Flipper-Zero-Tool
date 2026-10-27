@@ -58,12 +58,19 @@ void gen3_session_status(Gen3Session* s, Gen3ClubStatus* out, bool* log_ok, bool
 /* ---- App <-> club hand-off: each runs its gen3_club_* call inside one PRIMASK section. The
  * status shows the change from the next frame on. ---- */
 
-/* gen3_club_set_offer: offer is the Flipper's one party Pokemon (game form, GEN3_PARTY_SIZE
- * bytes), or NULL for no offer. Copied unchecked, since a PRIMASK section may not decrypt: publish
- * only a Pokemon that passes gen3_trade_offer_check (gen3_trade_sync_poll does). false and nothing
+/* gen3_club_set_offer_traits: offer is the Flipper's one party Pokemon (game form,
+ * GEN3_PARTY_SIZE bytes), or NULL for no offer; traits are its gen3_offer_traits (ignored without
+ * an offer). The section copies the 100-byte offer, has_offer and the traits byte, and decrypts
+ * nothing, so both come from the app thread: publish only a Pokemon that passes
+ * gen3_trade_offer_check, with the traits of its decrypted form (gen3_trade_sync_poll does both).
+ * The club sits and shows it only while the GBA's rules take those traits. false and nothing
  * changed if trades_seen isn't the club's trades_done (D6), or if the session isn't running (the
  * next start's club wouldn't have it). */
-bool gen3_session_set_offer(Gen3Session* s, const uint8_t* offer, uint32_t trades_seen);
+bool gen3_session_set_offer_traits(
+    Gen3Session* s,
+    const uint8_t* offer,
+    uint32_t trades_seen,
+    uint8_t traits);
 /* gen3_club_get_received: the latest finalized trade's Pokemon (game form; zeros before any) and
  * trades_done (may be NULL). After a stop: the stopped run's; before the first start: zeros, 0. */
 void gen3_session_get_received(Gen3Session* s, uint8_t out[GEN3_PARTY_SIZE], uint32_t* trades_done);

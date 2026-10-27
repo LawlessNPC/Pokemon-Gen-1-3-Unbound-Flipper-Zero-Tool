@@ -194,10 +194,10 @@ static uint16_t fz_national(void) {
     case 0:
     case 1:
         return GEN3_NATIONAL_UNOWN; /* for the shiny letter limits */
-    case 3: /* for the fateful rule (FRLG): set_fateful and imports can clear the bit */
-        return fz_below(2) ? GEN3_NATIONAL_MEW : GEN3_NATIONAL_DEOXYS;
     case 2:
         return (uint16_t)fz_below(400); /* 0 and past 386 included */
+    case 3: /* for the fateful rule (FRLG): set_fateful and imports can clear the bit */
+        return fz_below(2) ? GEN3_NATIONAL_MEW : GEN3_NATIONAL_DEOXYS;
     default:
         return (uint16_t)(1 + fz_below(GEN3_NATIONAL_COUNT));
     }
