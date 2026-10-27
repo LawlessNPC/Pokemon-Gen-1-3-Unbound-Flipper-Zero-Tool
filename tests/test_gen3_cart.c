@@ -418,6 +418,58 @@ TEST(test_job_connect_cancel) {
     ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
 }
 
+/* A connect cut short after its HELLO, by cancel or an error, leaves the cart unlinked: its
+ * CART_INFO may already describe another cart than its id does. Swapped to FireRed, a ROM copy
+ * then would write FireRed as roms/AXVE_v0.gba over the Ruby one. */
+TEST(test_job_connect_partial) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartOk);
+    static uint8_t ruby[MIB];
+    uint32_t size;
+    const uint8_t* rom = file(ROM_NAME, &size);
+    ASSERT_TRUE(rom != NULL && size == MIB);
+    memcpy(ruby, rom, MIB);
+    helper_cmd_header(hdr, gba.own, "POKEMON FIRE", "BPRE", 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    fake_gba_rom_string(&gba, LIB_OFF, LIB_STRING);
+    fake_helper_restart(&fh);
+    /* cancelled after CART_INFO */
+    prog.cancel_step = Gen3CartStepIdentify;
+    prog.cancel_at = 2;
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartCancelled);
+    ASSERT_EQ(calls(GEN3_HCMD_CART_INFO), 2);
+    cancel = false;
+    prog.cancel_step = Gen3CartStepNone;
+    const uint32_t exchanges = tap.exchanges;
+    bool dropped = true;
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartLinkLost);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartLinkLost);
+    ASSERT_EQ(gen3_cart_attach(&cart, STAMP, &dropped), Gen3CartLinkLost);
+    ASSERT_EQ(tap.exchanges, exchanges);
+    rom = file(ROM_NAME, &size);
+    ASSERT_TRUE(rom != NULL && size == MIB);
+    ASSERT_MEM_EQ(rom, ruby, MIB);
+    ASSERT_EQ(fake_store_count(&store, ".part"), 0);
+    /* an error after HELLO: the same */
+    tap.fake_code = GEN3_HCMD_SAVE_PROBE;
+    tap.fake_status = GEN3_HST_UNSUPPORTED;
+    tap.fake_n = 2;
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartHelperError);
+    tap.fake_code = 0;
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartLinkLost);
+    ASSERT_EQ(fake_store_count(&store, ".part"), 0);
+    /* a whole connect: FireRed, under its own name */
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_STR_EQ(gen3_cart_id(&cart)->code, "BPRE");
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartOk);
+    rom = file("roms/BPRE_v0.gba", &size);
+    ASSERT_TRUE(rom != NULL && size == MIB);
+    ASSERT_TRUE(is_rom(rom, size));
+    rom = file(ROM_NAME, &size);
+    ASSERT_TRUE(rom != NULL && size == MIB);
+    ASSERT_MEM_EQ(rom, ruby, MIB);
+}
+
 /* Every answer the client can give, as a job's result */
 TEST(test_job_client_results) {
     static const struct {
@@ -606,6 +658,44 @@ TEST(test_job_backup_cancel) {
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
 }
 
+/* Back while the cart reads each sector again */
+TEST(test_job_backup_cancel_verify) {
+    ASSERT_TRUE(connected());
+    prog.cancel_step = Gen3CartStepBackupVerify;
+    prog.cancel_at = 5;
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartCancelled);
+    ASSERT_EQ(calls(GEN3_HCMD_SECTOR_CRC32), 5);
+    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+}
+
+/* The card fails to close the temporary file (its flush), or to give a sector back */
+TEST(test_job_backup_store_faults) {
+    ASSERT_TRUE(connected());
+    fake_store_fail_close(&store, 0);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
+    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_EQ(calls(GEN3_HCMD_SECTOR_CRC32), 0);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    /* the read-back's first read */
+    fake_store_fail_read(&store, 0);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
+    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    /* the trainer's sector, read after the 32 of the read-back */
+    fake_store_fail_read(&store, 32);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
+    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    /* the working copy's close: after the temporary file's, the read-back's, the trainer read's
+     * and the .sav's as the copy's source */
+    fake_store_fail_close(&store, 4);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
+    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
+    ASSERT_TRUE(sav_is_flash(BACKUP_NAME));
+}
+
 /* Backup only: the Japanese layouts aren't known */
 TEST(test_job_backup_japanese) {
     ASSERT_TRUE(default_save());
@@ -630,14 +720,86 @@ TEST(test_job_backup_refused_sram) {
     ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
     ASSERT_EQ(gen3_cart_id(&cart)->why, Gen3CartRefuseSram);
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartRefused);
-    bool dropped = true;
-    ASSERT_EQ(gen3_cart_attach(&cart, STAMP, &dropped), Gen3CartRefused);
     ASSERT_EQ(calls(GEN3_HCMD_READ_SECTOR), 0);
-    ASSERT_EQ(calls(GEN3_HCMD_READ_FOOTERS), 0);
     ASSERT_EQ(fake_store_count(&store, ""), 0);
     FakeGbaCounts n;
     fake_gba_counts(&gba, &n);
     ASSERT_EQ(n.erases + n.programs + n.commits + n.bank_selects, 0);
+}
+
+/* A cart whose save the helper doesn't read attaches with no backup: Cart info and the ROM copy
+ * stay, and nothing that needs the save is offered */
+TEST(test_job_attach_unreadable) {
+    static const struct {
+        const char* code;
+        FakeSaveKind save;
+        bool bad_complement;
+        Gen3CartRefuse why;
+    } carts[] = {
+        {"AXVE", FakeSaveSram, false, Gen3CartRefuseSram},
+        {"AXVE", FakeSaveNone, false, Gen3CartRefuseChip},
+        {"AXVE", FakeSaveRomLike, false, Gen3CartRefuseChip},
+        {"AGBE", FakeSaveFlash, false, Gen3CartRefuseNotPokemon},
+        {"AXVE", FakeSaveFlash, true, Gen3CartRefuseHeader},
+    };
+    for(uint32_t i = 0; i < sizeof(carts) / sizeof(carts[0]); i++) {
+        ASSERT_TRUE(default_save());
+        insert(carts[i].code, MIB, carts[i].save);
+        if(carts[i].bad_complement) {
+            gba.header[0xBD] ^= 1;
+            hdr[0xBD] ^= 1;
+        }
+        ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+        const Gen3CartId* id = gen3_cart_id(&cart);
+        ASSERT_FALSE(id->can_read_save);
+        ASSERT_EQ(id->why, carts[i].why);
+        bool dropped = true;
+        ASSERT_EQ(gen3_cart_attach(&cart, STAMP, &dropped), Gen3CartOk);
+        ASSERT_FALSE(dropped);
+        ASSERT_FALSE(gen3_cart_backup_current(&cart));
+        ASSERT_FALSE(gen3_cart_browsable(&cart));
+        Gen3CartRefuse why = Gen3CartRefuseNone;
+        ASSERT_FALSE(gen3_cart_writable(&cart, &why));
+        ASSERT_EQ(why, carts[i].why);
+        ASSERT_FALSE(id->can_browse);
+        ASSERT_FALSE(id->can_write);
+        uint8_t mon[100];
+        size_t len;
+        ASSERT_EQ(gen3_cart_mon_get(&cart, GEN3_SAVE_PARTY, 0, mon, &len), Gen3CartBadArg);
+        ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartBadArg);
+        ASSERT_EQ(gen3_cart_party_count(&cart), 0);
+        ASSERT_EQ(calls(GEN3_HCMD_READ_SECTOR), 0);
+        ASSERT_EQ(calls(GEN3_HCMD_READ_FOOTERS), 0);
+        ASSERT_EQ(fake_store_count(&store, ""), 0);
+        /* the ROM copy works */
+        ASSERT_EQ(gen3_cart_rom_size(&cart), MIB);
+        ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartOk);
+        char name[GEN3_CART_NAME_MAX];
+        gen3_cart_rom_name(&cart, name);
+        uint32_t size;
+        const uint8_t* rom = file(name, &size);
+        ASSERT_TRUE(rom != NULL);
+        ASSERT_EQ(size, MIB);
+        ASSERT_TRUE(is_rom(rom, size));
+        FakeGbaCounts n;
+        fake_gba_counts(&gba, &n);
+        ASSERT_EQ(n.erases + n.programs + n.commits + n.bank_selects, 0);
+    }
+    /* edits on the cart that was in before are dropped */
+    ASSERT_TRUE(backed_up());
+    Gen3Pkm p;
+    ASSERT_TRUE(level50(&p));
+    ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartOk);
+    fake_gba_save(&gba, FakeSaveSram, 0);
+    fake_helper_restart(&fh);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    bool dropped = false;
+    ASSERT_EQ(gen3_cart_attach(&cart, STAMP, &dropped), Gen3CartOk);
+    ASSERT_TRUE(dropped);
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    ASSERT_FALSE(gen3_cart_browsable(&cart));
+    ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
 }
 
 /* A save the game loads but the Flipper can't write: Save, and can_write stays (a restore may
@@ -787,6 +949,44 @@ TEST(test_job_attach_footer_changed) {
         ASSERT_EQ(gen3_cart_id(&cart)->why, Gen3CartRefuseSave);
         ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
         ASSERT_EQ(gen3_cart_slots(&cart)->padded, i == 1);
+    }
+}
+
+/* Each footer field on its own tells another save: only the checksums (a save at the same counter
+ * with other data), only two ids (swapped), or only a signature */
+TEST(test_job_attach_footer_fields) {
+    for(uint32_t i = 0; i < 3; i++) {
+        ASSERT_TRUE(backed_up());
+        Gen3Pkm p;
+        ASSERT_TRUE(level50(&p));
+        ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartOk);
+        if(i == 0) {
+            FakeSaveSpec s2 = spec;
+            s2.seed ^= 0x00010000u;
+            fake_save_build(img2, &s2);
+            memcpy(flash(), img2, 14 * SECTOR_LEN);
+            /* ids, checksums (some), signatures and counters: only checksums differ */
+            uint32_t other = 0;
+            for(uint8_t s = 0; s < 14; s++) {
+                const uint8_t* now = flash() + s * SECTOR_LEN;
+                const uint8_t* was = img + s * SECTOR_LEN;
+                ASSERT_MEM_EQ(now + 0xFF4, was + 0xFF4, 2);
+                ASSERT_MEM_EQ(now + 0xFF8, was + 0xFF8, 8);
+                other += memcmp(now + 0xFF6, was + 0xFF6, 2) != 0;
+            }
+            ASSERT_TRUE(other > 0);
+        } else if(i == 1) {
+            fake_save_set_id(flash(), phys(0, 2), 3);
+            fake_save_set_id(flash(), phys(0, 3), 2);
+        } else {
+            flash()[phys(0, 5) * SECTOR_LEN + 0xFF9] ^= 0x01;
+        }
+        bool dropped = false;
+        ASSERT_EQ(gen3_cart_attach(&cart, STAMP, &dropped), Gen3CartOk);
+        ASSERT_TRUE(dropped);
+        ASSERT_EQ(fake_store_count(&store, ".sav"), 2);
+        ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+        ASSERT_EQ(gen3_cart_changes(&cart), 0);
     }
 }
 
@@ -950,6 +1150,10 @@ TEST(test_job_mon_put_sd_error) {
     ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartSdError);
     ASSERT_FALSE(gen3_cart_browsable(&cart));
     ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
+    /* even a first edit that failed counts as a change: Discard and the leave warning show */
+    ASSERT_EQ(gen3_cart_changes(&cart), 1);
+    ASSERT_TRUE(gen3_cart_mon_changed(&cart, 1, 19));
+    ASSERT_EQ(cart.dirty, 0x0060);
     uint8_t mon[100];
     size_t len;
     ASSERT_EQ(gen3_cart_mon_get(&cart, 1, 19, mon, &len), Gen3CartBadArg);
@@ -959,6 +1163,39 @@ TEST(test_job_mon_put_sd_error) {
     ASSERT_TRUE(gen3_cart_browsable(&cart));
     ASSERT_TRUE(gen3_cart_writable(&cart, NULL));
     ASSERT_TRUE(work_is(flash(), &spec, 0));
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(cart.dirty, 0);
+}
+
+/* The working copy is read back after it is made: a sector the card stored wrong, or can't give
+ * back, fails it */
+TEST(test_job_work_copy_read_back) {
+    /* while backing up: the backup goes with it */
+    ASSERT_TRUE(connected());
+    fake_store_corrupt_write(&store, GEN3_CART_WORK_NAME, 3 * SECTOR_LEN + 7);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartVerifyFailed);
+    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    ASSERT_FALSE(gen3_cart_browsable(&cart));
+    /* discarding: the backup stays, the working copy goes until a discard works */
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
+    Gen3Pkm p;
+    ASSERT_TRUE(level50(&p));
+    ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartOk);
+    fake_store_corrupt_write(&store, GEN3_CART_WORK_NAME, 13 * SECTOR_LEN + 0x7CF);
+    ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartVerifyFailed);
+    uint32_t size;
+    ASSERT_TRUE(file(GEN3_CART_WORK_NAME, &size) == NULL);
+    ASSERT_TRUE(gen3_cart_backup_current(&cart));
+    ASSERT_FALSE(gen3_cart_browsable(&cart));
+    ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
+    /* 14 sectors read from the .sav, then the read-back's first fails */
+    fake_store_fail_read(&store, 14);
+    ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartSdError);
+    ASSERT_FALSE(gen3_cart_browsable(&cart));
+    ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartOk);
+    ASSERT_TRUE(work_is(flash(), &spec, 0));
+    ASSERT_TRUE(gen3_cart_writable(&cart, NULL));
 }
 
 /* ---- ROM copy ---- */
@@ -1192,6 +1429,7 @@ int main(void) {
     RUN(test_job_busy_timeout);
     RUN(test_job_connect_wrong_helper);
     RUN(test_job_connect_cancel);
+    RUN(test_job_connect_partial);
     RUN(test_job_client_results);
     RUN(test_job_backup_ok);
     RUN(test_job_backup_nosave);
@@ -1203,8 +1441,11 @@ int main(void) {
     RUN(test_job_backup_flash_unstable);
     RUN(test_job_backup_link_lost);
     RUN(test_job_backup_cancel);
+    RUN(test_job_backup_cancel_verify);
+    RUN(test_job_backup_store_faults);
     RUN(test_job_backup_japanese);
     RUN(test_job_backup_refused_sram);
+    RUN(test_job_attach_unreadable);
     RUN(test_job_backup_not_strict_keeps_can_write);
     RUN(test_job_backup_padded_not_writable);
     RUN(test_job_backup_work_copy_fails);
@@ -1212,6 +1453,7 @@ int main(void) {
     RUN(test_job_attach_keeps_changes);
     RUN(test_job_attach_after_game_save);
     RUN(test_job_attach_footer_changed);
+    RUN(test_job_attach_footer_fields);
     RUN(test_job_connect_other_chip);
     RUN(test_job_attach_other_cart);
     RUN(test_job_mon_get_put);
@@ -1219,6 +1461,7 @@ int main(void) {
     RUN(test_job_discard);
     RUN(test_job_box_name);
     RUN(test_job_mon_put_sd_error);
+    RUN(test_job_work_copy_read_back);
     RUN(test_job_rom_dump);
     RUN(test_job_rom_resume);
     RUN(test_job_rom_resume_space);

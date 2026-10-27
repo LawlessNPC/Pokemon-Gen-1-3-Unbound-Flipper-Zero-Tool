@@ -138,7 +138,8 @@ void gen3_cart_init(
 
 /* HELLO. After a lost command the helper finishes it first, BUSY and then sending the response
  * nobody reads, and only then answers READY: each try's sync waits up to GEN3_HCLI_SYNC_US, so it
- * tries until relink_us has passed. */
+ * tries until relink_us has passed. A HELLO that came means the helper is done with it. It doesn't
+ * link the cart: only a whole connect does. */
 static Gen3CartResult cart_hello(Gen3Cart* c) {
     const uint32_t tries =
         c->relink_us ? (c->relink_us + GEN3_HCLI_SYNC_US - 1u) / GEN3_HCLI_SYNC_US : 1u;
@@ -147,7 +148,6 @@ static Gen3CartResult cart_hello(Gen3Cart* c) {
         if(cart_cancelled(c)) return Gen3CartCancelled;
         r = gen3_hcli_connect(c->cli, &c->hello);
         if(r == Gen3HcliOk) {
-            c->linked = true;
             c->relink_us = 0;
             return Gen3CartOk;
         }
@@ -158,6 +158,8 @@ static Gen3CartResult cart_hello(Gen3Cart* c) {
 
 Gen3CartResult gen3_cart_connect(Gen3Cart* c) {
     cart_step(c, Gen3CartStepIdentify, 0, 3);
+    /* Unlinked until the end: after a cancel or an error midway, info and id may describe
+     * different carts, and no job may run on them */
     c->linked = false;
     Gen3CartResult r = cart_hello(c);
     if(r != Gen3CartOk) return r;
@@ -175,6 +177,7 @@ Gen3CartResult gen3_cart_connect(Gen3Cart* c) {
     c->cart_why = c->id.why;
     if(probe.flash_id != c->flash_id) cart_drop_backup(c);
     cart_set_why(c);
+    c->linked = true;
     cart_step(c, Gen3CartStepIdentify, 3, 3);
     return Gen3CartOk;
 }
@@ -282,7 +285,25 @@ static Gen3CartResult cart_backup_keep(Gen3Cart* c, const char* stamp) {
     return Gen3CartSdError;
 }
 
-/* The working copy anew from the backup: the loaded slot's 14 sectors in id order, no edits */
+/* The card gives back each sector of the working copy as the backup's CRC says it is */
+static Gen3CartResult cart_check_work(Gen3Cart* c) {
+    const Gen3Store* st = &c->store;
+    void* f = st->open(st->ctx, GEN3_CART_WORK_NAME, Gen3StoreRead);
+    if(!f) return Gen3CartSdError;
+    Gen3CartResult r = Gen3CartOk;
+    for(uint32_t k = 0; k < GEN3_SAVE_SLOT_SECTORS && r == Gen3CartOk; k++) {
+        if(!st->read(st->ctx, f, k * GEN3_SAVE_SECTOR_SIZE, c->buf, GEN3_SAVE_SECTOR_SIZE)) {
+            r = Gen3CartSdError;
+        } else if(gen3_crc32(c->buf, GEN3_SAVE_SECTOR_SIZE) != c->crc[c->slots.phys[k]]) {
+            r = Gen3CartVerifyFailed;
+        }
+    }
+    st->close(st->ctx, f);
+    return r;
+}
+
+/* The working copy anew from the backup: the loaded slot's 14 sectors in id order, no edits,
+ * read back */
 static Gen3CartResult cart_build_work(Gen3Cart* c) {
     const Gen3Store* st = &c->store;
     c->work_ok = false;
@@ -305,6 +326,7 @@ static Gen3CartResult cart_build_work(Gen3Cart* c) {
     }
     st->close(st->ctx, in);
     if(!st->close(st->ctx, out) && r == Gen3CartOk) r = Gen3CartSdError;
+    if(r == Gen3CartOk) r = cart_check_work(c);
     if(r != Gen3CartOk) {
         st->remove(st->ctx, GEN3_CART_WORK_NAME);
         return r;
@@ -365,13 +387,24 @@ static bool cart_footers_same(const Gen3Cart* c) {
 Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
     *dropped = false;
     if(!c->linked) return Gen3CartLinkLost;
+    const bool pending = c->dirty != 0 || gen3_cart_changes(c) > 0;
+    if(!c->id.can_read_save) {
+        /* Nothing to back up, and so nothing to browse, write or restore: each needs
+         * can_read_save. The cart's info and its ROM copy are still there. Edits made on the
+         * cart that was in before are gone. */
+        cart_drop_backup(c);
+        c->dirty = 0;
+        memset(c->changed, 0, sizeof(c->changed));
+        c->work_ok = false;
+        *dropped = pending;
+        return Gen3CartOk;
+    }
     /* The connect already found the same header and flash id, or the backup isn't current */
-    if(c->backup_current && c->id.can_read_save) {
+    if(c->backup_current) {
         const Gen3CartResult r = cart_read(c, gen3_hcli_read_footers(c->cli, c->footers));
         if(r != Gen3CartOk) return r;
         if(cart_footers_same(c)) return Gen3CartOk;
     }
-    const bool pending = c->dirty != 0 || gen3_cart_changes(c) > 0;
     const Gen3CartResult r = gen3_cart_backup(c, stamp);
     if(r == Gen3CartOk) *dropped = pending;
     return r;
@@ -502,14 +535,16 @@ Gen3CartResult gen3_cart_mon_put(Gen3Cart* c, uint8_t box, uint8_t slot, const G
             mon[len] = (uint8_t)(count + 1u);
         }
     }
+    /* Marked first: a failed write is a change too, which only gen3_cart_discard undoes, so that
+     * Discard and the warning on leaving show even when this was the first edit */
+    for(uint8_t i = 0; i < n; i++) c->dirty |= (uint16_t)(1u << sp[i].id);
+    const uint16_t bit = cart_mon_bit(box, slot);
+    c->changed[bit / 8u] |= (uint8_t)(1u << (bit % 8u));
     if(!cart_work_io(c, true, sp, n, mon)) {
         /* a span may be half written: no edit can be trusted to go to the cart now */
         c->work_ok = false;
         return Gen3CartSdError;
     }
-    for(uint8_t i = 0; i < n; i++) c->dirty |= (uint16_t)(1u << sp[i].id);
-    const uint16_t bit = cart_mon_bit(box, slot);
-    c->changed[bit / 8u] |= (uint8_t)(1u << (bit % 8u));
     return Gen3CartOk;
 }
 

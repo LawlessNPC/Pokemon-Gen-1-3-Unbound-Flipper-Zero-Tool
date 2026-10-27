@@ -14,10 +14,10 @@
  * run on a worker thread with a 2 KB stack, of which the store needs about 1 KB. So the big
  * working arrays are Gen3Cart fields, and no job keeps more than 256 B of locals, none over 128 B.
  *
- * The link: a job sends helper commands only after a connect's HELLO. Every LinkLost or
- * BusyTimeout needs a new gen3_cart_connect first, since the helper may still be busy with the
- * lost command, or sending its response; until then a job answers LinkLost with no link traffic.
- * That connect keeps trying for the lost command's BUSY budget plus GEN3_HCLI_SYNC_US.
+ * The link: a job sends helper commands only after a whole gen3_cart_connect. Every LinkLost or
+ * BusyTimeout needs a new one first, since the helper may still be busy with the lost command, or
+ * sending its response; until then a job answers LinkLost with no link traffic. That connect keeps
+ * trying for the lost command's BUSY budget plus GEN3_HCLI_SYNC_US.
  *
  * Files are on the store, named relative to its folder:
  * - backups/<code>_<tid | nosave>_<stamp>.sav: the whole 128 KB flash, all 32 sectors, as
@@ -128,7 +128,7 @@ struct Gen3Cart {
     uint8_t* buf; /* GEN3_CART_BUF_SIZE bytes */
     Gen3CartProgress progress;
     /* The link */
-    bool linked; /* a connect's HELLO came, and no command was lost since */
+    bool linked; /* a connect ran to its end, and no command was lost since */
     uint32_t relink_us; /* how long the next connect keeps trying */
     Gen3HHello hello;
     /* The cart, as the last connect found it */
@@ -167,21 +167,27 @@ void gen3_cart_init(
 
 /* HELLO (tried again for as long as a lost command may keep the helper busy), CART_INFO,
  * SAVE_PROBE, then gen3_cart_identify. A cart with another header or flash id than the backup's
- * makes the backup not current. Progress Identify; cancel between commands. */
+ * makes the backup not current. Only a connect that ran to its end links the cart: after a cancel
+ * or an error midway, no job runs until the next one. Progress Identify; cancel between
+ * commands. */
 Gen3CartResult gen3_cart_connect(Gen3Cart* c);
 /* After gen3_cart_connect: keeps the current backup and working copy, edits included, if this
  * cart's header and flash id (the connect checked them) and all 28 footers (READ_FOOTERS) still
- * match them; otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were pending). */
+ * match them; otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were pending).
+ * A cart whose save can't be read (not can_read_save) is Ok with no backup: it has its info and,
+ * when rom_size > 0, its ROM copy, while browsing, writing and restoring all need can_read_save;
+ * edits pending from the cart before are dropped. */
 Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped);
 /* Reads all 32 sectors to a new .sav, verified three ways: the packet CRC, the cart's
  * SECTOR_CRC32 of every sector, and an SD read-back. Then analyzes it and, if browsable, rebuilds
- * the working copy; the edits are gone. Refused unless can_read_save; SdFull before any link
- * traffic unless GEN3_CART_BACKUP_SPACE is free. Any failure removes every file it made and leaves
- * no current backup. stamp: YYYYMMDD-HHMMSS (at most 20 characters). Progress BackupRead per
- * sector, then BackupVerify and Analyze; cancel after each sector. */
+ * the working copy and reads that back too; the edits are gone. Refused unless can_read_save;
+ * SdFull before any link traffic unless GEN3_CART_BACKUP_SPACE is free. Any failure removes every
+ * file it made and leaves no current backup. stamp: YYYYMMDD-HHMMSS (at most 20 characters).
+ * Progress BackupRead per sector, then BackupVerify and Analyze; cancel after each sector. */
 Gen3CartResult gen3_cart_backup(Gen3Cart* c, const char* stamp);
-/* Rebuilds the working copy from the backup: the edits are gone. BadArg without a current
- * backup of a save the game loads. */
+/* Rebuilds the working copy from the backup and reads it back: the edits are gone. On a failure
+ * there is no working copy, and the edits stay counted, until a discard works. BadArg without a
+ * current backup of a save the game loads. */
 Gen3CartResult gen3_cart_discard(Gen3Cart* c);
 
 const Gen3CartId* gen3_cart_id(const Gen3Cart* c);
@@ -215,7 +221,8 @@ Gen3CartResult gen3_cart_mon_get(
  * changed. A party slot equal to the count appends: the count goes up by one. BadArg if not
  * browsable, out of range, or a party slot over the count. The caller checks p
  * (gen3_trade_offer_check) first. A store failure leaves the working copy untrusted: not browsable
- * until gen3_cart_discard. */
+ * until gen3_cart_discard. The slot counts as changed either way, so that Discard and the warning
+ * on leaving show. */
 Gen3CartResult gen3_cart_mon_put(Gen3Cart* c, uint8_t box, uint8_t slot, const Gen3Pkm* p);
 bool gen3_cart_mon_changed(const Gen3Cart* c, uint8_t box, uint8_t slot);
 uint16_t gen3_cart_changes(const Gen3Cart* c); /* Pokemon slots changed */

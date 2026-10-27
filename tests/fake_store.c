@@ -37,6 +37,35 @@ void fake_store_corrupt_read(FakeStore* s, const char* name, uint32_t off) {
     s->corrupt_off = off;
 }
 
+void fake_store_fail_read(FakeStore* s, uint32_t after) {
+    s->read_fault = true;
+    s->reads_left = after;
+}
+
+void fake_store_fail_close(FakeStore* s, uint32_t after) {
+    s->close_fault = true;
+    s->closes_left = after;
+}
+
+void fake_store_corrupt_write(FakeStore* s, const char* name, uint32_t off) {
+    if(strlen(name) >= FAKE_STORE_NAME_MAX) fake_store_misuse("name too long", name);
+    s->corrupt_write = true;
+    strcpy(s->corrupt_write_name, name);
+    s->corrupt_write_off = off;
+}
+
+/* A one-shot fault armed by fake_store_fail_read or fake_store_fail_close: true when this call is
+ * the one that fails */
+static bool fake_store_fault(bool* armed, uint32_t* left) {
+    if(!*armed) return false;
+    if(*left) {
+        (*left)--;
+        return false;
+    }
+    *armed = false;
+    return true;
+}
+
 static int32_t fake_store_find(const FakeStore* s, const char* name) {
     for(uint32_t i = 0; i < FAKE_STORE_FILES; i++) {
         if(s->files[i].used && strcmp(s->files[i].name, name) == 0) return (int32_t)i;
@@ -124,6 +153,7 @@ static bool fake_store_read(void* ctx, void* f, uint32_t off, void* buf, uint32_
     const FakeStoreHandle* h = fake_store_handle(s, f);
     const FakeStoreFile* file = &s->files[h->file];
     if(off > file->size || len > file->size - off) return false;
+    if(fake_store_fault(&s->read_fault, &s->reads_left)) return false;
     if(len) memcpy(buf, file->data + off, len);
     if(s->corrupt && strcmp(s->corrupt_name, file->name) == 0 && s->corrupt_off >= off &&
        s->corrupt_off - off < len) {
@@ -154,6 +184,11 @@ static bool fake_store_write(void* ctx, void* f, uint32_t off, const void* buf, 
         file->cap = cap;
     }
     if(len) memcpy(file->data + off, buf, len);
+    if(s->corrupt_write && strcmp(s->corrupt_write_name, file->name) == 0 &&
+       s->corrupt_write_off >= off && s->corrupt_write_off - off < len) {
+        s->corrupt_write = false;
+        file->data[s->corrupt_write_off] ^= 0x01;
+    }
     if(end > file->size) file->size = (uint32_t)end;
     s->writes++;
     return true;
@@ -174,7 +209,7 @@ static bool fake_store_close(void* ctx, void* f) {
     FakeStore* s = ctx;
     FakeStoreHandle* h = fake_store_handle(s, f);
     h->file = -1;
-    return true;
+    return !fake_store_fault(&s->close_fault, &s->closes_left);
 }
 
 static bool fake_store_remove(void* ctx, const char* name) {

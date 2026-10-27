@@ -41,6 +41,13 @@ struct FakeStore {
     bool corrupt;
     char corrupt_name[FAKE_STORE_NAME_MAX];
     uint32_t corrupt_off;
+    bool read_fault;
+    uint32_t reads_left; /* reads that succeed before the one that fails */
+    bool close_fault;
+    uint32_t closes_left; /* closes that succeed before the one that fails */
+    bool corrupt_write;
+    char corrupt_write_name[FAKE_STORE_NAME_MAX];
+    uint32_t corrupt_write_off;
     uint32_t writes; /* write() calls that succeeded */
     FakeStoreFile files[FAKE_STORE_FILES];
     FakeStoreHandle handles[FAKE_STORE_OPEN];
@@ -58,6 +65,14 @@ void fake_store_fail_write_after(FakeStore* s, uint32_t writes);
 /* Every read of that byte of that file returns it XORed with 0x01; the file stays as it is. One at
  * a time; a NULL name ends it. */
 void fake_store_corrupt_read(FakeStore* s, const char* name, uint32_t off);
+/* Once: the next `after` read() calls succeed, and the one after them fails, reading nothing. */
+void fake_store_fail_read(FakeStore* s, uint32_t after);
+/* Once: the next `after` close() calls succeed, and the one after them fails, as a failed flush
+ * does; that file is closed all the same. */
+void fake_store_fail_close(FakeStore* s, uint32_t after);
+/* Once: the next write to that file that covers byte off stores it XORed with 0x01, and succeeds,
+ * as a card that wrote it wrong would. */
+void fake_store_corrupt_write(FakeStore* s, const char* name, uint32_t off);
 /* The file's bytes and *size; NULL if absent */
 const uint8_t* fake_store_file(FakeStore* s, const char* name, uint32_t* size);
 uint32_t fake_store_count(FakeStore* s, const char* suffix); /* files ending with suffix */
