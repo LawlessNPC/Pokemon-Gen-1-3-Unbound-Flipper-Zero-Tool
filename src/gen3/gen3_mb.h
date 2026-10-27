@@ -140,6 +140,7 @@ typedef struct Gen3Mb {
     uint8_t rr; /* the slave's byte from 0x73rr */
     uint8_t junk; /* Detect: other replies since entering it */
     uint8_t tx_count; /* words in the frame in flight */
+    bool stale; /* Detect: the next reply answers a word sent before Detect began */
     bool palette_other; /* Palette: a reply other than a valid 0x7202 came back */
     bool attempting; /* a header word has gone out: the attempt budget runs */
     uint16_t pos; /* Header: next word of 98; Data: next payload halfword */

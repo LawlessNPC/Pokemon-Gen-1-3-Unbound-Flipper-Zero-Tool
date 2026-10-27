@@ -15,6 +15,8 @@
 
 #define MB_DETECT_REPLY (0x7200u | GEN3_MB_CLIENT_BIT)
 
+_Static_assert(GEN3_MB_JUNK_LIMIT <= UINT8_MAX, "Gen3Mb.junk counts up to GEN3_MB_JUNK_LIMIT");
+
 uint32_t gen3_mb_crc_step(uint32_t crc, uint32_t data) {
     for(uint8_t i = 0; i < 32; i++) {
         const uint32_t bit = (crc ^ data) & 1u;
@@ -72,6 +74,7 @@ static void mb_enter(Gen3Mb* mb, Gen3MbPhase phase) {
     mb->pos = 0;
     mb->junk = 0;
     mb->palette_other = false;
+    mb->stale = phase == Gen3MbPhaseDetect;
     mb->phase = phase;
 }
 
@@ -122,6 +125,13 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
     const uint16_t r = rx->word[0];
     switch(mb->phase) {
     case Gen3MbPhaseDetect:
+        /* MultiPlay replies run one transfer behind (multiboot-and-save.md §2.2), so the first
+         * reply here answers whatever was sent before Detect began, after gen3_mb_init or a wait:
+         * a 0x7202 left over from a palette wait would start a Hello that fails. */
+        if(mb->stale) {
+            mb->stale = false;
+            break;
+        }
         if(!mb_valid(mb, rx, 0)) break; /* polling: a marked word is ignored */
         if((r & 0xFFF0u) == 0x7200u && (r & 0xFu) == GEN3_MB_CLIENT_BIT) {
             mb->waiting_us = 0;

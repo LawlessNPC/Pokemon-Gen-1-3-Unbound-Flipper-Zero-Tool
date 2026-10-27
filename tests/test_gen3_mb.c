@@ -347,7 +347,8 @@ TEST(test_mb_busy_slave) {
 /* The palette budget, one 0x63pp per tick: the last poll it allows is the one whose reply comes
  * at or past GEN3_MB_PALETTE_US. A slave whose 0x73cc comes on that poll is taken; one busy for
  * one poll longer times the wait out. That wait saw only valid 0x7202 replies, so it is not
- * counted: the sender keeps trying until the attempt budget runs out. */
+ * counted. This fake is busy exactly that long on every attempt, so each attempt times out the
+ * same way, and the attempt budget ends the fourth one's successor. */
 TEST(test_mb_palette_timeout) {
     const uint32_t polls = (GEN3_MB_PALETTE_US + MLINK_TICK_US - 1u) / MLINK_TICK_US;
     ASSERT_TRUE(GEN3_MB_PALETTE_US >= 3500000u && GEN3_MB_PALETTE_US <= 4500000u);
@@ -375,10 +376,39 @@ TEST(test_mb_palette_timeout) {
         }
     }
     /* none counted; the attempt budget ends it */
-    ASSERT_TRUE(timeouts >= 4);
+    ASSERT_EQ(timeouts, 4);
     ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
     ASSERT_EQ(st.restarts, 0);
     ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
+}
+
+/* A slave that never stops answering 0x7202 to the palette word. Each palette wait times out
+ * uncounted. The restart's first Detect reply is that same 0x7202, loaded before the wait: it is
+ * stale and ignored, so it never starts a Hello that fails. The attempt budget ends it with a
+ * power-cycle request and nothing counted. */
+TEST(test_mb_palette_stuck_busy) {
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_set_busy(&bios, UINT32_MAX, 0);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
+    ASSERT_EQ(fake_bios_boots(&bios), 0);
+    uint32_t timeouts = 0;
+    uint32_t hellos = 0;
+    for(uint32_t i = 1; i < bench_n; i++) {
+        const Gen3MbPhase from = bench_log[i - 1].phase;
+        if(from == Gen3MbPhasePalette && bench_log[i].phase == Gen3MbPhaseWait) timeouts++;
+        if(from == Gen3MbPhaseHello) {
+            ASSERT_EQ(bench_log[i].phase, Gen3MbPhaseHeader);
+            hellos++;
+        }
+    }
+    ASSERT_EQ(timeouts, 4);
+    ASSERT_EQ(hellos, 5);
+    ASSERT_TRUE(us_since_first_header() >= GEN3_MB_ATTEMPT_US);
 }
 
 /* A palette wait that saw anything but valid 0x7202 replies counts: here the GBA resets in the
@@ -429,6 +459,7 @@ TEST(test_mb_attempt_budget) {
     run(&mb, &bios, 100000);
     Gen3MbStatus st = status();
     ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
+    ASSERT_EQ(st.restarts, 1);
     ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
     ASSERT_EQ(fake_bios_boots(&bios), 0);
     bool handshake_failed = false;
@@ -442,6 +473,36 @@ TEST(test_mb_attempt_budget) {
     const uint64_t us = us_since_first_header();
     ASSERT_TRUE(us >= GEN3_MB_ATTEMPT_US);
     ASSERT_TRUE(us < GEN3_MB_ATTEMPT_US + MLINK_BURST_LEN * MLINK_TICK_US);
+}
+
+/* The budget is checked after the frame's reply: a CRC that matches in the frame that uses up the
+ * budget still ends Done. One that doesn't is a counted CRC failure, and then the budget ends it
+ * with PowerCycle instead of a restart. The CRC frame is given exactly what is left of the
+ * budget. */
+TEST(test_mb_crc_at_budget_end) {
+    for(int bad = 0; bad <= 1; bad++) {
+        bench_init(0x1C0, 0x5A, 0xC3);
+        fake_bios_force_bad_crc(&bios, bad);
+        fake_bios_power_on(&bios);
+        ASSERT_TRUE(run_until(Gen3MbPhaseCrc, 10000));
+        const uint64_t used = us_since_first_header();
+        ASSERT_TRUE(used < GEN3_MB_ATTEMPT_US);
+        MlinkRx rx;
+        fake_bios_frame(&bios, &bench_pending, &rx);
+        gen3_mb_frame(&mb, &rx, &bench_pending, (uint32_t)(GEN3_MB_ATTEMPT_US - used));
+        Gen3MbStatus st = status();
+        if(bad) {
+            ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
+            ASSERT_EQ(st.restarts, 1);
+            ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
+            ASSERT_EQ(fake_bios_boots(&bios), 0);
+        } else {
+            ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+            ASSERT_EQ(st.restarts, 0);
+            ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+            ASSERT_EQ(fake_bios_boots(&bios), 1);
+        }
+    }
 }
 
 /* One early data glitch recovers to Done: within 15 s of the glitch for an 8 KB image, and inside
@@ -568,6 +629,39 @@ TEST(test_mb_masked_word) {
     ASSERT_EQ(st.restarts, 1);
     ASSERT_EQ(st.last_fail, Gen3MbFailHello);
     ASSERT_EQ(tx.count, 0);
+}
+
+/* Replies to the frame in flight with word (unmarked), as the next driver frame would. */
+static void reply_with(MlinkTx* tx, uint16_t word) {
+    MlinkRx rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.count = tx->count;
+    rx.word[0] = word;
+    gen3_mb_frame(&mb, &rx, tx, mlink_frame_us(MlinkModeStream, rx.count));
+}
+
+/* MultiPlay replies run one transfer behind (multiboot-and-save.md §2.2), so the first reply in
+ * Detect answers a word sent before Detect began: after gen3_mb_init, and after every wait. It is
+ * ignored even when it reads 0x7202; the next one is the slave's answer to 0x6200. */
+TEST(test_mb_stale_detect_reply) {
+    make_image(image, 0x1C0);
+    gen3_mb_init(&mb, image, 0x1C0, BENCH_SEED);
+    MlinkTx tx;
+    gen3_mb_frame(&mb, NULL, &tx, 0);
+    for(int round = 0; round < 2; round++) {
+        ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+        ASSERT_TRUE(tx.count == 1 && tx.word[0] == 0x6200);
+        reply_with(&tx, 0x7202); /* stale */
+        ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
+        ASSERT_TRUE(tx.count == 1 && tx.word[0] == 0x6200);
+        reply_with(&tx, 0x7202);
+        ASSERT_EQ(status().phase, Gen3MbPhaseHello);
+        ASSERT_TRUE(tx.count == 1 && tx.word[0] == 0x6102);
+        reply_with(&tx, 0x0000); /* Hello fails: a counted restart, then a wait */
+        ASSERT_EQ(status().phase, Gen3MbPhaseWait);
+        ASSERT_EQ(status().restarts, round + 1);
+        for(int i = 0; i < 1000 && tx.count == 0; i++) reply_with(&tx, 0);
+    }
 }
 
 /* A length gen3_mb_image_check refuses starts Failed: idle ticks only, and the image is never
@@ -828,15 +922,18 @@ int main(void) {
     RUN(test_mb_poll_spacing);
     RUN(test_mb_busy_slave);
     RUN(test_mb_palette_timeout);
+    RUN(test_mb_palette_stuck_busy);
     RUN(test_mb_palette_reset_counts);
     RUN(test_mb_final_timeout);
     RUN(test_mb_attempt_budget);
+    RUN(test_mb_crc_at_budget_end);
     RUN(test_mb_glitch_recovers_in_budget);
     RUN(test_mb_late_power_on);
     RUN(test_mb_header_glitch);
     RUN(test_mb_data_glitch);
     RUN(test_mb_bad_crc_gives_up);
     RUN(test_mb_masked_word);
+    RUN(test_mb_stale_detect_reply);
     RUN(test_mb_bad_len);
     RUN(test_mb_wrong_handshake_reply);
     RUN(test_mb_wrong_length_reply);

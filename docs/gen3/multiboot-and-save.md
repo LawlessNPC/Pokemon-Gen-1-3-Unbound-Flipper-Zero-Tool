@@ -143,18 +143,18 @@ protocol table specialised to child 1 (`x = y = 0x02`), with afska's checks.
 
 | # | P sends | P expects | Repeat / on failure |
 |---|---|---|---|
-| 1 | `0x6200` | `0xFFFF` (no start bit: slave not in MultiPlay yet), then `0x0000` | repeat, 1 per frame, until step 2 |
-| 2 | `0x6200` | `0x7202`: `(r & 0xFFF0) == 0x7200` and `(r & 0xF) == 0x2` | up to 16 tries (afska `DETECTION_TRIES = 16`; GBATEK "Repeat 15 times"); else wait 1/16 s and restart at 1 |
+| 1 | `0x6200` | `0xFFFF` (no start bit: slave not in MultiPlay yet), then `0x0000` | repeat back to back, 1 per tick, until step 2. The first reply after starting, or after a restart wait, answers a word sent before it: ignore it |
+| 2 | `0x6200` | `0x7202`: `(r & 0xFFF0) == 0x7200` and `(r & 0xF) == 0x2` | after 255 replies that are neither `0x0000`, `0xFFFF` nor `0x72x2`, wait 70–240 ms and restart at 1, not counted as a failure (GBATEK "Repeat 15 times" and afska `DETECTION_TRIES = 16` pause sooner, for no stated reason; §2.6) |
 | 3 | `0x6102` (`0x6100 \| client_bit`) | `0x7202` | else restart |
 | 4 | header halfword k, k = 0..0x5F, little-endian `hdr[2k] \| hdr[2k+1] << 8` | `((0x60 - k) << 8) \| 0x02`, so `0x6002` … `0x0102` | any mismatch: restart |
 | 5 | `0x6200` | `0x0002` | else restart |
 | 6 | `0x6202` | `0x7202` | else restart |
-| 7 | `0x6300 \| pp` (palette, e.g. `0x6393`) | `0x7202` while the slave is busy, then `0x73cc`: `(r & 0xFF00) == 0x7300`, `cc = r & 0xFF` | up to 16 tries, else restart |
+| 7 | `0x6300 \| pp` (palette, e.g. `0x6393`) | `0x7202` while the slave is busy, then `0x73cc`: `(r & 0xFF00) == 0x7300`, `cc = r & 0xFF` | back to back, 1 per tick, for up to 4 s (GBATEK sets no limit; afska gives up after 16 tries); then restart. Not counted as a failure if every reply was a valid `0x7202` |
 | 8 | `0x6400 \| hh`, `hh = (0x11 + cc + 0xFF + 0xFF) & 0xFF` (absent children count as 0xFF), using the `cc` of the last `0x73cc` reply **(inferred, M19)** | `(r & 0xFF00) == 0x7300` (`0x73uu`, ignore uu) | else restart |
 | 9 | — | wait ≥ 1/16 s (GBATEK "DELAY Wait 1/16 seconds at master side"; afska waits 4 frames). Use 100 ms **(inferred, M20)** | |
 | 10 | `llll = (file_size - 0x190) / 4` (= L/4 − 0x34) | `0x73rr`, `rr = r & 0xFF` | `(r & 0xFF00) != 0x7300`: restart |
 | 11 | encrypted payload, 2 halfwords per 32-bit word (§2.3), L/2 transfers | halfword k (byte offset `0xC0 + 2k`): `r == (0xC0 + 2k) & 0xFFFF`, so `0x00C0, 0x00C2, …` | any mismatch: restart |
-| 12 | `0x0065` | anything first (`nnnn`), then `0x0074` while the slave computes the CRC, then `0x0075` | repeat until `0x0075`, 1 per frame, ≤ 5 s (afska `MAX_FINAL_HANDSHAKE_ATTEMPS = FPS * 5`) |
+| 12 | `0x0065` | anything first (`nnnn`), then `0x0074` while the slave computes the CRC, then `0x0075` | repeat until `0x0075`, once per GBA frame with idle ticks between, ≤ 5 s (afska `MAX_FINAL_HANDSHAKE_ATTEMPS = FPS * 5`) |
 | 13 | `0x0066` | `0x0075` | |
 | 14 | `crc` (16 bits, §2.3) | `r == crc` (the slave's own CRC) | mismatch: transfer failed; restart |
 | — | done: the BIOS jumps to 0x020000C0 | | |
@@ -164,6 +164,14 @@ protocol table specialised to child 1 (`x = y = 0x02`), with afska's checks.
   speed 0–3), or `0xF1 + color*2` for a fixed palette (GBATEK SWI 25h). afska's
   default `0b10010011` = `0x93` is fine.
 - Do not send `0xFFFF` as a command word. The handshake words never are.
+- Steps 1, 2 and 7 poll back to back, one transfer per tick, as afska's
+  `LinkCableMultiboot` does (each try right after the previous reply). Only
+  step 12's retries are spaced, once per GBA frame, as afska's are (once per
+  VBlank).
+- "Restart" is a failure that counts, except where the table says otherwise:
+  after the fourth one the sender gives up (§2.6).
+- One attempt, from the first header word, has 20 s in all, restarts included.
+  Past that the sender gives up and asks for a power cycle (§2.6).
 
 ## 2.3 Encryption, seed and CRC
 
@@ -218,30 +226,42 @@ header = 0xC0 zero bytes; payload = bytes `00 01 02 … FF` (L = 0x100, file
 
 bool mb_send(const uint8_t* img, uint32_t len /* 0x1C0..0x40000, len % 16 == 0 */) {
     uint16_t r;
-    int tries;
+    int junk, fails = 0;
+    goto detect;
+fail:                                       /* a counted failure */
+    if(++fails > 3) return false;           /* ask for a power cycle */
 restart:
     wait_ms(70 + rand_ms(0, 170));          /* afska: 4 + random(1..10) frames */
-    for(tries = 0;; tries++) {              /* steps 1-2: 1 transfer per frame */
+detect:
+    xfer(0x6200);                           /* its reply answers an earlier word: ignore it */
+    for(junk = 0;;) {                       /* steps 1-2: back to back, 1 per tick */
         r = xfer(0x6200);
         if((r & 0xFFF0) == 0x7200 && (r & 0xF) == CB) break;
-        if(r != 0xFFFF && r != 0x0000 && tries >= 16) goto restart;
+        if(r != 0xFFFF && r != 0x0000 && ++junk >= 255) goto restart; /* not counted */
     }
-    if(xfer(0x6100 | CB) != (0x7200 | CB)) goto restart;
+    /* From here on, every xfer() also checks the attempt clock, started by the first header
+     * word ever sent: past 20 s, return false (ask for a power cycle). */
+    if(xfer(0x6100 | CB) != (0x7200 | CB)) goto fail;
     for(int k = 0; k < 0x60; k++)            /* step 4: may run 9 per frame */
-        if(xfer(img[2*k] | img[2*k+1] << 8) != (((0x60 - k) << 8) | CB)) goto restart;
-    if(xfer(0x6200) != CB) goto restart;
-    if(xfer(0x6200 | CB) != (0x7200 | CB)) goto restart;
+        if(xfer(img[2*k] | img[2*k+1] << 8) != (((0x60 - k) << 8) | CB)) goto fail;
+    if(xfer(0x6200) != CB) goto fail;
+    if(xfer(0x6200 | CB) != (0x7200 | CB)) goto fail;
     uint8_t pp = 0x93, cc;
-    for(tries = 0;; tries++) {              /* step 7: 1 per frame */
+    bool other = false;
+    for(uint32_t t0 = now_ms();;) {         /* step 7: back to back, 1 per tick */
         r = xfer(0x6300 | pp);
         if((r & 0xFF00) == 0x7300) { cc = r & 0xFF; break; }
-        if(tries >= 16) goto restart;
+        if(r != (0x7200 | CB)) other = true;
+        if(now_ms() - t0 >= 4000) {
+            if(other) goto fail;
+            goto restart;                   /* only 0x7202: a slow slave, not counted */
+        }
     }
     uint8_t hh = (uint8_t)(0x11 + cc + 0xFF + 0xFF);
-    if((xfer(0x6400 | hh) & 0xFF00) != 0x7300) goto restart;
+    if((xfer(0x6400 | hh) & 0xFF00) != 0x7300) goto fail;
     wait_ms(100);
     r = xfer((uint16_t)((len - 0x190) / 4));
-    if((r & 0xFF00) != 0x7300) goto restart;
+    if((r & 0xFF00) != 0x7300) goto fail;
     uint8_t rr = r & 0xFF;
     uint32_t m = pp | (uint32_t)cc << 8 | 0xFFFF0000u;
     uint32_t f = hh | (uint32_t)rr << 8 | 0xFFFF0000u;
@@ -251,14 +271,17 @@ restart:
         c = crc32step(c, w);
         m = m * 0x6F646573u + 1u;
         uint32_t e = w ^ (0xFE000000u - ptr) ^ m ^ 0x6465646Fu;
-        if(xfer(e & 0xFFFF) != (ptr & 0xFFFF)) goto restart;
-        if(xfer(e >> 16) != ((ptr + 2) & 0xFFFF)) goto restart;
+        if(xfer(e & 0xFFFF) != (ptr & 0xFFFF)) goto fail;
+        if(xfer(e >> 16) != ((ptr + 2) & 0xFFFF)) goto fail;
     }
     c = crc32step(c, f);
-    for(tries = 0; xfer(0x0065) != 0x0075; tries++)  /* 1 per frame */
-        if(tries > 300) goto restart;
+    for(uint32_t t0 = now_ms(); xfer(0x0065) != 0x0075;) {  /* 1 per GBA frame */
+        if(now_ms() - t0 >= 5000) goto fail;
+        wait_frame();
+    }
     xfer(0x0066);
-    return xfer((uint16_t)c) == (uint16_t)c;     /* false: restart, or ask for a power cycle */
+    if(xfer((uint16_t)c) != (uint16_t)c) goto fail;
+    return true;
 }
 ```
 
@@ -279,9 +302,11 @@ transfers per frame, one frame of reaction latency):
 | Minimum gap after each transfer | "wait for Start bit cleared … followed by a 36us delay" | GBATEK "Multiboot Communication" |
 | Our gap inside a frame | ≈ 751.5 µs (TIM2 tick 1073 µs start to start) | `mlink_hw_furi.c` header comment |
 | Our gap between frames | 16.74 − 9 × 1.073 ≈ 7.1 ms | same |
-| Detection retry | 16 tries, then wait 1/16 s | GBATEK; afska |
+| Detection | back to back, 1 per tick; after 255 other replies, a 70–240 ms wait (GBATEK: 15 tries, then 1/16 s; afska: 16 tries) | `gen3_mb.c`; GBATEK; afska |
+| Palette (step 7) | back to back, 1 per tick, ≤ 4 s | `gen3_mb.c`; afska gives up after 16 tries |
 | Before the length word | ≥ 1/16 s | GBATEK |
 | Waiting for `0x0075` | afska polls once per frame for ≤ 5 s | afska |
+| One whole attempt | 20 s from the first header word, restarts included; then ask for a power cycle | `gen3_mb.c` (§2.6) |
 | Maximum gap the BIOS tolerates | not documented. afska's async master leaves a whole frame between transfers in several states, so multi-millisecond gaps work **(inferred, M3)** | — |
 
 Time to send the helper: ≈ 113 + L/2 transfers (detection, header, palette,
@@ -294,18 +319,35 @@ in frame mode (≈ 0.25 s):
 | 8 KB | ≈ 8.0 s | ≈ 4.6 s |
 | 16 KB | ≈ 15.6 s | ≈ 9.0 s |
 
-Keep the helper ≤ 8 KB.
+The sender takes images up to 12 KB (`GEN3_MB_MAX_LEN`, 0x3000).
 
 ## 2.6 Failure behaviour
 
 - Detection fails (no `7202`): wrong plug, GBA not held at Start+Select, or GBA
-  off. Retry forever with the 1/16 s back-off. Show "power on the GBA holding
+  off. Retry forever, back to back, with a 70–240 ms wait after every 255
+  replies that are neither `0x0000`, `0xFFFF` nor `0x72x2`. None of this counts
+  as a failure, and waiting for the GBA before the first header word doesn't
+  count against the attempt budget either. Show "power on the GBA holding
   Start+Select" after ~3 s.
+- **The junk limit.** After a glitch, the slave is still mid-transfer: it
+  answers each `0x6200` with its own header count or data offset until it has
+  had every word it expects. GBATEK's "Repeat 15 times, if failed: delay 1/16s
+  and restart" and afska's 16 tries give no reason for the pause, and document
+  no slave timeout, so the sender lets it drain at one word per tick and pauses
+  only every 255 replies.
 - Header, address or CRC mismatch: restart at step 1 after the random delay
   (afska `startMultibootSend`). How the slave BIOS behaves after a bad CRC or a
   bad header (logo, `0x96`, complement) is not documented. Expect it to go back
-  to waiting, and fall back to asking the user to power-cycle with Start+Select
-  after 3 failures **(inferred, M4)**.
+  to waiting. The fourth counted failure ends the attempt, and the user is asked
+  to power-cycle with Start+Select **(inferred, M4)**.
+- **A slow palette step isn't a failure.** A 4 s palette wait whose every reply
+  was a valid `0x7202` restarts without counting.
+- **The attempt budget.** One attempt, from the first header word, has 20 s in
+  all, restarts and waits included. A slave left mid-transfer by a glitch can
+  take minutes to drain, while turning the GBA off and on takes seconds. Past
+  20 s the sender stops with a power-cycle request (`Gen3MbFailPowerCycle`). A
+  clean 12 KB send takes about 16 s even with a slow slave (palette and `0x0075`
+  waits near their limits), so the budget never cuts a normal run.
 - SWI 25h's own result is "r0 0=okay, 1=failed" (GBATEK). The slave only starts
   the program when the CRCs match.
 
