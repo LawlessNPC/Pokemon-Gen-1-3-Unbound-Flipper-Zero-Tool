@@ -432,6 +432,18 @@ static bool cart_footers_same(const Gen3Cart* c, uint8_t skip) {
     return true;
 }
 
+/* *same: READ_FOOTERS shows the cart as the backup has it, but for the slot of a write or restore
+ * not yet backed up (wslot). That slot may have changed since: by the write itself, cut short or
+ * finished, or, after a power cut, by a game save. The write's next run reads it before anything
+ * is armed: its own save there is found written and isn't written again, anything else is Changed.
+ * So the other slot's footers decide here. */
+static Gen3CartResult cart_still_backed_up(Gen3Cart* c, bool* same) {
+    *same = false;
+    const Gen3CartResult r = cart_footer_view(c);
+    if(r == Gen3CartOk) *same = cart_footers_same(c, c->wslot);
+    return r;
+}
+
 Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
     *dropped = false;
     if(!c->linked) return Gen3CartLinkLost;
@@ -447,13 +459,12 @@ Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
         *dropped = pending;
         return Gen3CartOk;
     }
-    /* The connect already found the same header and flash id, or the backup isn't current. A
-     * whole connect may follow a power cut and a game save, so every footer counts here, even
-     * those of a slot a write left unchecked. */
+    /* The connect already found the same header and flash id, or the backup isn't current */
     if(c->backup_current) {
-        const Gen3CartResult r = cart_footer_view(c);
+        bool same = false;
+        const Gen3CartResult r = cart_still_backed_up(c, &same);
         if(r != Gen3CartOk) return r;
-        if(cart_footers_same(c, GEN3_SAVE_NO_SECTOR)) return Gen3CartOk;
+        if(same) return Gen3CartOk;
     }
     const Gen3CartResult r = gen3_cart_backup(c, stamp);
     if(r == Gen3CartOk) *dropped = pending;
@@ -1102,11 +1113,10 @@ Gen3CartResult gen3_cart_reconnect(Gen3Cart* c) {
     if(r != Gen3CartOk || !had) return r;
     /* the connect found another header or flash id, and dropped the backup */
     if(!c->backup_current) return Gen3CartChanged;
-    /* The helper ran on, so the cart changed since the backup only by a write or restore not yet
-     * backed up, in its own slot, which that one's next run reads anyway */
-    r = cart_footer_view(c);
+    bool same = false;
+    r = cart_still_backed_up(c, &same);
     if(r != Gen3CartOk) return r;
-    if(cart_footers_same(c, c->wslot)) return Gen3CartOk;
+    if(same) return Gen3CartOk;
     cart_drop_backup(c);
     return Gen3CartChanged;
 }

@@ -154,8 +154,8 @@ struct Gen3Cart {
     uint16_t dirty; /* bit k: section id k was edited */
     uint8_t changed[(GEN3_CART_MON_SLOTS + 7u) / 8u]; /* bit per Pokemon slot */
     /* A write or restore that armed (or found its slot already written) and hasn't ended with a
-     * new backup: the slot it may have changed since the backup, which the reconnect after a lost
-     * link doesn't compare. GEN3_SAVE_NO_SECTOR: none. */
+     * new backup: the slot it may have changed since the backup, which neither reconnect nor
+     * attach compares. GEN3_SAVE_NO_SECTOR: none. */
     uint8_t wslot;
     /* The jobs' scratch */
     Gen3HFooter footers[GEN3_SAVE_SECTORS];
@@ -183,8 +183,10 @@ void gen3_cart_init(
  * commands. */
 Gen3CartResult gen3_cart_connect(Gen3Cart* c);
 /* After gen3_cart_connect: keeps the current backup and working copy, edits included, if this
- * cart's header and flash id (the connect checked them) and all 28 footers (READ_FOOTERS) still
- * match them; otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were pending).
+ * cart's header and flash id (the connect checked them) and its footers (READ_FOOTERS) still match
+ * them, but for the slot of a write or restore not yet backed up, which may have changed (as
+ * gen3_cart_reconnect); otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were
+ * pending). So a write cut short by a power cut keeps its edits, and its next run finishes it.
  * A cart whose save can't be read (not can_read_save) is Ok with no backup: it has its info and,
  * when rom_size > 0, its ROM copy, while browsing, writing and restoring all need can_read_save;
  * edits pending from the cart before are dropped. */
@@ -212,13 +214,18 @@ Gen3CartResult gen3_cart_discard(Gen3Cart* c);
  *   unless a backup and a sector fit on the card.
  * - Before arming, the cart must still hold what the backup says: the footers of the slot kept, the
  *   game's choice, and SECTOR_CRC32 of each sector kept; else Changed, which drops the backup. A
- *   write that a lost link interrupted after its last commit is found written, and not redone.
- * - A failure from the arming to the check ends any arming (its result ignored); the game still
- *   loads the save the backup holds, which stays current.
+ *   write that a lost link or a power cut interrupted after its last commit is found written (the
+ *   game loads the new slot, which holds exactly the images), and not redone; anything else in
+ *   that slot is Changed.
+ * - A failure from the arming to the check ends any arming (its result ignored). The backup stays
+ *   current: the slot it holds was never written. Until the last commit the game still loads that
+ *   slot; after it (a lost link in the check, or a check that failed with every commit done) it
+ *   may load the new one, which the next run finds written, or else Changed.
  * - Ok: written, checked and backed up; the edits are gone, now on the cart.
  * - WrittenNoBackup: written and checked, but the new backup failed. The edits are gone, now on the
  *   cart, and there is no current backup until gen3_cart_backup.
- * - LinkLost or BusyTimeout, at any step: gen3_cart_reconnect, then this again finishes the job.
+ * - LinkLost or BusyTimeout, at any step: gen3_cart_reconnect (or, after the GBA lost power,
+ *   gen3_cart_connect and gen3_cart_attach), then this again finishes the job.
  * Never cancelled. Progress Prepare, Erase, Program, Commit, Verify, PostBackup. */
 Gen3CartResult gen3_cart_write(Gen3Cart* c, const char* stamp);
 /* Reads a backup file and checks it: 131072 bytes, strict with this cart's layout. Fills the
@@ -242,8 +249,8 @@ Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stam
 /* After LinkLost or BusyTimeout: gen3_cart_connect (HELLO tried for the lost command's budget,
  * CART_INFO, SAVE_PROBE); then, if there was a current backup, the cart must still be its cart
  * (header and flash id) with the same footers (READ_FOOTERS), but for the slot of a write or
- * restore not yet backed up, which may have changed; else Changed, which drops the backup. The
- * edits stay. Progress Identify; cancel as gen3_cart_connect. */
+ * restore not yet backed up, which may have changed (as gen3_cart_attach); else Changed, which
+ * drops the backup. The edits stay. Progress Identify; cancel as gen3_cart_connect. */
 Gen3CartResult gen3_cart_reconnect(Gen3Cart* c);
 
 /* The cart as the last connect found it. Read it, gen3_cart_rom_size and gen3_cart_rom_name only

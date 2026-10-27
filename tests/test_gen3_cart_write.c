@@ -530,6 +530,13 @@ static void slot_at(uint8_t slot, uint8_t first, uint8_t at[14]) {
     for(uint8_t k = 0; k < 14; k++) at[k] = (uint8_t)(14u * slot + (k + first) % 14u);
 }
 
+/* After the run: the new save, backed up, the edits gone */
+static bool written_and_backed_up(void) {
+    return game_view() == ViewNew && gen3_cart_backup_current(&cart) &&
+           gen3_cart_changes(&cart) == 0 && sav_is_flash(gen3_cart_backup_name(&cart)) &&
+           fake_store_count(&store, ".tmp") == 0 && cart.wslot == NONE;
+}
+
 /* ---- Snapshots, for the sweeps ---- */
 
 static FakeGba snap_gba;
@@ -848,22 +855,26 @@ TEST(test_write_cart_changed) {
 TEST(test_write_cart_changed_same_footer) {
     ASSERT_TRUE(backed_up());
     ASSERT_TRUE(edit_party());
-    uint8_t* d = flash() + phys(0, 2) * SECTOR_LEN;
-    uint32_t w0 = (uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 |
-                  (uint32_t)d[3] << 24;
-    uint32_t w1 = (uint32_t)d[4] | (uint32_t)d[5] << 8 | (uint32_t)d[6] << 16 |
-                  (uint32_t)d[7] << 24;
-    w0 += 1u;
-    w1 -= 1u;
-    for(uint32_t i = 0; i < 4; i++) {
-        d[i] = (uint8_t)(w0 >> (8 * i));
-        d[4 + i] = (uint8_t)(w1 >> (8 * i));
+    snap_take();
+    for(uint8_t id = 0; id < 14; id++) {
+        snap_restore();
+        uint8_t* d = flash() + phys(0, id) * SECTOR_LEN;
+        uint32_t w0 = (uint32_t)d[0] | (uint32_t)d[1] << 8 | (uint32_t)d[2] << 16 |
+                      (uint32_t)d[3] << 24;
+        uint32_t w1 = (uint32_t)d[4] | (uint32_t)d[5] << 8 | (uint32_t)d[6] << 16 |
+                      (uint32_t)d[7] << 24;
+        w0 += 1u;
+        w1 -= 1u;
+        for(uint32_t i = 0; i < 4; i++) {
+            d[i] = (uint8_t)(w0 >> (8 * i));
+            d[4 + i] = (uint8_t)(w1 >> (8 * i));
+        }
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartChanged);
+        ASSERT_TRUE((hook.crc_sectors >> phys(0, id)) & 1u);
+        ASSERT_EQ(calls(GEN3_HCMD_ARM_WRITE), 0);
+        ASSERT_TRUE(no_flash_ops());
+        ASSERT_FALSE(gen3_cart_backup_current(&cart));
     }
-    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartChanged);
-    ASSERT_TRUE((hook.crc_sectors >> phys(0, 2)) & 1u);
-    ASSERT_EQ(calls(GEN3_HCMD_ARM_WRITE), 0);
-    ASSERT_TRUE(no_flash_ops());
-    ASSERT_FALSE(gen3_cart_backup_current(&cart));
 }
 
 /* The game saved since the backup, in slot B: with counter 5 the game loads it, as it would a
@@ -1120,11 +1131,13 @@ TEST(test_write_short_glitch) {
 }
 
 /* Acts on the flash after the last commit, as a cart that changed on its own would */
+static uint8_t act_k; /* the id whose new sector new_sector_differs changes */
+
 static void new_sector_differs(void) {
     uint8_t b[14];
     slot_at(1, 1, b);
-    flash()[b[5] * SECTOR_LEN + 0x100] ^= 0x01;
-    fake_save_fix(flash(), b[5], FakeGameRS);
+    flash()[b[act_k] * SECTOR_LEN + 0x100] ^= 0x01;
+    fake_save_fix(flash(), b[act_k], FakeGameRS);
 }
 
 static void old_slot_newer(void) {
@@ -1135,25 +1148,169 @@ static void hall_of_fame_differs(void) {
     flash()[29u * SECTOR_LEN + 0x10] ^= 0x01;
 }
 
-/* The check after the commits: a new sector that doesn't hold its image, its footer valid; or
- * every new sector right, but the game loading the other slot. VerifyFailed either way; the backup
- * stays (the slot it holds wasn't written), and no new one is made. */
+/* The check after the commits: a new sector, any of the 14, that doesn't hold its image, its
+ * footer valid; or every new sector right, but the game loading the other slot. VerifyFailed
+ * either way; the backup stays (the slot it holds wasn't written), and no new one is made. */
 TEST(test_write_verify_fails) {
-    void (*const acts[])(void) = {new_sector_differs, old_slot_newer};
-    for(uint32_t i = 0; i < 2; i++) {
-        ASSERT_TRUE(backed_up());
-        ASSERT_TRUE(edit_party());
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    snap_take();
+    for(uint8_t i = 0; i <= 14; i++) {
+        snap_restore();
+        act_k = i;
         hook.act_code = GEN3_HCMD_COMMIT_SECTOR;
         hook.act_nth = 14;
-        hook.act = acts[i];
+        hook.act = i < 14 ? new_sector_differs : old_slot_newer;
         ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartVerifyFailed);
         ASSERT_TRUE(gen3_cart_backup_current(&cart));
         ASSERT_STR_EQ(gen3_cart_backup_name(&cart), BACKUP_NAME);
         ASSERT_EQ(fake_store_count(&store, ".sav"), 1);
         ASSERT_EQ(fake_store_count(&store, ".tmp"), 0);
         ASSERT_EQ(gen3_cart_changes(&cart), 1);
-        ASSERT_EQ(calls(GEN3_HCMD_SECTOR_CRC32), 32 + 14 + (i == 0 ? 6 : 14));
+        /* the slot kept, then the new one up to the sector that differs */
+        ASSERT_EQ(calls(GEN3_HCMD_SECTOR_CRC32), 14 + (i < 14 ? i + 1 : 14));
     }
+}
+
+/* A write lost right after its last commit, then a new sector, any of the 14, changed on the cart
+ * (its footer valid) before the next run: that run doesn't find its own save written there, and
+ * stops, Changed, writing nothing */
+TEST(test_write_written_differs) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    snap_take();
+    for(uint8_t k = 0; k < 14; k++) {
+        snap_restore();
+        hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+        hook.unplug_nth = 14;
+        hook.unplug_len = FOREVER;
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+        act_k = k;
+        new_sector_differs();
+        fake_helper_replug(&fh);
+        ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+        const FakeGbaCounts n = counts();
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartChanged);
+        ASSERT_EQ(counts().erases, n.erases);
+        ASSERT_EQ(counts().programs, n.programs);
+        ASSERT_FALSE(gen3_cart_backup_current(&cart));
+        ASSERT_EQ(fake_store_count(&store, ".sav"), 1);
+        ASSERT_EQ(fake_store_count(&store, ".tmp"), 0);
+    }
+}
+
+/* The GBA loses power: the helper replies to nothing until fake_helper_restart */
+static void power_off(void) {
+    fh.dead = true;
+}
+
+/* The op count at which a power cut stops the 8th commit byte: 14 erases, 14 sectors of 4,095
+ * bytes, 7 commit bytes */
+#define CUT_IN_COMMIT8 (14u + 14u * 4095u + 7u)
+
+/* The GBA switched on again after a power cut in a write, the helper sent: a whole connect, and
+ * attach keeps the backup and the edit, whatever the cut left in the slot the write armed */
+static void power_back_on(void) {
+    fake_helper_replug(&fh);
+    fake_helper_restart(&fh);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    bool dropped = true;
+    ASSERT_EQ(gen3_cart_attach(&cart, STAMP3, &dropped), Gen3CartOk);
+    ASSERT_FALSE(dropped);
+    ASSERT_EQ(gen3_cart_changes(&cart), 1);
+    ASSERT_TRUE(gen3_cart_backup_current(&cart));
+    ASSERT_STR_EQ(gen3_cart_backup_name(&cart), BACKUP_NAME);
+}
+
+/* A power cut in a write, then a whole connect: attach compares the save the game loaded (slot A),
+ * not the slot the write armed, so the write's next run finishes the job. Cut after the 14th
+ * commit, the slot is found written and nothing is erased again; cut in the 8th commit, the slot
+ * is written anew; and if the game saved into it meanwhile, that run finds another save there and
+ * writes nothing. */
+TEST(test_attach_after_power_cut) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    watch_write();
+    snap_take();
+    hook.act_code = GEN3_HCMD_COMMIT_SECTOR;
+    hook.act_nth = 14;
+    hook.act = power_off;
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(game_view(), ViewNew);
+    power_back_on();
+    FakeGbaCounts n = counts();
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartOk);
+    ASSERT_EQ(counts().erases, n.erases);
+    ASSERT_EQ(counts().programs, n.programs);
+    ASSERT_TRUE(written_and_backed_up());
+    ASSERT_EQ(watch.violations, 0);
+    /* in the 8th commit */
+    snap_restore();
+    fake_gba_power_cut_after(&gba, CUT_IN_COMMIT8);
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(game_view(), ViewOld);
+    power_back_on();
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartOk);
+    ASSERT_EQ(counts().erases, 28);
+    ASSERT_TRUE(written_and_backed_up());
+    ASSERT_EQ(watch.violations, 0);
+    /* in the 8th commit, then the game played and saved: into slot B, with counter 5 */
+    snap_restore();
+    watch.on = false;
+    fake_gba_power_cut_after(&gba, CUT_IN_COMMIT8);
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    fake_helper_restart(&fh);
+    FakeSaveSpec s = spec;
+    s.slot_present[1] = true;
+    s.counter[1] = 5;
+    s.first[1] = 1;
+    s.seed ^= 0x00010000u;
+    fake_save_build(img2, &s);
+    memcpy(flash() + 14 * SECTOR_LEN, img2 + 14 * SECTOR_LEN, 14 * SECTOR_LEN);
+    memcpy(before, flash(), SAVE_LEN);
+    power_back_on();
+    n = counts();
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartChanged);
+    ASSERT_EQ(counts().erases, n.erases);
+    ASSERT_EQ(counts().programs, n.programs);
+    ASSERT_EQ(calls(GEN3_HCMD_ARM_WRITE), 1);
+    ASSERT_MEM_EQ(flash(), before, SAVE_LEN);
+    ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    /* the game's save is then backed up, the edit dropped */
+    bool dropped = false;
+    ASSERT_EQ(gen3_cart_attach(&cart, STAMP4, &dropped), Gen3CartOk);
+    ASSERT_TRUE(dropped);
+    ASSERT_EQ(gen3_cart_slots(&cart)->active, 1);
+    ASSERT_EQ(gen3_cart_slots(&cart)->save_counter, 5);
+    ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
+}
+
+/* The link lost for 1,200 transfers right after the 5th COMMIT ran: LinkLost after 5 commits, none
+ * sent after it, and no job talks to the helper until a reconnect, which tries for a commit's
+ * budget plus a sync */
+TEST(test_write_commit_link_lost) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    watch_write();
+    hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+    hook.unplug_nth = 5;
+    hook.unplug_len = 1200;
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(calls(GEN3_HCMD_COMMIT_SECTOR), 5);
+    ASSERT_EQ(counts().commits, 5);
+    ASSERT_FALSE(cart.linked);
+    ASSERT_EQ(cart.relink_us, GEN3_HLINK_BUSY_US + GEN3_HCLI_SYNC_US);
+    ASSERT_EQ(cart.wslot, 1);
+    ASSERT_EQ(watch.violations, 0);
+    ASSERT_EQ(game_view(), ViewOld);
+    const uint32_t exchanges = tap.exchanges;
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(tap.exchanges, exchanges);
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartOk);
+    ASSERT_EQ(counts().erases, 28);
+    ASSERT_EQ(watch.violations, 0);
+    ASSERT_TRUE(written_and_backed_up());
 }
 
 /* Every new sector checked, but a sector the write never touches (the Hall of Fame) isn't the
@@ -1236,13 +1393,6 @@ static uint32_t sweep_points(
     return count;
 }
 
-/* After the run: the new save, backed up, the edits gone */
-static bool written_and_backed_up(void) {
-    return game_view() == ViewNew && gen3_cart_backup_current(&cart) &&
-           gen3_cart_changes(&cart) == 0 && sav_is_flash(gen3_cart_backup_name(&cart)) &&
-           fake_store_count(&store, ".tmp") == 0;
-}
-
 /* The cable out for good at d transfers into the write, for every d: LinkLost or Ok, and the game
  * loads the old save or the new one at every step. Then the cable back, a reconnect, and the
  * write again finish it. */
@@ -1288,8 +1438,10 @@ TEST(test_write_link_drop_sweep) {
  * program leaves something half done. At each of the reference run's points the op the cut stops
  * in, an erase, the last program or a commit byte, is also left half done: a sector reading 0xFF
  * but weakly erased, or a byte with only some of its bits programmed. The GBA is then switched on
- * again and the helper sent: after a whole connect the write finishes, its erase making the weak
- * sector whole, and the new save survives the next power cycle too. */
+ * again and the helper sent: after a whole connect and attach, which keep the edit, the write
+ * finishes, its erase making the weak sector whole, and the new save survives the next power cycle
+ * too. Past the last flash op, in the check and the new backup, a cut leaves the new save, which
+ * the next session finds written: it backs it up and erases nothing. */
 TEST(test_write_power_cut_sweep) {
     ASSERT_TRUE(save_with_older_b());
     insert("AXVE", FakeSaveFlash);
@@ -1304,6 +1456,7 @@ TEST(test_write_power_cut_sweep) {
     static uint32_t at[POINTS];
     const uint32_t ats = ref.n;
     memcpy(at, ref.ops, sizeof(at));
+    const uint32_t after_commits = ref.xfer[ats - 1u];
     static uint32_t points[200];
     const uint32_t grid = sweep_points(1500, 0, ops, NULL, 0, points, 200);
     const uint32_t n = grid + sweep_points(1, 0, 0, at, ats, points + grid, 200 - grid);
@@ -1332,22 +1485,11 @@ TEST(test_write_power_cut_sweep) {
         const View cut = watch_view();
         ASSERT_TRUE(cut == ViewOld || cut == ViewNew);
         if(p < GEN3_SAVE_SLOT_SECTORS) ASSERT_TRUE(gba.weak_erase);
-        /* switched on again: a whole connect; the edit again if the backup went with it */
-        fake_helper_restart(&fh);
+        power_back_on();
         ASSERT_EQ(watch_view(), cut);
-        ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
-        bool dropped = false;
-        ASSERT_EQ(gen3_cart_attach(&cart, STAMP3, &dropped), Gen3CartOk);
-        ASSERT_EQ(watch.violations, 0);
-        if(cut == ViewNew) {
-            ASSERT_EQ(gen3_cart_changes(&cart), 0);
-            ASSERT_EQ(gen3_cart_slots(&cart)->active, watch.new_slot);
-        } else {
-            if(gen3_cart_changes(&cart) == 0) ASSERT_TRUE(edit_party());
-            const Gen3CartResult again = gen3_cart_write(&cart, STAMP4);
-            if(again != Gen3CartOk) printf("  k=%u: write again %d\n", (unsigned)k, again);
-            ASSERT_EQ(again, Gen3CartOk);
-        }
+        const Gen3CartResult again = gen3_cart_write(&cart, STAMP4);
+        if(again != Gen3CartOk) printf("  k=%u: write again %d\n", (unsigned)k, again);
+        ASSERT_EQ(again, Gen3CartOk);
         ASSERT_EQ(watch.violations, 0);
         ASSERT_TRUE(written_and_backed_up());
         /* nothing was left half erased under the new save */
@@ -1356,8 +1498,40 @@ TEST(test_write_power_cut_sweep) {
         ASSERT_EQ(game_view(), ViewNew);
         halves++;
     }
+    /* past the last flash op, in the check and the new backup: a cut every 100 transfers from the
+     * 14th commit, and at the write's last transfer. With no flash op left, the GBA off is the
+     * helper hearing nothing more until it is sent again. The last transfers may follow the last
+     * response the write needs: then it is done, Ok. */
+    static uint32_t late[64];
+    uint32_t lates = 0;
+    uint32_t late_lost = 0;
+    for(uint32_t d = after_commits; d < xfers && lates < 63u; d += 100u) late[lates++] = d;
+    late[lates++] = xfers - 1u;
+    for(uint32_t i = 0; i < lates; i++) {
+        snap_restore();
+        fake_helper_unplug_at(&fh, fake_helper_transfers(&fh) + late[i], FOREVER);
+        const Gen3CartResult r = gen3_cart_write(&cart, STAMP2);
+        ASSERT_EQ(watch.violations, 0);
+        ASSERT_EQ(watch_view(), ViewNew);
+        if(r == Gen3CartOk) {
+            ASSERT_TRUE(written_and_backed_up());
+            continue;
+        }
+        ASSERT_EQ(r, Gen3CartLinkLost);
+        late_lost++;
+        power_back_on();
+        const FakeGbaCounts c = counts();
+        ASSERT_EQ(gen3_cart_write(&cart, STAMP4), Gen3CartOk);
+        ASSERT_EQ(counts().erases, c.erases);
+        ASSERT_EQ(counts().programs, c.programs);
+        ASSERT_TRUE(written_and_backed_up());
+        fake_gba_power_cycle(&gba);
+        ASSERT_EQ(game_view(), ViewNew);
+    }
     ASSERT_TRUE(runs >= 100u);
     ASSERT_EQ(halves, 29);
+    ASSERT_TRUE(lates >= 10u);
+    ASSERT_TRUE(late_lost + 1u >= lates);
 }
 
 /* ---- The new backup ---- */
@@ -1832,6 +2006,9 @@ int main(void) {
     RUN(test_write_retry_mid_commit);
     RUN(test_write_short_glitch);
     RUN(test_write_verify_fails);
+    RUN(test_write_written_differs);
+    RUN(test_attach_after_power_cut);
+    RUN(test_write_commit_link_lost);
     RUN(test_post_write_backup_cart_differs);
     RUN(test_write_link_lost_in_backup);
     RUN(test_write_link_drop_sweep);
