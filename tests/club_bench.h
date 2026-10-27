@@ -11,6 +11,7 @@
 #include <src/gen3/gen3_club.h>
 #include <src/gen3/gen3_link.h>
 #include <src/gen3/gen3_text.h>
+#include <src/gen3/gen3_trade_sync.h>
 
 /* Test bench shared by the club and trade tests: the Flipper (club) and fake Ruby wired back to
  * back. Every helper is static inline, so a test file that doesn't use one compiles cleanly. */
@@ -590,6 +591,15 @@ static inline void raw_gba_run(BenchRawGba* g, Bench* b, uint32_t frames) {
 }
 
 /* The GBA player walks out of the room (§B7); the club must go through Closing to Waiting. */
+/* The guide for st with no offer refusal and no pickup failure is l1 / l2 / l3 */
+static inline bool guide_says(const Gen3ClubStatus* st, const char* l1, const char* l2, const char* l3) {
+    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
+    if(!gen3_trade_guide(st, true, true, Gen3RefuseNone, Gen3PickupOk, out)) return false;
+    if(strcmp(out[0], l1) == 0 && strcmp(out[1], l2) == 0 && strcmp(out[2], l3) == 0) return true;
+    printf("  guide: \"%s\" / \"%s\" / \"%s\"\n", out[0], out[1], out[2]);
+    return false;
+}
+
 static inline bool leave_room(Bench* b) {
     fake_ruby_leave_room(&b->ruby);
     return run_until_phase(b, Gen3ClubPhaseClosing, 600) &&

@@ -2896,15 +2896,6 @@ static bool guide_step(Bench* b, GuideWatch* w) {
         } \
     } while(0)
 
-/* The guide for st with no offer refusal and no pickup failure is l1 / l2 / l3 */
-static bool guide_says(const Gen3ClubStatus* st, const char* l1, const char* l2, const char* l3) {
-    char out[GEN3_GUIDE_LINES][GEN3_GUIDE_LINE_LEN];
-    if(!gen3_trade_guide(st, true, true, Gen3RefuseNone, Gen3PickupOk, out)) return false;
-    if(strcmp(out[0], l1) == 0 && strcmp(out[1], l2) == 0 && strcmp(out[2], l3) == 0) return true;
-    printf("  guide: \"%s\" / \"%s\" / \"%s\"\n", out[0], out[1], out[2]);
-    return false;
-}
-
 TEST(test_guide_other_room) {
     /* A GBA linked as another room: the guide names its own game's Trade Center counter, never
      * the one the player just used. Ruby's Record Corner (0x3311) is its right counter, the Trade

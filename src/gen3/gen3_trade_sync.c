@@ -226,7 +226,8 @@ static const char* guide_reason(Gen3Refuse r) {
  *   CENTER and COLOSSEUM (CableClub_EventScript_WelcomeToCableClub); x = 2 and x = 6 are the
  *   wireless club and the Union Room.
  * - Emerald: as FireRed. pokeemerald's PokemonCenter_2F maps place the same three attendants,
- *   and its CableClub_EventScript_DirectCornerAttendant falls back to the same menu.
+ *   and its CableClub_EventScript_DirectCornerAttendant falls back to a menu that also adds
+ *   RECORD CORNER after Mauville, with TRADE CENTER still on the right.
  * - Unknown: as R/S. */
 static bool trade_center_right(Gen3LinkGame game) {
     switch(game) {

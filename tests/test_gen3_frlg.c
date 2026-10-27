@@ -1094,6 +1094,11 @@ TEST(test_frlg_trade_relink_timeout) {
     ASSERT_EQ(st.trades_done, 0);
     ASSERT_TRUE(st.trade_pending);
     ASSERT_EQ(st.last_result, Gen3TradeResultNone);
+    /* The club's own relink wait runs out, then the guide says the link was lost */
+    for(int i = 0; i <= GEN3_CLUB_RELINK_WAIT_FRAMES && club_status(&b).relinking; i++) step(&b);
+    st = club_status(&b);
+    ASSERT_TRUE(
+        guide_says(&st, "Link lost before the", "trade. On a GBA link", "error, restart it."));
 
     ruby_relink(&b); /* the player switches FireRed off and on, and goes back to the club */
     ASSERT_TRUE(bench_to_room(&b));
