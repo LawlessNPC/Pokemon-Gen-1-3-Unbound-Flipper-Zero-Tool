@@ -19,6 +19,22 @@ void fake_store_init(FakeStore* s, uint64_t capacity) {
     for(uint32_t h = 0; h < FAKE_STORE_OPEN; h++) s->handles[h].file = -1;
 }
 
+void fake_store_copy(FakeStore* dst, const FakeStore* src) {
+    if(dst == src) return;
+    for(uint32_t h = 0; h < FAKE_STORE_OPEN; h++) {
+        if(src->handles[h].file >= 0) fake_store_misuse("copy with a file open", NULL);
+    }
+    fake_store_free_files(dst);
+    memcpy(dst, src, sizeof(*dst));
+    for(uint32_t i = 0; i < FAKE_STORE_FILES; i++) {
+        FakeStoreFile* f = &dst->files[i];
+        if(!src->files[i].data) continue;
+        f->data = malloc(f->cap);
+        if(!f->data) fake_store_misuse("out of memory", f->name);
+        memcpy(f->data, src->files[i].data, f->cap);
+    }
+}
+
 void fake_store_report_free(FakeStore* s, uint64_t bytes) {
     s->report = true;
     s->report_bytes = bytes;

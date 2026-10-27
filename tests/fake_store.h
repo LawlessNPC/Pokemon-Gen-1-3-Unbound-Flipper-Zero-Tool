@@ -55,6 +55,9 @@ struct FakeStore {
 
 /* No files; capacity bytes across all files; no fault. */
 void fake_store_init(FakeStore* s, uint64_t capacity);
+/* dst becomes a copy of src, files, capacity and armed faults included, with its own data; what
+ * dst held before is freed. No file of src may be open. */
+void fake_store_copy(FakeStore* dst, const FakeStore* src);
 /* One-shot: the next free_bytes() returns bytes instead of the truth; later ones the truth,
  * capacity minus the bytes the files hold. */
 void fake_store_report_free(FakeStore* s, uint64_t bytes);

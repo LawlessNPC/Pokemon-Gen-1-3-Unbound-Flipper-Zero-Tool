@@ -8,16 +8,19 @@
 #include <src/gen3/gen3_pkm.h>
 #include <src/gen3/gen3_save.h>
 
-/* The cartridge jobs: connect, back up the save, browse and edit it in a working copy, and copy
- * the ROM (plan 5 D5, D7, D8), on top of the helper client (gen3_hcli.h) and an SD store. Pure C,
- * no heap, no file-scope state. Not ISR code: a job blocks in the client's transport, so the jobs
- * run on a worker thread with a 2 KB stack, of which the store needs about 1 KB. So the big
- * working arrays are Gen3Cart fields, and no job keeps more than 256 B of locals, none over 128 B.
+/* The cartridge jobs: connect, back up the save, browse and edit it in a working copy, write it
+ * back, restore a backup, and copy the ROM (plan 5 D4-D8), on top of the helper client
+ * (gen3_hcli.h) and an SD store. Pure C, no heap, no file-scope state. Not ISR code: a job blocks
+ * in the client's transport, so the jobs run on a worker thread with a 2 KB stack, of which the
+ * store needs about 1 KB. So the big working arrays are Gen3Cart fields, and no job keeps more
+ * than 256 B of locals, none over 128 B.
  *
- * The link: a job sends helper commands only after a whole gen3_cart_connect. Every LinkLost or
- * BusyTimeout needs a new one first, since the helper may still be busy with the lost command, or
- * sending its response; until then a job answers LinkLost with no link traffic. That connect keeps
- * trying for the lost command's BUSY budget plus GEN3_HCLI_SYNC_US.
+ * The link: a job sends helper commands only after a whole gen3_cart_connect (or
+ * gen3_cart_reconnect). Every LinkLost or BusyTimeout needs a new one first, since the helper may
+ * still be busy with the lost command, or sending its response; until then a job answers LinkLost
+ * with no link traffic. That connect keeps trying for the lost command's BUSY budget plus
+ * GEN3_HCLI_SYNC_US. So does one after a write-class command answered with a response the client
+ * can't take: what the helper did is then unknown, and the write's next run finds out.
  *
  * Files are on the store, named relative to its folder:
  * - backups/<code>_<tid | nosave>_<stamp>.sav: the whole 128 KB flash, all 32 sectors, as
@@ -120,7 +123,7 @@ const char* gen3_cart_result_text(Gen3CartResult r);
 
 typedef struct Gen3Cart Gen3Cart;
 
-/* Fields are private to gen3_cart.c: read them through the functions below. About 1.8 KB: a field
+/* Fields are private to gen3_cart.c: read them through the functions below. About 2.3 KB: a field
  * of the session's state, or heap, never a stack local. */
 struct Gen3Cart {
     Gen3Hcli* cli;
@@ -150,9 +153,17 @@ struct Gen3Cart {
     bool work_ok; /* it holds the slot the game loads, plus exactly the edits recorded below */
     uint16_t dirty; /* bit k: section id k was edited */
     uint8_t changed[(GEN3_CART_MON_SLOTS + 7u) / 8u]; /* bit per Pokemon slot */
+    /* A write or restore that armed (or found its slot already written) and hasn't ended with a
+     * new backup: the slot it may have changed since the backup, which the reconnect after a lost
+     * link doesn't compare. GEN3_SAVE_NO_SECTOR: none. */
+    uint8_t wslot;
     /* The jobs' scratch */
     Gen3HFooter footers[GEN3_SAVE_SECTORS];
-    uint32_t exp_crc[GEN3_SAVE_SLOT_SECTORS];
+    /* Sectors 0..27 as READ_FOOTERS shows them, or as a restore's backup file holds them, and
+     * their analysis */
+    Gen3SaveSectorInfo seen[GEN3_SAVE_SLOT_SECTORS * 2u];
+    Gen3SaveSlots seen_slots;
+    uint32_t exp_crc[GEN3_SAVE_SLOT_SECTORS]; /* the CRC-32 of each image a write puts on the cart */
 };
 
 /* No cart and no backup yet, and no link: gen3_cart_connect comes first. cli was just
@@ -190,6 +201,54 @@ Gen3CartResult gen3_cart_backup(Gen3Cart* c, const char* stamp);
  * current backup of a save the game loads. */
 Gen3CartResult gen3_cart_discard(Gen3Cart* c);
 
+/* Writes the edits back (multiboot-and-save.md §5.8, plan 5 D4): the working copy's 14 sectors,
+ * each with the counter N + 1 and an edited one with its checksum, go to the slot the game doesn't
+ * load, edited ones uploaded and the rest copied on the cart; only the last step, a commit byte per
+ * sector, makes that slot whole, and so the one the game loads. Then each of them is checked on the
+ * cart, and a new backup is made of the cart as it now is (the .sav, with the 14 new sectors in
+ * place of the old ones, checked against the cart and read back), from which the working copy is
+ * built again.
+ * - Before any link traffic: Refused unless gen3_cart_writable; Nothing without an edit; SdFull
+ *   unless a backup and a sector fit on the card.
+ * - Before arming, the cart must still hold what the backup says: the footers of the slot kept, the
+ *   game's choice, and SECTOR_CRC32 of each sector kept; else Changed, which drops the backup. A
+ *   write that a lost link interrupted after its last commit is found written, and not redone.
+ * - A failure from the arming to the check ends any arming (its result ignored); the game still
+ *   loads the save the backup holds, which stays current.
+ * - Ok: written, checked and backed up; the edits are gone, now on the cart.
+ * - WrittenNoBackup: written and checked, but the new backup failed. The edits are gone, now on the
+ *   cart, and there is no current backup until gen3_cart_backup.
+ * - LinkLost or BusyTimeout, at any step: gen3_cart_reconnect, then this again finishes the job.
+ * Never cancelled. Progress Prepare, Erase, Program, Commit, Verify, PostBackup. */
+Gen3CartResult gen3_cart_write(Gen3Cart* c, const char* stamp);
+/* Reads a backup file and checks it: 131072 bytes, strict with this cart's layout. Fills the
+ * backup's trainer, from the sector the game would load as id 0. BadArg for a name that can't be
+ * a backup (too long, or the temporary one); Refused for a cart with no known layout (not
+ * can_browse); SdError if the file can't be read; BadBackup otherwise. Bytes past a section
+ * needn't be zero: a restore clears them. Progress RestoreCheck per sector. */
+Gen3CartResult gen3_cart_restore_check(
+    Gen3Cart* c,
+    const char* name,
+    Gen3SaveTrainer* trainer,
+    bool* has_trainer);
+/* Puts the backup's save on the cart by gen3_cart_write's path (plan 5 D6), every sector uploaded
+ * from the file, each with the bytes past its section zeroed and the plan's counter; the file
+ * itself is never written. A cart whose save is strict and not padded keeps it as the fallback:
+ * the backup's goes to the slot the game doesn't load, with the counter N + 1. A cart with no save
+ * the game loads (Empty or Corrupt) gets the backup's own counter and rotation. Refused unless
+ * gen3_cart_restore_check is Ok (an SdError stays one), can_write, a current backup, and one of
+ * those two saves; then as gen3_cart_write. Sectors 28..31 are never written. */
+Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stamp);
+/* After LinkLost or BusyTimeout: gen3_cart_connect (HELLO tried for the lost command's budget,
+ * CART_INFO, SAVE_PROBE); then, if there was a current backup, the cart must still be its cart
+ * (header and flash id) with the same footers (READ_FOOTERS), but for the slot of a write or
+ * restore not yet backed up, which may have changed; else Changed, which drops the backup. The
+ * edits stay. Progress Identify; cancel as gen3_cart_connect. */
+Gen3CartResult gen3_cart_reconnect(Gen3Cart* c);
+
+/* The cart as the last connect found it. Read it, gen3_cart_rom_size and gen3_cart_rom_name only
+ * after a connect that ran to its end: one cut short may have read another cart's CART_INFO, and
+ * not yet its id. */
 const Gen3CartId* gen3_cart_id(const Gen3Cart* c);
 /* The backup's analysis, while gen3_cart_backup_current and the cart can_browse */
 const Gen3SaveSlots* gen3_cart_slots(const Gen3Cart* c);
@@ -227,7 +286,8 @@ Gen3CartResult gen3_cart_mon_put(Gen3Cart* c, uint8_t box, uint8_t slot, const G
 bool gen3_cart_mon_changed(const Gen3Cart* c, uint8_t box, uint8_t slot);
 uint16_t gen3_cart_changes(const Gen3Cart* c); /* Pokemon slots changed */
 
-uint32_t gen3_cart_rom_size(const Gen3Cart* c); /* CART_INFO's rom_size; 0: no ROM copy */
+/* CART_INFO's rom_size; 0: no ROM copy. After a whole connect only, as gen3_cart_id. */
+uint32_t gen3_cart_rom_size(const Gen3Cart* c);
 void gen3_cart_rom_name(const Gen3Cart* c, char out[GEN3_CART_NAME_MAX]); /* "roms/AXVE_v1.gba" */
 /* A .part of this ROM holds at least one region: *done_bytes, its length rounded down to a region,
  * is where a resumed copy starts */

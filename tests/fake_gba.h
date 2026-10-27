@@ -30,6 +30,7 @@
 #define FAKE_GBA_FLASH_LEN 131072u
 #define FAKE_GBA_SRAM_LEN 65536u
 #define FAKE_GBA_SECTORS 32u
+#define FAKE_GBA_SECTOR_LEN 4096u
 #define FAKE_GBA_STRINGS 8u
 #define FAKE_GBA_STRING_MAX 16u
 #define FAKE_GBA_TRACE 64u
@@ -106,9 +107,17 @@ struct FakeGba {
     uint8_t weak_poll_val;
     bool cut_armed;
     uint32_t cut_ops; /* erases + byte programs still allowed before the chip freezes */
+    bool cut_partial; /* the operation the cut freezes is half done (fake_gba_power_cut_partial) */
     bool frozen; /* the power cut came */
     uint8_t cut_want; /* the data of the operation the cut froze */
     uint8_t cut_toggle;
+    /* A sector whose erase a partial cut froze: it reads all 0xFF, but weak_old's 0 bits are
+     * still weakly there until a whole erase of it. A program into it meanwhile marks it
+     * weak_programmed: then the next power cycle lets those bits read 0 again. */
+    bool weak_erase;
+    uint8_t weak_erase_sector;
+    bool weak_programmed;
+    uint8_t weak_old[FAKE_GBA_SECTOR_LEN];
     uint8_t late_reads; /* tests set it: the next erase or program to complete shows this many
                          * status reads, DQ5 set, before its data, as if it finished just as DQ5
                          * rose */
@@ -162,10 +171,18 @@ void fake_gba_weak_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t tim
  * still counted), every read is that operation's busy status (DQ7 the complement of its data, DQ6
  * toggling, DQ5 clear), and the array stays as it was before that operation. */
 void fake_gba_power_cut_after(FakeGba* g, uint32_t ops);
+/* fake_gba_power_cut_after, but the operation the cut freezes is half done, as cells cut off
+ * mid-change are:
+ * - a sector erase leaves the whole sector reading 0xFF, yet weakly erased (weak_erase) until a
+ *   whole erase of it: a program into it before one keeps reading right, but the next power cycle
+ *   lets the bits that were 0 before the cut erase read 0 again, as data held over the erase;
+ * - a byte program clears only the lowest of the bits it should clear (none if it clears none). */
+void fake_gba_power_cut_partial(FakeGba* g, uint32_t ops);
 /* The GBA is switched off and on again with the cart still in: the chip leaves a power cut's
  * freeze, forgets a power cut still to come, and is back in read mode, out of any command sequence,
- * in bank 0; the status is Ready and the modelled time starts again. The array, the cart, the chip's
- * id, the faults the test injected and the counts stay. */
+ * in bank 0; the status is Ready and the modelled time starts again. A weakly erased sector that
+ * was programmed since its cut gets its old 0 bits back (fake_gba_power_cut_partial). The array
+ * otherwise, the cart, the chip's id, the faults the test injected and the counts stay. */
 void fake_gba_power_cycle(FakeGba* g);
 void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out);
 /* Time the GBA spent since the last call, in µs, as the fake models it: 300,000 per erase, 25 per

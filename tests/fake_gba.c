@@ -117,11 +117,23 @@ void fake_gba_weak_program(FakeGba* g, uint8_t sector, uint16_t off, uint8_t tim
 void fake_gba_power_cut_after(FakeGba* g, uint32_t ops) {
     g->cut_armed = true;
     g->cut_ops = ops;
+    g->cut_partial = false;
+}
+
+void fake_gba_power_cut_partial(FakeGba* g, uint32_t ops) {
+    fake_gba_power_cut_after(g, ops);
+    g->cut_partial = true;
 }
 
 void fake_gba_power_cycle(FakeGba* g) {
+    if(g->weak_erase && g->weak_programmed) {
+        uint8_t* s = g->flash + (uint32_t)g->weak_erase_sector * FAKE_SECTOR_LEN;
+        for(uint32_t i = 0; i < FAKE_SECTOR_LEN; i++) s[i] &= g->weak_old[i];
+        g->weak_programmed = false;
+    }
     g->frozen = false;
     g->cut_armed = false;
+    g->cut_partial = false;
     g->cut_ops = 0;
     g->mode = FAKE_MODE_READ;
     g->seq = FAKE_SEQ_IDLE;
@@ -219,14 +231,16 @@ static bool fake_flash_live(const FakeGba* g) {
 
 /* An erase or a byte program, writing want, was issued (and counted). True if the chip carries it
  * out; false if it isn't a live flash chip, or the power cut comes first and freezes it in the
- * middle of this operation. */
-static bool fake_flash_op(FakeGba* g, uint8_t want) {
+ * middle of this operation: then *half is whether a partial cut leaves it half done. */
+static bool fake_flash_op(FakeGba* g, uint8_t want, bool* half) {
+    *half = false;
     if(g->status != HpStatusWriting) g->ops_not_red++;
     if(!fake_flash_live(g)) return false;
     if(g->cut_armed) {
         if(g->cut_ops == 0) {
             g->frozen = true;
             g->cut_want = want;
+            *half = g->cut_partial;
             return false;
         }
         g->cut_ops--;
@@ -248,32 +262,51 @@ static void fake_flash_done(FakeGba* g, uint8_t want) {
 
 static void fake_flash_erase(FakeGba* g, uint16_t off) {
     const uint8_t sector = (uint8_t)(g->bank * 16u + (off >> 12));
+    uint8_t* s = g->flash + (uint32_t)sector * FAKE_SECTOR_LEN;
     g->counts.erases++;
     g->busy_us += FAKE_ERASE_US;
-    if(!fake_flash_op(g, 0xFF)) return;
+    bool half;
+    if(!fake_flash_op(g, 0xFF, &half)) {
+        if(half) {
+            /* one weak sector at a time: a second partial cut's sector replaces the first */
+            g->weak_erase = true;
+            g->weak_erase_sector = sector;
+            g->weak_programmed = false;
+            memcpy(g->weak_old, s, FAKE_SECTOR_LEN);
+            memset(s, 0xFF, FAKE_SECTOR_LEN);
+        }
+        return;
+    }
     if(g->fail_erase[sector]) {
         g->fail_erase[sector]--;
         fake_flash_fail(g, 0xFF);
         return;
     }
-    memset(g->flash + (uint32_t)sector * FAKE_SECTOR_LEN, 0xFF, FAKE_SECTOR_LEN);
+    memset(s, 0xFF, FAKE_SECTOR_LEN);
+    if(g->weak_erase && g->weak_erase_sector == sector) g->weak_erase = false;
     fake_flash_done(g, 0xFF);
 }
 
 static void fake_flash_program(FakeGba* g, uint16_t off, uint8_t v) {
     const uint8_t sector = (uint8_t)(g->bank * 16u + (off >> 12));
     const uint16_t in_sector = off & (FAKE_SECTOR_LEN - 1u);
+    uint8_t* cell = &g->flash[(uint32_t)g->bank * FAKE_BANK_LEN + off];
     g->counts.programs++;
     if(in_sector == 0xFF8u) g->counts.commits++;
     g->busy_us += FAKE_PROGRAM_US;
-    if(!fake_flash_op(g, v)) return;
+    bool half;
+    if(!fake_flash_op(g, v, &half)) {
+        const uint8_t to_clear = (uint8_t)(*cell & ~v);
+        if(half) *cell &= (uint8_t) ~(to_clear & (0u - to_clear));
+        return;
+    }
     if(g->fail_program_times && sector == g->fail_program_sector &&
        in_sector == g->fail_program_off) {
         g->fail_program_times--;
         fake_flash_fail(g, v);
         return;
     }
-    uint8_t* cell = &g->flash[(uint32_t)g->bank * FAKE_BANK_LEN + off];
+    if(g->weak_erase && g->weak_erase_sector == sector) g->weak_programmed = true;
     const uint8_t to_clear = (uint8_t)(*cell & ~v);
     *cell &= v;
     if(g->weak_times && to_clear && sector == g->weak_sector && in_sector == g->weak_off) {
@@ -290,8 +323,10 @@ static void fake_flash_program(FakeGba* g, uint16_t off, uint8_t v) {
 static void fake_flash_chip_erase(FakeGba* g) {
     g->counts.chip_erases++;
     g->busy_us += FAKE_ERASE_US;
-    if(!fake_flash_op(g, 0xFF)) return;
+    bool half;
+    if(!fake_flash_op(g, 0xFF, &half)) return;
     memset(g->flash, 0xFF, sizeof(g->flash));
+    g->weak_erase = false;
 }
 
 /* One bus write, decoded as a JEDEC command for every kind of chip. */

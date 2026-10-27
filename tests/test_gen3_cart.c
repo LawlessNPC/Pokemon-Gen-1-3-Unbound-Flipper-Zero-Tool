@@ -692,6 +692,24 @@ TEST(test_job_backup_store_faults) {
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
     ASSERT_EQ(fake_store_count(&store, ""), 0);
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    /* the working copy's reads: its first sector from the .sav, after the read-back's 32 and the
+     * trainer's, with only the backup's 32 sectors written; then the first of its own read-back,
+     * after the 14 it copied */
+    static const struct {
+        uint32_t reads, writes;
+    } work_reads[] = {{33, 32}, {47, 46}};
+    for(uint32_t i = 0; i < sizeof(work_reads) / sizeof(work_reads[0]); i++) {
+        fake_store_fail_read(&store, work_reads[i].reads);
+        const uint32_t writes = store.writes;
+        ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
+        ASSERT_EQ(store.writes - writes, work_reads[i].writes);
+        ASSERT_EQ(fake_store_count(&store, ""), 0);
+        ASSERT_FALSE(gen3_cart_backup_current(&cart));
+        ASSERT_STR_EQ(gen3_cart_backup_name(&cart), "");
+        ASSERT_FALSE(gen3_cart_browsable(&cart));
+        ASSERT_FALSE(cart.work_ok);
+        ASSERT_FALSE(store.read_fault);
+    }
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
     ASSERT_TRUE(sav_is_flash(BACKUP_NAME));
 }
@@ -797,7 +815,11 @@ TEST(test_job_attach_unreadable) {
     ASSERT_EQ(gen3_cart_attach(&cart, STAMP, &dropped), Gen3CartOk);
     ASSERT_TRUE(dropped);
     ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(cart.dirty, 0);
+    ASSERT_FALSE(cart.work_ok);
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    ASSERT_EQ(cart.backup_name[0], '\0');
+    ASSERT_STR_EQ(gen3_cart_backup_name(&cart), "");
     ASSERT_FALSE(gen3_cart_browsable(&cart));
     ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
 }
