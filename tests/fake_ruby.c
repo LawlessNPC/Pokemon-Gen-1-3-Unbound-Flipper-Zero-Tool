@@ -199,6 +199,12 @@
 /* fr: trade.c: CommunicateWhetherMonCanBeTraded, PARTNER_MON_INVALID:
  * QueueAction(180, QUEUE_SEND_DATA) */
 #define FRLG_REFUSE_SEND_DELAY 180
+/* gReadyCloseLinkType from fr: link.c: SetCloseLinkCallbackAndType: fr: trade.c:
+ * CB_WaitToStartTrade (the trade) and CB_InitExitCanceledTrade (back to the room) */
+#define FRLG_CLOSE_TYPE_TRADE  32
+#define FRLG_CLOSE_TYPE_CANCEL 12
+/* fr: trade_scene.c: CheckLinkTimeout: CloseLink and CB2_LinkError once linkTimeoutTimer > 300 */
+#define FRLG_LINK_TIMEOUT_FRAMES 300
 
 /* sBlockRequestLookupTable sizes, request types 0..4 */
 static const uint16_t block_request_size[] = {200, 200, 100, 220, 40};
@@ -375,6 +381,20 @@ static void close_link(FakeRuby* g) {
     g->received_link_players = false;
     g->link_open = false;
     disable_serial(g);
+}
+
+/* SetCloseLinkCallback: ignored while gLinkCallback is busy. In FRLG mode its 5FFF's word 1 is
+ * then 0 (fr: link.c: SetCloseLinkCallback), or `type` for fr: link.c:
+ * SetCloseLinkCallbackAndType. Ruby's is always 0, as every Ruby call passes 0. */
+static bool set_close_link_callback_type(FakeRuby* g, uint16_t type) {
+    if(g->callback != FakeRubyCbNone) return false;
+    g->callback = FakeRubyCbReadyCloseLink;
+    g->close_type = type;
+    return true;
+}
+
+static bool set_close_link_callback(FakeRuby* g) {
+    return set_close_link_callback_type(g, 0);
 }
 
 static void enqueue_send_cmd(FakeRuby* g) {
@@ -626,6 +646,7 @@ static void run_callback(FakeRuby* g) {
     case FakeRubyCbReadyCloseLink:
         if(g->last_recv_count == 0) {
             g->send_cmd[0] = CMD_READY_CLOSE_LINK;
+            g->send_cmd[1] = g->close_type; /* FRLG: fr: link.c: BuildSendCmd */
             g->callback = FakeRubyCbWaitCloseLink;
         }
         break;
@@ -841,7 +862,7 @@ static void run_room_script(FakeRuby* g) {
         break;
     case FakeRubyScriptExitFade:
         if(--g->script_updates == 0) {
-            if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbReadyCloseLink;
+            set_close_link_callback(g);
             g->script = FakeRubyScriptExitWait;
         }
         break;
@@ -970,6 +991,7 @@ static void open_link(FakeRuby* g) {
     memset(g->block_recv_size, 0, sizeof(g->block_recv_size));
     memset(g->block_recv_pos, 0, sizeof(g->block_recv_pos));
     memset(g->ready_close, 0, sizeof(g->ready_close));
+    g->close_type = 0; /* FRLG: fr: link.c: InitLink */
     memset(g->ready_standby, 0, sizeof(g->ready_standby));
     for(int i = 0; i < FAKE_RUBY_PLAYERS; i++) g->link_player_pending[i] = true;
     g->trigger_active = true; /* CreateTask(Task_TriggerHandshake) */
@@ -994,7 +1016,7 @@ static void run_start_trade(FakeRuby* g) {
         if(g->frame - g->task_frame >= START_FADE_FRAMES) g->start_case = 2;
         break;
     case 2: /* m4aMPlayAllStop, SetCloseLinkCallback: it acts only while gLinkCallback is NULL */
-        if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbReadyCloseLink;
+        set_close_link_callback(g);
         g->start_case = 3;
         break;
     case 3: /* CloseLink cleared gReceivedRemoteLinkPlayers */
@@ -1218,13 +1240,6 @@ static void set_trade_state(FakeRuby* g, uint8_t state) {
        g->menu != FakeRubyMenuPrompt) {
         g->answer_pending = false;
     }
-}
-
-/* SetCloseLinkCallback: ignored while gLinkCallback is busy */
-static bool set_close_link_callback(FakeRuby* g) {
-    if(g->callback != FakeRubyCbNone) return false;
-    g->callback = FakeRubyCbReadyCloseLink;
-    return true;
 }
 
 /* Trade_SendData: SendBlock(linkData, 20), refused while a block is active. linkData keeps its
@@ -1508,7 +1523,8 @@ static void trade_menu_update(FakeRuby* g) {
         if(elapsed < MENU_FADE_FRAMES) break;
         g->selected[0] = g->cursor;
         g->selected[1] = g->partner_pos;
-        if(!set_close_link_callback(g)) {
+        /* FRLG mode: fr: trade.c: CB_WaitToStartTrade, SetCloseLinkCallbackAndType(32) */
+        if(!set_close_link_callback_type(g, g->frlg ? FRLG_CLOSE_TYPE_TRADE : 0)) {
             set_error(g, "ccdd hang"); /* the link stays open: state 13 never ends */
             return;
         }
@@ -1516,7 +1532,8 @@ static void trade_menu_update(FakeRuby* g) {
         break;
     case TRADE_FADE_ROOM: /* sub_8049D9C, once the fade is done */
         if(elapsed < MENU_FADE_FRAMES) break;
-        if(!set_close_link_callback(g)) {
+        /* FRLG mode: fr: trade.c: CB_InitExitCanceledTrade, SetCloseLinkCallbackAndType(12) */
+        if(!set_close_link_callback_type(g, g->frlg ? FRLG_CLOSE_TYPE_CANCEL : 0)) {
             set_error(g, "eebb hang"); /* the link stays open: state 12 never ends */
             return;
         }
@@ -1640,7 +1657,8 @@ static void run_create_menu(FakeRuby* g) {
 
 /* sub_804BA94 [TradeMons] (§B4.4) on own cursor i and partner j = gSelectedTradeMonPositions[1]
  * % 6. This GBA holds no mail (its step 1 clears nothing here). Pokedex flags (step 5) aren't
- * modelled. */
+ * modelled. FRLG mode: fr: trade_scene.c: TradeMons, the same swap, Friendship 70 and mail, but
+ * no National Dex from the Flipper's LinkPlayer (§C4). */
 static void trade_mons(FakeRuby* g) {
     const uint8_t i = g->selected[0];
     const uint8_t j = g->selected[1] % FAKE_RUBY_PARTY;
@@ -1662,8 +1680,10 @@ static void trade_mons(FakeRuby* g) {
         gen3_pkm_set(&p, Gen3FieldFriendship, TRADE_FRIENDSHIP);
         gen3_pkm_encrypt(&p, g->party[i]);
     }
-    /* sub_804BA64 [TryEnableNationalDexFromLinkPartner]: gLinkPlayers[mpId ^ 1] */
-    if(g->received_link_players && g->link_players[0].lp_field_2 == LP_NATIONAL_DEX) {
+    /* sub_804BA64 [TryEnableNationalDexFromLinkPartner]: gLinkPlayers[mpId ^ 1]. FRLG mode:
+     * fr: trade_scene.c: TryEnableNationalDexFromLinkPartner has this check commented out, so
+     * the 0x8000 every FRLG LinkPlayer carries does nothing */
+    if(!g->frlg && g->received_link_players && g->link_players[0].lp_field_2 == LP_NATIONAL_DEX) {
         g->national_dex = true;
     }
 }
@@ -1686,12 +1706,14 @@ static void trade_link_receive(FakeRuby* g) {
 }
 
 /* sub_804B41C [CB2_LinkTrade] (§B4.1). It reads no block flags: a block that comes in waits for
- * sub_804DB84. */
+ * sub_804DB84. FRLG mode: fr: trade_scene.c: CB2_LinkTrade, the same states on a cable, and on
+ * this child CheckLinkTimeout in state 4 (§C4). */
 static void run_link_trade(FakeRuby* g) {
     switch(g->cb2_state) {
-    case 0: /* ResetTasks, CloseLink, gLinkType = 0x1144 */
+    case 0: /* ResetTasks, CloseLink, gLinkType = 0x1144; FRLG: ClearLinkTimeoutTimer */
         close_link(g);
         g->me.link_type = GEN3_LINKTYPE_TRADE_DISCONNECTED;
+        g->link_timeout = 0;
         g->cb2_state = 1;
         break;
     case 1: /* OpenLink, with no Task_WaitForLinkPlayerConnection */
@@ -1705,10 +1727,18 @@ static void run_link_trade(FakeRuby* g) {
             g->cb2_state = 3;
         }
         break;
-    case 3: /* the child's branch */
+    case 3: /* the child's branch (FRLG: CheckLinkTimeout runs here on the master only) */
         g->cb2_state = 4;
         break;
-    case 4: /* sub_804B24C is a debug counter: no timeout */
+    case 4:
+        /* Ruby: sub_804B24C is a debug counter, no timeout. FRLG mode: fr: trade_scene.c:
+         * CheckLinkTimeout first, every frame of state 4. Its linkTimeoutCheck1 is never written,
+         * so the timer counts whether or not data flows; past 300: CloseLink, CB2_LinkError */
+        if(g->frlg && ++g->link_timeout > FRLG_LINK_TIMEOUT_FRAMES) {
+            close_link(g);
+            set_error(g, "link timeout");
+            break;
+        }
         if(!g->received_link_players) break;
         if(!link_types_match(g)) {
             set_error(g, "link type"); /* Ruby: state 4 never passes, a silent hang (§B8) */
@@ -1782,7 +1812,10 @@ static void commit_save(FakeRuby* g) {
     g->save_dirty = false;
 }
 
-/* sub_804DC88 [CB2_SaveAndEndTrade] (§B5.1). */
+/* sub_804DC88 [CB2_SaveAndEndTrade] (§B5.1). FRLG mode: fr: trade_scene.c: CB2_SaveAndEndTrade,
+ * the cartridge build, runs the same states on this child (§C6): state 40's 51 frames, then
+ * Random() % 30 more on the master only (GetMultiplayerId() == 0), none here; the commit in state
+ * 42. Its soft reset stays off until state 9, which nothing on the link sees. */
 static void run_save(FakeRuby* g) {
     switch(g->cb2_state) {
     case SAVE_STANDBY_TEXT:
@@ -1930,7 +1963,7 @@ static void run_linkup_task(FakeRuby* g) {
         if(!g->received_link_players) break;
         /* GetLinkPlayerDataExchangeStatusTimed: every linkType must equal slot 0's. */
         if(!link_types_match(g)) {
-            if(g->callback == FakeRubyCbNone) g->callback = FakeRubyCbReadyCloseLink;
+            set_close_link_callback(g);
             next_task(g, FakeRubyTaskStop);
             break;
         }

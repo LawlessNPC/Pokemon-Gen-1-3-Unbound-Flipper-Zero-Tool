@@ -37,10 +37,22 @@
  * - the party exchange's 11-frame delay before every round's request case, on this child too
  *   (fr: trade.c: BufferTradeParties cases 2/6/10/14/18, §C4);
  * - which of its own Pokemon it may offer (fr: trade.c: CanTradeSelectedMon) and, on YES, the
- *   Flipper's (fr: trade.c: CheckValidityOfTradeMons): fake_ruby_offer, fake_ruby_answer.
- * The room, the seats, the walk-in, the 0x1111 re-establish and the 300-frame tasks are Ruby's,
- * as FRLG's are the same (§C5; fr: cable_club.c: Task_EnterCableClubSeat,
- * Task_WaitForLinkPlayerConnection, cartridge build). */
+ *   Flipper's (fr: trade.c: CheckValidityOfTradeMons): fake_ruby_offer, fake_ruby_answer;
+ * - word 1 of its 5FFF, gReadyCloseLinkType (fr: link.c: BuildSendCmd): 32 for the trade's close
+ *   after CCDD (fr: trade.c: CB_WaitToStartTrade), 12 for the room's after EEBB
+ *   (CB_InitExitCanceledTrade), 0 for every other close (SetCloseLinkCallback) and from each
+ *   OpenLink (InitLink); Ruby's is always 0 (§C4);
+ * - the 0x1144 relink's deadline (fr: trade_scene.c: CB2_LinkTrade, CheckLinkTimeout): "link
+ *   timeout" below;
+ * - TradeMons without the National Dex from the Flipper's lp_field_2 (fr: trade_scene.c:
+ *   TradeMons, TryEnableNationalDexFromLinkPartner has its check commented out).
+ * The room, the seats, the walk-in, the 0x1111 re-establish (its fade-in included) and the
+ * 300-frame tasks are Ruby's, as FRLG's are the same (§C5; fr: cable_club.c:
+ * Task_EnterCableClubSeat, Task_WaitForLinkPlayerConnection, Task_ReestablishLink; fr:
+ * overworld.c: ReturnToFieldLink; fr: field_fadetransition.c: Task_ReturnToFieldCableLink,
+ * cartridge build). So are the trade's animation, ABCD/DCBA and the child's link save
+ * (fr: trade_scene.c: CB2_UpdateLinkTrade, HandleLinkDataReceive, CB2_SaveAndEndTrade: the extra
+ * Random() % 30 frames before sync 2 are the master's only, §C6). */
 
 #define FAKE_RUBY_CMD_LEN   8 /* CMD_LENGTH */
 #define FAKE_RUBY_QUEUE_LEN 50 /* QUEUE_CAPACITY */
@@ -231,6 +243,8 @@ struct FakeRuby {
     uint8_t block_received; /* gBlockReceived, bit i = slot i */
     Gen3LinkPlayer link_players[FAKE_RUBY_PLAYERS]; /* gLinkPlayers */
     bool ready_close[FAKE_RUBY_PLAYERS]; /* gReadyToCloseLink */
+    /* FRLG: gReadyCloseLinkType, word 1 of its 5FFF (fr: link.c: BuildSendCmd); 0 in Ruby mode */
+    uint16_t close_type;
     bool ready_standby[FAKE_RUBY_PLAYERS]; /* gReadyToExitStandby */
     uint16_t held_keys[FAKE_RUBY_PLAYERS]; /* gLinkPartnersHeldKeys */
 
@@ -318,6 +332,7 @@ struct FakeRuby {
     /* Part B: the trade (§B4) and the link save (§B5), callback2 sub_804B41C .. sub_804DC88 */
     uint8_t cb2_state; /* gMain.state of the callback2 running (SetMainCallback2 zeroes it) */
     uint16_t cb2_count; /* its unk_00c0 */
+    uint16_t link_timeout; /* FRLG: linkTimeoutTimer (fr: trade_scene.c: CheckLinkTimeout) */
     uint32_t cb2_frame; /* frame its current timed step began */
     bool abcd_sent; /* this trade's ABCD went out (sub_804BB78) */
     bool national_dex; /* EnableNationalPokedex ran (sub_804BA64) */
@@ -416,7 +431,10 @@ FakeRubyPhase fake_ruby_phase(const FakeRuby* g);
  * Task_LinkupExchangeDataWithLeader; phase Closed), and "bad card" also for an FRLG Flipper's
  * card whose version byte at 0x38 isn't its LinkPlayer's (fr: cable_club.c:
  * Task_LinkupAwaitTrainerCardData copies it whole, and fr: trainer_card.c: GetCardType picks
- * the Kanto or the Hoenn card from that byte) */
+ * the Kanto or the Hoenn card from that byte), and "link timeout" also for the trade's 0x1144
+ * relink (fr: trade_scene.c: CB2_LinkTrade calls CheckLinkTimeout in state 3 on the master and in
+ * state 4: on this child, more than 300 frames in state 4, each counted, data or not; it closes
+ * the link, CB2_LinkError) */
 const char* fake_ruby_error(const FakeRuby* g);
 /* the Flipper's block as this GBA parsed it (in FRLG mode, converted as every received
  * LinkPlayer is: fr: link.c: ConvertLinkPlayerName) */
@@ -482,7 +500,8 @@ uint32_t fake_ruby_saved_trades(const FakeRuby* g); /* link saves committed */
  * save's first sector (after sync 1) and before the commit (§B5.2). The saved party stays as it
  * was: on Ruby, the boot reports a corrupt save and loads the previous one. */
 bool fake_ruby_save_corrupt(const FakeRuby* g);
-bool fake_ruby_national_dex(const FakeRuby* g); /* saved National Dex flag */
+/* Saved National Dex flag, from the Flipper's 0x1144 lp_field_2 (§B4.5); never in FRLG mode */
+bool fake_ruby_national_dex(const FakeRuby* g);
 /* Main-loop stall per flash sector written in the link save; default 2 (not measured:
  * link-protocol-trade.md T4). */
 void fake_ruby_set_sector_stall(FakeRuby* g, uint8_t frames);

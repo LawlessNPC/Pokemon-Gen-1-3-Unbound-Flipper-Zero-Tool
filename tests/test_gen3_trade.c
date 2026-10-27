@@ -2730,7 +2730,6 @@ TEST(test_leave_left_menu_stale) {
      * The late relink then finishes the trade and its link save, and the post-save trade menu is
      * stale (left): EEBB, never a second trade, and no seat in the room the GBA goes back to */
     Bench b;
-    bool offered = false;
     bench_init_trade(&b);
     ASSERT_TRUE(bench_reach_menu(&b));
     fake_ruby_offer(&b.ruby, 2);
@@ -2767,19 +2766,15 @@ TEST(test_leave_left_menu_stale) {
     ASSERT_EQ(st.last_result, Gen3TradeResultDone);
     ASSERT_EQ(fake_ruby_saved_trades(&b.ruby), 1);
 
-    /* The post-save menu */
+    /* The post-save menu. The GBA can't offer in it: the club's EEBB comes while the GBA still
+     * builds the menu, and its first menu update handles that EEBB before any input. So the GBA
+     * sends no trade block after the first trade's ABCD */
     ASSERT_TRUE(run_until_phase(&b, Gen3ClubPhaseMenu, 1500));
     ASSERT_TRUE(club_status(&b).offer_stale);
-    for(int i = 0; i < 400 && fake_ruby_phase(&b.ruby) != FakeRubyReturn; i++) {
-        step(&b);
-        ASSERT_TRUE(fake_ruby_error(&b.ruby) == NULL);
-        if(!offered && fake_ruby_menu_state(&b.ruby) == FakeRubyMenuBrowsing) {
-            fake_ruby_offer(&b.ruby, 0);
-            offered = true;
-        }
-    }
-    ASSERT_EQ(fake_ruby_phase(&b.ruby), FakeRubyReturn);
+    ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyReturn, 400));
     ASSERT_TRUE(run_until_fake_phase(&b, FakeRubyRoom, 200));
+    ASSERT_EQ(n_trade_blocks(b.g_blocks, b.n_g_blocks), 3); /* AABB, BBBB, ABCD */
+    ASSERT_EQ(trade_block(b.g_blocks, b.n_g_blocks, 2)->code, GEN3_TRADE_ANIM_DONE);
     ASSERT_EQ(f_code_count(&b, GEN3_TRADE_SET_MONS), 1); /* the first trade's only */
     ASSERT_EQ(f_code_count(&b, GEN3_TRADE_START), 1);
     ASSERT_EQ(f_code_count(&b, GEN3_TRADE_BOTH_CANCEL), 1);

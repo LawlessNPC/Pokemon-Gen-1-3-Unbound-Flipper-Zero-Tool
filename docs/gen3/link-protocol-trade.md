@@ -862,7 +862,7 @@ National Dex.
 | Item | FRLG | Ruby |
 |---|---|---|
 | Party exchange | `fr: trade.c: BufferTradeParties`: cases 2/6/10/14/18 wait 11 frames before each `CCCC`, on master and child alike (no `id == 0` test) | no delay |
-| Round-1 `CCCC` rule | same (≥ G0 + 3); FRLG masters leave ≈ 14 frames → use **≥ 15 idle bursts** | ≥ 8 |
+| Round-1 `CCCC` rule | **≥ G0 + 4**: `fr: trade.c: CB2_CreateTradeMenu` case 5 (wireless only, one frame on a cable) runs between case 4 and `BufferTradeParties`, one frame more than Ruby; FRLG masters leave ≈ 14 frames → use **≥ 15 idle bursts** | ≥ G0 + 3; ≥ 8 |
 | Codes, 20-byte blocks, master logic, 5-frame reply delay | identical (`fr: trade.c: Leader_HandleCommunication`, `Follower_ReadLinkBuffer`, `QUEUE_DELAY_DATA` 5) | |
 | `5FFF` word 1 | `gReadyCloseLinkType`: 32 before the trade (`CB_WaitToStartTrade`), 12 on both-cancel (`CB_InitExitCanceledTrade`), else 0 (`fr: link.c: BuildSendCmd`); receivers ignore it | 0 |
 | 0x1144 relink | `fr: trade_scene.c: CB2_LinkTrade` states 3/4 call `CheckLinkTimeout`: **300 frames → `CloseLink` + `CB2_LinkError`** | no timeout |
