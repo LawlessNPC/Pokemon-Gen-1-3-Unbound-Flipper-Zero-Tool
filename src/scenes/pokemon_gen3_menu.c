@@ -7,20 +7,21 @@
 #include <src/views/gen3_link_test.h>
 #include <src/views/gen3_trade.h>
 
-#include <furi_hal_random.h>
 #include <stdlib.h>
+#include <loader/loader.h>
+#include <storage/storage.h>
 #include <src/gen3/gen3_bulk_furi.h>
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
 #include <src/scenes/include/pokemon_gen3_menu.h>
 #include <src/views/gen3_species_select.h>
 
-/* OK on the "Data missing" dialog. Kept clear of the menu items (scene ids) and the other Gen III
- * events. */
-#define GEN3_MENU_EVENT_DATA_OK 0x47330101u
+/* The Cartridge item. It isn't a scene of this app: it launches the pokemon_cart app. The value is
+ * clear of the scene ids and of the other Gen III events. */
+#define GEN3_MENU_ITEM_CARTRIDGE PokemonSceneNum
 
-/* The "Data missing" dialog is up instead of the menu */
-static bool gen3_menu_dialog_shown = false;
+/* The Cartridge app's file. Both apps are installed side by side, in apps/GPIO (fap_category). */
+#define GEN3_MENU_CART_FAP "pokemon_cart.fap"
 
 /* gen3_menu_status's buffer */
 static Gen3ClubStatus gen3_menu_status_buf;
@@ -91,85 +92,9 @@ static void gen3_menu_trade_alloc(PokemonFap* pokemon_fap) {
     pokemon_fap->gen3_trade_ended = false;
 }
 
-static void gen3_menu_dialog_callback(DialogExResult result, void* context) {
-    PokemonFap* pokemon_fap = context;
-
-    if(result == DialogExResultCenter) {
-        view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_MENU_EVENT_DATA_OK);
-    }
-}
-
-/* Everything but the Link Test needs gen3_bulk.bin (format v2): the species, move and item names
- * and the learnsets. Deleting apps_assets/pokemon makes the Flipper unpack the app's assets again
- * on the next start; a reinstall alone doesn't if their signature still matches. */
-void gen3_menu_show_data_missing(PokemonFap* pokemon_fap) {
-    DialogEx* dialog_ex = pokemon_fap->dialog_ex;
-
-    /* From an editor scene, back to this menu first. From the menu itself this does nothing. */
-    scene_manager_search_and_switch_to_previous_scene(
-        pokemon_fap->scene_manager, PokemonSceneGen3Menu);
-
-    dialog_ex_reset(dialog_ex);
-    dialog_ex_set_header(dialog_ex, "Data missing", 64, 0, AlignCenter, AlignTop);
-    dialog_ex_set_text(
-        dialog_ex,
-        "Gen III data file missing.\nDelete apps_assets/pokemon\non the SD card, then reopen.",
-        64,
-        13,
-        AlignCenter,
-        AlignTop);
-    dialog_ex_set_center_button_text(dialog_ex, "OK");
-    dialog_ex_set_context(dialog_ex, pokemon_fap);
-    dialog_ex_set_result_callback(dialog_ex, gen3_menu_dialog_callback);
-
-    gen3_menu_dialog_shown = true;
-    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
-}
-
-static void gen3_notice_callback(DialogExResult result, void* context) {
-    PokemonFap* pokemon_fap = context;
-
-    if(result == DialogExResultCenter) {
-        view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_EVENT_NOTICE_OK);
-    }
-}
-
-void gen3_menu_show_notice(PokemonFap* pokemon_fap, const char* header, const char* text) {
-    DialogEx* dialog_ex = pokemon_fap->dialog_ex;
-
-    dialog_ex_reset(dialog_ex);
-    dialog_ex_set_header(dialog_ex, header, 64, 0, AlignCenter, AlignTop);
-    dialog_ex_set_text(dialog_ex, text, 64, 13, AlignCenter, AlignTop);
-    dialog_ex_set_center_button_text(dialog_ex, "OK");
-    dialog_ex_set_context(dialog_ex, pokemon_fap);
-    dialog_ex_set_result_callback(dialog_ex, gen3_notice_callback);
-    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
-}
-
-static void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
-    gen3_menu_dialog_shown = false;
-    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);
-}
-
-/* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
- * file, so it is created only once the file reads, and Trade, Edit, Load and Save need the file:
- * false if it can't be read. A read that failed since (the SD card pulled) closed it, so it is
- * opened again here first. */
-bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
-    if(!gen3_bulk_ready()) gen3_bulk_furi_open();
-    if(!gen3_bulk_ready()) return false;
-    if(!pokemon_fap->gen3_editor) {
-        pokemon_fap->gen3_editor = malloc(sizeof(Gen3Editor));
-        if(!gen3_edit_init(pokemon_fap->gen3_editor, furi_hal_random_get())) {
-            free(pokemon_fap->gen3_editor);
-            pokemon_fap->gen3_editor = NULL;
-        }
-    }
-    return pokemon_fap->gen3_editor != NULL;
-}
-
 /* The items for the session as it is now: End trade while a trade session runs (D9), Link Test
- * only while none does (TIM2 runs one link at a time). */
+ * and Cartridge only while none does (TIM2 runs one link at a time, and Cartridge closes this
+ * app). */
 void gen3_menu_rebuild(PokemonFap* pokemon_fap) {
     const bool trading = gen3_session_trading(pokemon_fap->gen3_session);
 
@@ -219,6 +144,12 @@ void gen3_menu_rebuild(PokemonFap* pokemon_fap) {
             pokemon_fap->submenu,
             "Link Test",
             PokemonSceneGen3LinkTest,
+            gen3_menu_item_callback,
+            pokemon_fap);
+        submenu_add_item(
+            pokemon_fap->submenu,
+            "Cartridge",
+            GEN3_MENU_ITEM_CARTRIDGE,
             gen3_menu_item_callback,
             pokemon_fap);
     }
@@ -277,6 +208,49 @@ static bool gen3_menu_end_dialog(PokemonFap* pokemon_fap) {
     return true;
 }
 
+/* The Cartridge app's file into path: beside this app's own .fap, else in apps/GPIO, whichever
+ * holds it first. false if neither does. */
+static bool gen3_menu_cart_path(Loader* loader, Storage* storage, FuriString* path) {
+    if(loader_get_application_launch_path(loader, path)) {
+        const size_t slash = furi_string_search_rchar(path, '/', 0);
+        if(slash != FURI_STRING_FAILURE) {
+            furi_string_left(path, slash + 1);
+            furi_string_cat_str(path, GEN3_MENU_CART_FAP);
+            if(storage_file_exists(storage, furi_string_get_cstr(path))) return true;
+        }
+    }
+    furi_string_set(path, EXT_PATH("apps/GPIO/" GEN3_MENU_CART_FAP));
+    return storage_file_exists(storage, furi_string_get_cstr(path));
+}
+
+/* Cartridge is another app, pokemon_cart: a FAP loads whole into RAM, and the Cartridge code does
+ * not fit beside the trade code. The loader starts it once this app has exited, and reports a
+ * failed start in its own dialog. Call only while no trade session runs: one that stopped goes
+ * now, with the Link Test and trade views, as for Link Test. Without the app's file this app
+ * stays, and a dialog says where to copy it. */
+static void gen3_menu_launch_cart(PokemonFap* pokemon_fap) {
+    Loader* loader = furi_record_open(RECORD_LOADER);
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    FuriString* path = furi_string_alloc();
+
+    if(gen3_menu_cart_path(loader, storage, path)) {
+        gen3_menu_end_session(pokemon_fap);
+        loader_enqueue_launch(
+            loader, furi_string_get_cstr(path), NULL, LoaderDeferredLaunchFlagGui);
+        scene_manager_stop(pokemon_fap->scene_manager);
+        view_dispatcher_stop(pokemon_fap->view_dispatcher);
+    } else {
+        gen3_menu_show_dialog(
+            pokemon_fap,
+            "App missing",
+            "Copy pokemon_cart.fap\nnext to pokemon.fap,\nin apps/GPIO.");
+    }
+
+    furi_string_free(path);
+    furi_record_close(RECORD_STORAGE);
+    furi_record_close(RECORD_LOADER);
+}
+
 bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
     PokemonFap* pokemon_fap = context;
     bool consumed = false;
@@ -290,6 +264,12 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
             if(!gen3_session_trading(pokemon_fap->gen3_session)) {
                 gen3_menu_end_session(pokemon_fap);
                 scene_manager_next_scene(pokemon_fap->scene_manager, event.event);
+            }
+            consumed = true;
+        } else if(event.event == GEN3_MENU_ITEM_CARTRIDGE) {
+            /* Never while a trade session runs: closing this app would stop it */
+            if(!gen3_session_trading(pokemon_fap->gen3_session)) {
+                gen3_menu_launch_cart(pokemon_fap);
             }
             consumed = true;
         } else if(event.event == PokemonSceneGen3Trade) {
@@ -342,12 +322,12 @@ bool pokemon_scene_gen3_menu_on_event(void* context, SceneManagerEvent event) {
                 gen3_menu_rebuild(pokemon_fap);
             }
             consumed = true;
-        } else if(event.event == GEN3_MENU_EVENT_DATA_OK && gen3_menu_dialog_shown) {
+        } else if(event.event == GEN3_MENU_EVENT_DATA_OK && gen3_menu_dialog_up()) {
             gen3_menu_show_menu(pokemon_fap);
             consumed = true;
         }
     } else if(event.type == SceneManagerEventTypeBack) {
-        if(gen3_menu_dialog_shown) {
+        if(gen3_menu_dialog_up()) {
             /* Back on the dialog returns to this menu, not to the main menu */
             gen3_menu_show_menu(pokemon_fap);
             consumed = true;

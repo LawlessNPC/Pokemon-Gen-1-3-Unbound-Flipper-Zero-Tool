@@ -5,11 +5,14 @@
 #include <src/gen3/gen3_trade_sync.h>
 
 /* The Gen III scenes' shared header. The scene files have no header each, so what one of them
- * exports to the others is declared here: the menu's own helpers (pokemon_gen3_menu.c), and a
- * few from other scene files, each saying which file defines it. Every name is
- * gen3_<scene>_..., after the scene it belongs to, like the scene files' static helpers. The
- * trade tick and gen3_trade_begin_edit are declared in pokemon_app.h instead, with the app that
- * calls the tick. */
+ * exports to the others is declared here: the menu's own helpers (pokemon_gen3_menu.c, and
+ * pokemon_gen3_common.c for those the pokemon_cart app shares), and a few from other scene files,
+ * each saying which file defines it. Every name is gen3_<scene>_..., after the scene it belongs
+ * to, like the scene files' static helpers. The trade tick and gen3_trade_begin_edit are declared
+ * in pokemon_app.h instead, with the app that calls the tick.
+ *
+ * The pokemon_cart app (Cartridge) registers its own hub as Gen3Menu, so there "the Gen III
+ * menu" below means that hub. */
 
 /* Copies the session's latest status (gen3_session_status; log_ok and cable_ok may be NULL) into
  * one static buffer and returns it. Gen3ClubStatus is never a stack local (no app stack local is
@@ -22,9 +25,30 @@ const Gen3ClubStatus* gen3_menu_status(PokemonFap* pokemon_fap, bool* log_ok, bo
  * events. */
 #define GEN3_EVENT_DATA_MISSING 0x47330102u
 
+/* OK on a dialog gen3_menu_show_dialog shows ("Data missing" among them). Kept clear of the menu
+ * items (scene ids) and the other Gen III events. */
+#define GEN3_MENU_EVENT_DATA_OK 0x47330101u
+
+/* gen3_menu_show_dialog, gen3_menu_dialog_up, gen3_menu_show_menu, gen3_menu_show_data_missing,
+ * gen3_menu_show_notice and gen3_menu_editor_ready: defined in pokemon_gen3_common.c, which both
+ * FAPs compile. */
+
+/* Shows a dialog with header, text and OK instead of the Gen III menu's submenu, and
+ * gen3_menu_dialog_up is true until gen3_menu_show_menu. The menu's on_event shows the menu again
+ * on GEN3_MENU_EVENT_DATA_OK and on Back while the dialog is up. The strings must outlive the
+ * dialog (string literals). Call while the Gen III menu is the current scene. */
+void gen3_menu_show_dialog(PokemonFap* pokemon_fap, const char* header, const char* text);
+
+/* True while a dialog gen3_menu_show_dialog showed is up instead of the menu's submenu */
+bool gen3_menu_dialog_up(void);
+
+/* Shows the menu's submenu (AppViewSubmenu): gen3_menu_dialog_up is false again */
+void gen3_menu_show_menu(PokemonFap* pokemon_fap);
+
 /* The bulk data file (gen3_bulk.bin) is missing, corrupt or unreadable: returns to the Gen III menu
- * from any Gen III scene above it, and shows the "Data missing" dialog there. OK or Back on the
- * dialog shows the menu. Call from a scene's on_event, not from a view callback. */
+ * from any Gen III scene above it, and shows the "Data missing" dialog there, which names the
+ * app's own apps_assets folder. OK or Back on the dialog shows the menu. Call from a scene's
+ * on_event, not from a view callback. */
 void gen3_menu_show_data_missing(PokemonFap* pokemon_fap);
 
 /* Custom events: a Gen III editor scene sends GEN3_EVENT_NO_SHINY itself (from a view callback)

@@ -18,6 +18,7 @@ struct Gen3StoreFuri {
     Gen3Store api;
     File* file[GEN3_STORE_FILES];
     bool open[GEN3_STORE_FILES];
+    char name[GEN3_STORE_FILES][GEN3_CART_NAME_MAX]; /* the name each open file was opened by */
     char path[2][GEN3_STORE_PATH_MAX]; /* rename takes two */
 };
 
@@ -54,10 +55,16 @@ static uint8_t store_slot(const Gen3StoreFuri* s, const void* f) {
 
 static void* store_open(void* ctx, const char* name, Gen3StoreMode mode) {
     Gen3StoreFuri* s = ctx;
+    char* path = store_path(s, 0, name);
+    if(!path) return NULL;
+    /* Never one file twice: the card would make the second open wait for the first to close
+     * (FSE_ALREADY_OPEN), and the worker would hang */
+    for(uint8_t i = 0; i < GEN3_STORE_FILES; i++) {
+        if(s->open[i] && strcmp(s->name[i], name) == 0) return NULL;
+    }
     uint8_t k = 0;
     while(k < GEN3_STORE_FILES && s->open[k]) k++;
-    char* path = store_path(s, 0, name);
-    if(k == GEN3_STORE_FILES || !path) return NULL;
+    if(k == GEN3_STORE_FILES) return NULL;
 
     FS_AccessMode access = FSAM_READ_WRITE;
     FS_OpenMode how = FSOM_OPEN_EXISTING;
@@ -72,6 +79,7 @@ static void* store_open(void* ctx, const char* name, Gen3StoreMode mode) {
         return NULL;
     }
     s->open[k] = true;
+    strcpy(s->name[k], name); /* store_path checked its length */
     return s->file[k];
 }
 

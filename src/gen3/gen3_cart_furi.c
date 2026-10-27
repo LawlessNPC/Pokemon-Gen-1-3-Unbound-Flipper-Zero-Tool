@@ -304,8 +304,8 @@ static Gen3HlinkFail
     }
     cart_set_link_up(s, fail == Gen3HlinkFailNone);
     /* A sound response has at least the 2 words resp_max_words always leaves room for. A status
-     * but OK carries the fail code and offset (multiboot-and-save.md §6.4); HELLO's answer starts
-     * with the protocol and the build (multiboot-and-save.md §6.3) */
+     * other than OK carries the fail code and offset (multiboot-and-save.md §6.4); HELLO's answer
+     * starts with the protocol and the build (multiboot-and-save.md §6.3) */
     if(fail != Gen3HlinkFailNone || *resp_words < 2u || !req->resp) return fail;
     if(*status != GEN3_HST_OK) {
         CART_LOG(
@@ -341,6 +341,7 @@ static void cart_driver_stop(Gen3CartSession* s) {
     cart_lock(s);
     s->driver_on = false;
     s->status.cable_ok = mlink_hw_cable_ok(s->hw);
+    s->status.link_up = false; /* nothing answers without the driver */
     cart_unlock(s);
 }
 
@@ -595,6 +596,8 @@ static int32_t cart_worker(void* ctx) {
             s->status.total = 0;
             s->status.dropped = false;
             s->status.restore_has_trainer = false;
+            /* A Connect's multiboot starts afresh: never show the last run's */
+            if(job == Gen3CartJobConnect) memset(&s->status.mb, 0, sizeof(s->status.mb));
         }
         cart_unlock(s);
         if(pending) cart_run_one(s, job);
@@ -683,6 +686,8 @@ void gen3_cart_session_status(Gen3CartSession* s, Gen3CartSessionStatus* out) {
     if(s->req_pending) {
         out->busy = true;
         out->job = s->req_job;
+        /* As the worker will once it takes the Connect */
+        if(s->req_job == Gen3CartJobConnect) memset(&out->mb, 0, sizeof(out->mb));
     }
     if(s->driver_on) out->cable_ok = mlink_hw_cable_ok(s->hw);
     cart_unlock(s);
