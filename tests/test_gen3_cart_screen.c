@@ -764,6 +764,7 @@ TEST(test_mon_texts) {
         {Gen3CartMonSdError, "SD card error."},
         {Gen3CartMonBadArg, "Invalid request."},
         {Gen3CartMonNoData, "Gen III data\nunreadable."},
+        {Gen3CartMonPending, "Finish the write\nfirst: Reconnect or\nWrite changes."},
     };
     for(size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
         ASSERT_STR_EQ(gen3_cart_screen_mon_text(want[k].m), want[k].text);
@@ -771,7 +772,7 @@ TEST(test_mon_texts) {
     }
     ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonOk), "");
     ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonEmpty), "");
-    ASSERT_STR_EQ(gen3_cart_screen_mon_text((Gen3CartMon)(Gen3CartMonNoData + 1)), "");
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text((Gen3CartMon)(Gen3CartMonPending + 1)), "");
     ASSERT_TRUE(fits(GEN3_CART_SCREEN_CANT_EDIT, 1, GEN3_CART_SCREEN_TITLE_LEN));
     ASSERT_TRUE(fits(GEN3_CART_SCREEN_CANT_PUT, 1, GEN3_CART_SCREEN_TITLE_LEN));
 }

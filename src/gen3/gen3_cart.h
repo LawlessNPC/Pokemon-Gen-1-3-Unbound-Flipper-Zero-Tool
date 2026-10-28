@@ -27,10 +27,11 @@
  * Files are on the store, named relative to its folder:
  * - backups/<code>_<tid | nosave>_<stamp>.sav: the whole 128 KB flash, all 32 sectors, as
  *   emulators and PKHeX load it. It is written as GEN3_CART_BACKUP_TMP and renamed only once the
- *   cart and the SD card both read it back the same; nothing writes a .sav after that.
+ *   cart and the SD card both read it back the same; nothing writes or deletes a .sav after that.
  * - GEN3_CART_WORK_NAME: the working copy, the 14 sectors the game loads in id order, which the
  *   edits go into;
- * - roms/<code>_v<version>.gba, written as the same name plus ".part". */
+ * - roms/<code>_v<version>.gba, written as roms/<code>_v<version>.gba.<id>.part, where id ties the
+ *   copy to the cart it started on (gen3_cart_rom_part). */
 
 #define GEN3_CART_BUF_SIZE 4096u /* the buffer gen3_cart_init takes: one sector */
 #define GEN3_CART_NAME_MAX 48u /* a store name with its terminator */
@@ -123,9 +124,21 @@ const char* gen3_cart_result_text(Gen3CartResult r);
 /* Pokemon slots of a save: the 6 of the party, then the 420 of the boxes */
 #define GEN3_CART_MON_SLOTS (GEN3_SAVE_PARTY_MAX + GEN3_SAVE_BOXES * GEN3_SAVE_BOX_SLOTS)
 
+/* A write or restore an earlier run left unfinished, which the last gen3_cart_attach or
+ * gen3_cart_reconnect found done on the cart and finished: its new backup made (Ok), or tried
+ * (WrittenNoBackup) */
+typedef enum {
+    Gen3CartFinishedNone,
+    Gen3CartFinishedWrite,
+    Gen3CartFinishedRestore,
+} Gen3CartFinished;
+
+/* The longest backup stamp a job takes (YYYYMMDD-HHMMSS is 15) */
+#define GEN3_CART_STAMP_MAX 20u
+
 typedef struct Gen3Cart Gen3Cart;
 
-/* Fields are private to gen3_cart.c: read them through the functions below. About 2.3 KB: a field
+/* Fields are private to gen3_cart.c: read them through the functions below. About 2.5 KB: a field
  * of the session's state, or heap, never a stack local. */
 struct Gen3Cart {
     Gen3Hcli* cli;
@@ -158,9 +171,20 @@ struct Gen3Cart {
     /* A write or restore that armed (or found its slot already written) and hasn't ended with a
      * new backup or a discard: the slot it may have changed since the backup, GEN3_SAVE_NO_SECTOR
      * for none, and its counter. Reconnect and attach take a sector there that has the signature
-     * only if it is the backup's or has that counter. */
+     * only if it is the backup's or has that counter, and then find out whether it is done. Until
+     * then no Pokemon is opened or put, so the edits it writes stay the ones it was given. */
     uint8_t wslot;
     uint32_t wcounter;
+    /* ... its plan (wslot is plan.target, wcounter plan.counter), ARM_WRITE's mode, its source
+     * ("" for the working copy, else a restore's backup file), the CRC-32 of each image it puts on
+     * the cart (exp_crc as it armed: a later job's step 3 may change exp_crc, never these), and
+     * its stamp, which the backup that finishes it is named with */
+    Gen3SaveWritePlan wplan;
+    uint8_t wmode;
+    char wfrom[GEN3_CART_NAME_MAX];
+    uint32_t wcrc[GEN3_SAVE_SLOT_SECTORS];
+    char wstamp[GEN3_CART_STAMP_MAX + 1u];
+    Gen3CartFinished finished; /* the last attach's or reconnect's */
     /* The jobs' scratch */
     Gen3HFooter footers[GEN3_SAVE_SECTORS];
     /* Sectors 0..27 as READ_FOOTERS shows them, or as a restore's backup file holds them, and
@@ -190,9 +214,17 @@ Gen3CartResult gen3_cart_connect(Gen3Cart* c);
  * cart's header and flash id (the connect checked them) and its footers (READ_FOOTERS) still match
  * them, except that the slot of a write or restore not yet backed up may also hold sectors with no
  * signature and sectors with that write's counter (its own, or a game save after a power cut);
- * otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were pending). So a write
- * cut short by a power cut keeps its edits, and its next run finishes it, or finds the game's save
- * there and is Changed; any other save in that slot (another cart's, say) gets a backup first.
+ * otherwise runs gen3_cart_backup, and on Ok sets *dropped = (changes were pending). Any other
+ * save in that slot (another cart's, say) gets a backup first.
+ * Such a write is then settled before anything else runs, by reading only (gen3_cart_finished):
+ * - the game loads its slot, with its counter, and each sector there holds the image the write
+ *   put there (SECTOR_CRC32): it got past its last commit, and is finished: its new backup is made
+ *   as gen3_cart_write's (Ok or WrittenNoBackup), named with its own stamp; the edits are on the
+ *   cart;
+ * - the game loads its slot with its counter and other data: the game saved there after a power
+ *   cut. The backup and the edits are dropped, and a new backup is made, as above (*dropped);
+ * - else (cut short before its last commit, or a game save there torn): it stays pending, with its
+ *   edits, and the next gen3_cart_write (or restore) redoes it.
  * A cart whose save can't be read (not can_read_save) is Ok with no backup: it has its info and,
  * when rom_size > 0, its ROM copy, while browsing, writing and restoring all need can_read_save;
  * edits pending from the cart before are dropped. */
@@ -200,8 +232,10 @@ Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped);
 /* Reads all 32 sectors to a new .sav, verified three ways: the packet CRC, the cart's
  * SECTOR_CRC32 of every sector, and an SD read-back. Then analyzes it and, if browsable, rebuilds
  * the working copy and reads that back too; the edits are gone. Refused unless can_read_save;
- * SdFull before any link traffic unless GEN3_CART_BACKUP_SPACE is free. Any failure removes every
- * file it made and leaves no current backup. stamp: YYYYMMDD-HHMMSS (at most 20 characters).
+ * SdFull before any link traffic unless GEN3_CART_BACKUP_SPACE is free. Any failure leaves no
+ * current backup, and removes every file it made but a .sav already kept: a working copy that
+ * fails after it leaves that file, verified, in backups/. stamp: YYYYMMDD-HHMMSS (at most
+ * GEN3_CART_STAMP_MAX characters).
  * Progress BackupRead per sector, then BackupVerify and Analyze; cancel after each sector. */
 Gen3CartResult gen3_cart_backup(Gen3Cart* c, const char* stamp);
 /* Rebuilds the working copy from the backup and reads it back: the edits are gone. So is the claim
@@ -235,12 +269,17 @@ Gen3CartResult gen3_cart_discard(Gen3Cart* c);
  * - A failure from the arming to the check ends any arming (its result ignored). The backup stays
  *   current: the slot it holds was never written. Until the last commit the game still loads that
  *   slot; after it (a lost link in the check, or a check that failed with every commit done) it
- *   may load the new one, which the next run finds written, or else Changed.
- * - Ok: written, checked and backed up; the edits are gone, now on the cart.
+ *   may load the new one, which the next reconnect or attach finds written, or else Changed.
+ *   From the arming until the write ends Ok, WrittenNoBackup or Changed, or a discard, it is
+ *   pending: no Pokemon is opened or put.
+ * - Ok: written, checked and backed up; the edits are gone, now on the cart. The result says to
+ *   power-cycle the GBA to play, which ends the helper, so the cart is no longer linked: a job
+ *   that needs the helper waits for a reconnect.
  * - WrittenNoBackup: written and checked, but the new backup failed. The edits are gone, now on the
  *   cart, and there is no current backup until gen3_cart_backup.
  * - LinkLost or BusyTimeout, at any step: gen3_cart_reconnect (or, after the GBA lost power,
- *   gen3_cart_connect and gen3_cart_attach), then this again finishes the job.
+ *   gen3_cart_connect and gen3_cart_attach) finishes the job if it got past its last commit, and
+ *   else this again does.
  * Never cancelled. Progress Prepare, Erase, Program, Commit, Verify, PostBackup. */
 Gen3CartResult gen3_cart_write(Gen3Cart* c, const char* stamp);
 /* Reads a backup file and checks it: 131072 bytes, strict with this cart's layout. Fills the
@@ -272,12 +311,20 @@ bool gen3_cart_restorable(const Gen3Cart* c);
 /* After LinkLost or BusyTimeout: gen3_cart_connect (HELLO tried for the lost command's budget,
  * CART_INFO, SAVE_PROBE); then, if there was a current backup, the cart must still be its cart
  * (header and flash id) with the same footers (READ_FOOTERS), the slot of a write or restore not
- * yet backed up taken as gen3_cart_attach takes it; else Changed, which drops the backup. The
- * edits stay. Progress Identify; cancel as gen3_cart_connect. */
+ * yet backed up taken as gen3_cart_attach takes it; else Changed, which drops the backup, and the
+ * edits stay counted. Such a write is then settled as gen3_cart_attach settles it, except that a
+ * game save in its slot is Changed, with the backup and the edits dropped, and no new backup.
+ * Progress Identify; cancel as gen3_cart_connect. */
 Gen3CartResult gen3_cart_reconnect(Gen3Cart* c);
+/* The write or restore the last gen3_cart_attach or gen3_cart_reconnect finished, if any */
+Gen3CartFinished gen3_cart_finished(const Gen3Cart* c);
+/* A write or restore armed and hasn't ended (wslot): no Pokemon is opened or put until the next
+ * reconnect, attach or write settles it, or a discard ends it */
+bool gen3_cart_pending(const Gen3Cart* c);
 
 /* A connect ran to its end, and no command was lost since (nor answered with a response the
- * client couldn't take): jobs may talk to the helper. False: a reconnect first. */
+ * client couldn't take), nor did a write or restore end Ok since (the GBA is then to be
+ * power-cycled): jobs may talk to the helper. False: a reconnect first. */
 bool gen3_cart_linked(const Gen3Cart* c);
 /* The cart as the last connect found it. Read it, gen3_cart_rom_size and gen3_cart_rom_name only
  * after a connect that ran to its end: one cut short may have read another cart's CART_INFO, and
@@ -315,7 +362,8 @@ Gen3CartResult gen3_cart_mon_get(
     size_t* len);
 /* Encrypts p into the slot (gen3_save_pkm_to_mon) and marks its sections dirty and the slot
  * changed. A party slot equal to the count appends: the count goes up by one. BadArg if not
- * browsable, out of range, or a party slot over the count. The caller checks p
+ * browsable, out of range, or a party slot over the count; Refused while a write is pending
+ * (gen3_cart_pending), with nothing written or marked. The caller checks p
  * (gen3_trade_offer_check) first. A store failure leaves the working copy untrusted: not browsable
  * until gen3_cart_discard. The slot counts as changed either way, so that Discard and the warning
  * on leaving show. */
@@ -342,11 +390,16 @@ typedef enum {
     Gen3CartMonBadEgg, /* as the game shows it: a checksum that fails, the flag, no species */
     Gen3CartMonBadData, /* a species, move or item out of range */
     Gen3CartMonNoData, /* the editor needed the bulk file (gen3_data.h), which can't be read */
+    /* a write or restore is pending (gen3_cart_pending): it is settled first, so that the edits it
+     * writes are never mixed with new ones */
+    Gen3CartMonPending,
 } Gen3CartMon;
 
 /* Opens slot (box, slot) of the working copy in the editor, to edit it in place. In order: a
- * party slot past the last one is Empty if it is the next one, else BadArg; the slot's bytes
- * (SdError); none there -> Empty; a Bad Egg, an egg, then the offer rules and gen3_pkm_check ->
+ * slot that isn't one (BadArg); a write pending (Pending), for an empty slot too, as nothing may
+ * be put there either; a party slot past the last one is Empty if it is the next one, else
+ * BadArg; the slot's bytes (SdError); none there -> Empty; a Bad Egg, an egg, then the offer rules
+ * and gen3_pkm_check ->
  * their reason; then gen3_edit_load, which normalises it (party stats recalculated, moves packed)
  * -> NoData if the bulk file can't be read, else BadData. Ok: the editor holds it, and orig its
  * normalised bytes as the slot keeps them (*orig_len 100 for the party, 80 for a box), which
@@ -360,7 +413,8 @@ Gen3CartMon gen3_cart_mon_open(
     uint8_t orig[GEN3_PARTY_SIZE],
     size_t* orig_len,
     Gen3Pkm* scratch);
-/* Puts the editor's Pokemon back into the slot gen3_cart_mon_open opened, if it was edited: its
+/* Puts the editor's Pokemon back into the slot gen3_cart_mon_open opened, if it was edited
+ * (Pending if a write is pending then, which no job leaves while the editor is open): its
  * orig_len bytes as the slot keeps them (into mon, the caller's) differ from orig. A species
  * changed in the editor made a new Pokemon there, met in Ruby (gen3_edit_set_species): if its
  * species or its MetGame isn't orig's, its MetGame becomes this cart's game, as a new one's does.
@@ -378,10 +432,11 @@ Gen3CartMon gen3_cart_mon_close(
     Gen3Pkm* scratch,
     bool* put);
 /* Puts the editor's Pokemon into a free slot: an empty box slot, or the party slot after the last,
- * which adds it to the party; another slot is Taken, so no Pokemon is ever written over. new_mon:
- * it was made for this save (gen3_cart_new_mon), so its MetGame is this cart's game again, which
- * a species change sets to Ruby; a loaded .pk3 keeps its own. Then gen3_pkm_check and the offer
- * rules, as gen3_cart_mon_close. mon: the caller's scratch. */
+ * which adds it to the party; another slot is Taken, so no Pokemon is ever written over; while a
+ * write is pending (gen3_cart_pending), Pending first. new_mon: it was made for this save
+ * (gen3_cart_new_mon), so its MetGame is this cart's game again, which a species change sets to
+ * Ruby; a loaded .pk3 keeps its own. Then gen3_pkm_check and the offer rules, as
+ * gen3_cart_mon_close. mon: the caller's scratch. */
 Gen3CartMon gen3_cart_mon_place(
     Gen3Cart* c,
     Gen3Editor* ed,
@@ -394,15 +449,19 @@ Gen3CartMon gen3_cart_mon_place(
 uint32_t gen3_cart_rom_size(const Gen3Cart* c);
 void gen3_cart_rom_name(const Gen3Cart* c, char out[GEN3_CART_NAME_MAX]); /* "roms/AXVE_v1.gba" */
 /* A .part of this ROM holds at least one region: *done_bytes, its length rounded down to a region,
- * is where a resumed copy starts */
+ * is where a resumed copy starts. It is this cart's only if the cart's header bytes 0xA0..0xBF and
+ * rom_size are the ones it started with: the .part's name holds their CRC-32, so a .part another
+ * cart left (the same code and version, another header or size) isn't found, and a copy starts
+ * from 0. */
 bool gen3_cart_rom_part(Gen3Cart* c, uint32_t* done_bytes);
 /* Copies the ROM in GEN3_CART_ROM_REGION regions (plan 5 D8): ROM_READs of 2048 halfwords
  * appended to the .part, then the region's ROM_CRC32 and an SD read-back must both equal the CRC
  * of what came; a region that differs is read once more, then VerifyFailed. The .part keeps only
  * checked regions: any failure, cancel included, cuts it back to the last one. resume starts at
  * gen3_cart_rom_part's length, after checking the last region it keeps again; a copy that doesn't
- * resume removes any .part first, so its room counts as free. SdFull before any ROM_READ unless
- * rom_size - that length + 4096 is free. At the end the .part is renamed to gen3_cart_rom_name's,
+ * resume removes this cart's .part first, so its room counts as free. SdFull before any ROM_READ
+ * unless rom_size - that length + 4096 is free. At the end the .part is renamed to
+ * gen3_cart_rom_name's,
  * replacing an older copy. Refused when rom_size is 0, LinkLost unless linked, both before any
  * file is touched. Progress RomRead and RomVerify in bytes; cancel between ROM_READs. */
 Gen3CartResult gen3_cart_rom_dump(Gen3Cart* c, bool resume);

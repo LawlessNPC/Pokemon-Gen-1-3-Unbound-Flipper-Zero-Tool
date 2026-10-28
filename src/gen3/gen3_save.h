@@ -110,8 +110,8 @@ typedef struct {
     uint8_t dst[GEN3_SAVE_SLOT_SECTORS]; /* 14 * target + (k + first) % 14 */
     uint8_t src[GEN3_SAVE_SLOT_SECTORS];
 } Gen3SaveWritePlan;
-/* §5.8 step 2: counter save_counter + 1 (it wraps), first + 1, so the target is the slot the game
- * doesn't load, and src = phys. false, *out untouched, unless strict_ok. */
+/* multiboot-and-save.md §5.8 step 2: counter save_counter + 1 (it wraps), first + 1, so the target
+ * is the slot the game doesn't load, and src = phys. false, *out untouched, unless strict_ok. */
 bool gen3_save_plan_write(const Gen3SaveSlots* s, Gen3SaveWritePlan* out);
 /* A restore onto a cart with no valid save: the backup's own counter and first (taken % 14),
  * target counter % 2. src is all GEN3_SAVE_NO_SECTOR. */

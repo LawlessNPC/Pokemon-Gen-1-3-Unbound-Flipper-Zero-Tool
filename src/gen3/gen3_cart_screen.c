@@ -416,6 +416,8 @@ const char* gen3_cart_screen_mon_text(Gen3CartMon m) {
         return "Unusual data:\nleft as is.";
     case Gen3CartMonNoData:
         return "Gen III data\nunreadable.";
+    case Gen3CartMonPending:
+        return "Finish the write\nfirst: Reconnect or\nWrite changes.";
     }
     return "";
 }

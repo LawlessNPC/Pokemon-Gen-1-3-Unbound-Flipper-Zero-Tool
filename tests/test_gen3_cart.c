@@ -32,8 +32,10 @@
 #define LIB_STRING "FLASH1M_V103"
 #define STAMP "20261025-143005"
 #define BACKUP_NAME "backups/AXVE_12345_" STAMP ".sav"
+#define BACKUP_NAME_2 "backups/AXVE_12345_" STAMP "-2.sav"
+#define BACKUP_NAME_3 "backups/AXVE_12345_" STAMP "-3.sav"
 #define ROM_NAME "roms/AXVE_v0.gba"
-#define PART_NAME ROM_NAME ".part"
+#define PART_NAME part_name() /* the .part of the cart inserted */
 #define REGION GEN3_CART_ROM_REGION
 #define ASSERT_FALSE(x) ASSERT_TRUE(!(x))
 
@@ -271,6 +273,11 @@ static bool work_differs_only_in(uint8_t only) {
     return true;
 }
 
+/* The card holds n files, all .sav: no temporary backup, no working copy */
+static bool only_savs(uint32_t n) {
+    return fake_store_count(&store, ".sav") == n && fake_store_count(&store, "") == n;
+}
+
 /* The .sav named holds the fake flash as it is, and no temporary backup is left */
 static bool sav_is_flash(const char* name) {
     uint32_t size;
@@ -293,6 +300,27 @@ static bool is_rom(const uint8_t* data, uint32_t len) {
         if(data[off] != rom_byte(off)) return false;
     }
     return true;
+}
+
+/* CRC-32 (IEEE, reflected 0xEDB88320), bit by bit: the test's own */
+static uint32_t crc32_ref(const uint8_t* b, uint32_t n) {
+    uint32_t c = 0xFFFFFFFFu;
+    for(uint32_t i = 0; i < n; i++) {
+        c ^= b[i];
+        for(int k = 0; k < 8; k++) c = (c & 1u) ? (c >> 1) ^ 0xEDB88320u : c >> 1;
+    }
+    return ~c;
+}
+
+/* A ROM copy's .part for the cart inserted: the ROM's name, then the CRC-32 of the cart's header
+ * bytes 0xA0..0xBF and its ROM size (little-endian), as the copy that started it read them */
+static const char* part_name(void) {
+    static char name[GEN3_CART_NAME_MAX];
+    uint8_t id[0x24];
+    memcpy(id, hdr + 0xA0, 0x20);
+    for(uint32_t i = 0; i < 4; i++) id[0x20 + i] = (uint8_t)(gba.rom_size >> (8u * i));
+    snprintf(name, sizeof(name), ROM_NAME ".%08x.part", (unsigned)crc32_ref(id, sizeof(id)));
+    return name;
 }
 
 static uint32_t calls(uint8_t code) {
@@ -693,14 +721,15 @@ TEST(test_job_backup_store_faults) {
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
     ASSERT_EQ(fake_store_count(&store, ""), 0);
     /* the working copy's close: after the temporary file's, the read-back's, the trainer read's
-     * and the .sav's as the copy's source */
+     * and the .sav's as the copy's source. The .sav, kept and verified by then, stays: */
     fake_store_fail_close(&store, 4);
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
-    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_TRUE(only_savs(1));
+    ASSERT_TRUE(sav_is_flash(BACKUP_NAME));
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
     /* the working copy's reads: its first sector from the .sav, after the read-back's 32 and the
      * trainer's, with only the backup's 32 sectors written; then the first of its own read-back,
-     * after the 14 it copied */
+     * after the 14 it copied. Each leaves its .sav, the next one -2, then -3. */
     static const struct {
         uint32_t reads, writes;
     } work_reads[] = {{33, 32}, {47, 46}};
@@ -709,7 +738,8 @@ TEST(test_job_backup_store_faults) {
         const uint32_t writes = store.writes;
         ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
         ASSERT_EQ(store.writes - writes, work_reads[i].writes);
-        ASSERT_EQ(fake_store_count(&store, ""), 0);
+        ASSERT_TRUE(only_savs(2 + i));
+        ASSERT_TRUE(sav_is_flash(i == 0 ? BACKUP_NAME_2 : BACKUP_NAME_3));
         ASSERT_FALSE(gen3_cart_backup_current(&cart));
         ASSERT_STR_EQ(gen3_cart_backup_name(&cart), "");
         ASSERT_FALSE(gen3_cart_browsable(&cart));
@@ -717,7 +747,8 @@ TEST(test_job_backup_store_faults) {
         ASSERT_FALSE(store.read_fault);
     }
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
-    ASSERT_TRUE(sav_is_flash(BACKUP_NAME));
+    ASSERT_STR_EQ(gen3_cart_backup_name(&cart), "backups/AXVE_12345_" STAMP "-4.sav");
+    ASSERT_TRUE(sav_is_flash(gen3_cart_backup_name(&cart)));
 }
 
 /* Backup only: the Japanese layouts aren't known */
@@ -854,12 +885,13 @@ TEST(test_job_backup_not_strict_keeps_can_write) {
     ASSERT_EQ(why, Gen3CartRefuseSave);
 }
 
-/* The working copy can't be made: the backup goes too */
+/* The working copy can't be made: the backup isn't current, but its .sav, verified, stays */
 TEST(test_job_backup_work_copy_fails) {
     ASSERT_TRUE(connected());
     fake_store_fail_write_after(&store, 32);
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartSdError);
-    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_TRUE(only_savs(1));
+    ASSERT_TRUE(sav_is_flash(BACKUP_NAME));
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
     ASSERT_STR_EQ(gen3_cart_backup_name(&cart), "");
     ASSERT_FALSE(gen3_cart_browsable(&cart));
@@ -1205,11 +1237,12 @@ TEST(test_job_mon_put_sd_error) {
 /* The working copy is read back after it is made: a sector the card stored wrong, or can't give
  * back, fails it */
 TEST(test_job_work_copy_read_back) {
-    /* while backing up: the backup goes with it */
+    /* while backing up: the backup isn't current, its .sav stays */
     ASSERT_TRUE(connected());
     fake_store_corrupt_write(&store, GEN3_CART_WORK_NAME, 3 * SECTOR_LEN + 7);
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartVerifyFailed);
-    ASSERT_EQ(fake_store_count(&store, ""), 0);
+    ASSERT_TRUE(only_savs(1));
+    ASSERT_TRUE(sav_is_flash(BACKUP_NAME));
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
     ASSERT_FALSE(gen3_cart_browsable(&cart));
     /* discarding: the backup stays, the working copy goes until a discard works */
@@ -1284,6 +1317,55 @@ TEST(test_job_rom_resume) {
     ASSERT_EQ(calls(GEN3_HCMD_ROM_READ), 192);
     ASSERT_EQ(fake_store_count(&store, ".part"), 0);
     ASSERT_FALSE(gen3_cart_rom_part(&cart, &done));
+}
+
+/* Swaps in a cart with the same code and version as the default one: the title t in its header,
+ * and rom_size, the ROM pattern the same; then a whole connect */
+static bool swap_rom(const char* t, uint32_t rom_size) {
+    helper_cmd_header(hdr, gba.own, t, "AXVE", 0);
+    fake_gba_rom(&gba, hdr, rom_size);
+    fake_gba_rom_string(&gba, LIB_OFF, LIB_STRING);
+    return gen3_cart_connect(&cart) == Gen3CartOk;
+}
+
+/* A .part resumes only on the cart it started on: another cart with the same code and version but
+ * another header (title, say) or ROM size finds none, and copies from 0, leaving the first one's
+ * .part as it was, which that cart still resumes */
+TEST(test_job_rom_resume_other_cart) {
+    ASSERT_TRUE(connected());
+    prog.cancel_step = Gen3CartStepRomRead;
+    prog.cancel_at = 300u * KIB;
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartCancelled);
+    cancel = false;
+    prog.cancel_step = Gen3CartStepNone;
+    static char first[GEN3_CART_NAME_MAX];
+    snprintf(first, sizeof(first), "%s", PART_NAME);
+    uint32_t size = 0;
+    ASSERT_TRUE(file(first, &size) != NULL);
+    ASSERT_EQ(size, REGION);
+    /* the title differs */
+    ASSERT_TRUE(swap_rom("POKEMON RUBX", MIB));
+    uint32_t done = 1;
+    ASSERT_FALSE(gen3_cart_rom_part(&cart, &done));
+    ASSERT_EQ(done, 0);
+    memset(hook.calls, 0, sizeof(hook.calls));
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, true), Gen3CartOk);
+    ASSERT_EQ(calls(GEN3_HCMD_ROM_READ), 256);
+    const uint8_t* rom = file(ROM_NAME, &size);
+    ASSERT_TRUE(rom != NULL);
+    ASSERT_EQ(size, MIB);
+    ASSERT_TRUE(is_rom(rom, size));
+    ASSERT_TRUE(file(first, &size) != NULL);
+    ASSERT_EQ(size, REGION);
+    ASSERT_EQ(fake_store_count(&store, ".part"), 1);
+    /* the first cart's header, another ROM size */
+    ASSERT_TRUE(swap_rom("POKEMON RUBY", 2u * MIB));
+    ASSERT_FALSE(gen3_cart_rom_part(&cart, &done));
+    /* the first cart again */
+    ASSERT_TRUE(swap_rom("POKEMON RUBY", MIB));
+    ASSERT_STR_EQ(PART_NAME, first);
+    ASSERT_TRUE(gen3_cart_rom_part(&cart, &done));
+    ASSERT_EQ(done, REGION);
 }
 
 /* A resumed copy needs room only for the rest */
@@ -1952,6 +2034,7 @@ int main(void) {
     RUN(test_job_work_copy_read_back);
     RUN(test_job_rom_dump);
     RUN(test_job_rom_resume);
+    RUN(test_job_rom_resume_other_cart);
     RUN(test_job_rom_resume_space);
     RUN(test_job_rom_resume_checks_last_region);
     RUN(test_job_rom_restart_removes_part);

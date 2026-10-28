@@ -16,13 +16,22 @@
 #define CART_BACKUP_NAME_FIXED (sizeof(GEN3_CART_BACKUP_DIR "/XXXX_nosave_-99.sav") - 1u)
 #define CART_STAMP_MAX (GEN3_CART_NAME_MAX - 1u - CART_BACKUP_NAME_FIXED)
 #define CART_ROM_FORMAT GEN3_CART_ROM_DIR "/%s_v%u.gba"
+/* The header bytes a ROM copy's .part is tied to (cart_part_name) */
+#define CART_PART_ID_OFF 0xA0u
+#define CART_PART_ID_LEN 0x20u
 
-_Static_assert(CART_STAMP_MAX >= sizeof("YYYYMMDD-HHMMSS") - 1u, "a stamp fits a backup name");
+_Static_assert(GEN3_CART_STAMP_MAX <= CART_STAMP_MAX, "a stamp fits a backup name");
+_Static_assert(GEN3_CART_STAMP_MAX >= sizeof("YYYYMMDD-HHMMSS") - 1u, "the session's stamp fits");
 _Static_assert(
     GEN3_CART_ROM_REGION % GEN3_CART_BUF_SIZE == 0,
     "a region is whole ROM_READs of one buffer");
 _Static_assert(GEN3_CART_BUF_SIZE == GEN3_SAVE_SECTOR_SIZE, "the buffer holds a sector");
 _Static_assert(sizeof(((Gen3HCartInfo*)0)->header) == CART_HEADER_LEN, "the header copy");
+_Static_assert(CART_PART_ID_OFF + CART_PART_ID_LEN <= CART_HEADER_LEN, "a .part's header bytes");
+/* roms/XXXX_v255.gba.01234567.part */
+_Static_assert(
+    sizeof(GEN3_CART_ROM_DIR "/XXXX_v255.gba.01234567.part") <= GEN3_CART_NAME_MAX,
+    "a .part's name fits");
 
 const char* gen3_cart_result_text(Gen3CartResult r) {
     /* At most 3 lines of 21 characters: the result screen starts its text at y 14 and may show
@@ -139,6 +148,14 @@ static void cart_drop_backup(Gen3Cart* c) {
     c->has_trainer = false;
     c->wslot = GEN3_SAVE_NO_SECTOR;
     cart_set_why(c);
+}
+
+/* The edits go with the save they were made on: none counted, and no working copy until a new
+ * backup makes one */
+static void cart_drop_edits(Gen3Cart* c) {
+    c->dirty = 0;
+    memset(c->changed, 0, sizeof(c->changed));
+    c->work_ok = false;
 }
 
 void gen3_cart_init(
@@ -358,7 +375,7 @@ static Gen3CartResult cart_build_work(Gen3Cart* c) {
 
 Gen3CartResult gen3_cart_backup(Gen3Cart* c, const char* stamp) {
     if(!c->id.can_read_save) return Gen3CartRefused;
-    if(!stamp || strlen(stamp) > CART_STAMP_MAX) return Gen3CartBadArg;
+    if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
     if(!c->linked) return Gen3CartLinkLost;
     const Gen3Store* st = &c->store;
     cart_drop_backup(c);
@@ -372,20 +389,15 @@ Gen3CartResult gen3_cart_backup(Gen3Cart* c, const char* stamp) {
         return r;
     }
     /* The edits are gone with the save they were made on; a save the game loads gets a new
-     * working copy, and if that fails, so does the backup */
-    c->dirty = 0;
-    memset(c->changed, 0, sizeof(c->changed));
-    c->work_ok = false;
+     * working copy. If that fails, the backup isn't current, but its file, verified, stays:
+     * nothing deletes a backup. */
+    cart_drop_edits(c);
     if(!(c->id.can_browse && cart_loads(c))) {
         st->remove(st->ctx, GEN3_CART_WORK_NAME);
         return Gen3CartOk;
     }
     r = cart_build_work(c);
-    if(r != Gen3CartOk) {
-        st->remove(st->ctx, c->backup_name);
-        c->backup_name[0] = '\0';
-        cart_drop_backup(c);
-    }
+    if(r != Gen3CartOk) cart_drop_backup(c);
     return r;
 }
 
@@ -463,8 +475,13 @@ static Gen3CartResult cart_still_backed_up(Gen3Cart* c, bool* same) {
     return r;
 }
 
+/* Settles a write or restore left pending, once the footers showed the cart as backed up but for
+ * its slot (with the write section below) */
+static Gen3CartResult cart_resolve(Gen3Cart* c);
+
 Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
     *dropped = false;
+    c->finished = Gen3CartFinishedNone;
     if(!c->linked) return Gen3CartLinkLost;
     const bool pending = c->dirty != 0 || gen3_cart_changes(c) > 0;
     if(!c->id.can_read_save) {
@@ -472,18 +489,21 @@ Gen3CartResult gen3_cart_attach(Gen3Cart* c, const char* stamp, bool* dropped) {
          * can_read_save. The cart's info and its ROM copy are still there. Edits made on the
          * cart that was in before are gone. */
         cart_drop_backup(c);
-        c->dirty = 0;
-        memset(c->changed, 0, sizeof(c->changed));
-        c->work_ok = false;
+        cart_drop_edits(c);
         *dropped = pending;
         return Gen3CartOk;
     }
     /* The connect already found the same header and flash id, or the backup isn't current */
     if(c->backup_current) {
         bool same = false;
-        const Gen3CartResult r = cart_still_backed_up(c, &same);
+        Gen3CartResult r = cart_still_backed_up(c, &same);
         if(r != Gen3CartOk) return r;
-        if(same) return Gen3CartOk;
+        if(same) {
+            r = cart_resolve(c);
+            /* Changed: the game saved over a pending write, which took the backup and the edits
+             * with it; the cart as it is now gets a new backup */
+            if(r != Gen3CartChanged) return r;
+        }
     }
     const Gen3CartResult r = gen3_cart_backup(c, stamp);
     if(r == Gen3CartOk) *dropped = pending;
@@ -501,9 +521,7 @@ Gen3CartResult gen3_cart_discard(Gen3Cart* c) {
         if(r != Gen3CartOk) return r;
         if(!cart_footers_same(c, GEN3_SAVE_NO_SECTOR, 0)) {
             cart_drop_backup(c);
-            c->dirty = 0;
-            memset(c->changed, 0, sizeof(c->changed));
-            c->work_ok = false;
+            cart_drop_edits(c);
             return Gen3CartChanged;
         }
     }
@@ -515,6 +533,14 @@ Gen3CartResult gen3_cart_discard(Gen3Cart* c) {
 
 bool gen3_cart_linked(const Gen3Cart* c) {
     return c->linked;
+}
+
+Gen3CartFinished gen3_cart_finished(const Gen3Cart* c) {
+    return c->finished;
+}
+
+bool gen3_cart_pending(const Gen3Cart* c) {
+    return c->wslot != GEN3_SAVE_NO_SECTOR;
 }
 
 const Gen3CartId* gen3_cart_id(const Gen3Cart* c) {
@@ -625,6 +651,8 @@ Gen3CartResult gen3_cart_mon_put(Gen3Cart* c, uint8_t box, uint8_t slot, const G
     Gen3SaveSpan sp[3];
     uint8_t n = gen3_cart_browsable(c) ? gen3_save_mon_spans(c->id.game, box, slot, sp) : 0;
     if(n == 0) return Gen3CartBadArg;
+    /* The write pending writes the working copy as it was given: settled first */
+    if(gen3_cart_pending(c)) return Gen3CartRefused;
     /* the Pokemon, then for an append the new count, written in one go */
     uint8_t mon[GEN3_PARTY_SIZE + 1];
     const size_t len = box == GEN3_SAVE_PARTY ? GEN3_PARTY_SIZE : GEN3_BOX_SIZE;
@@ -678,6 +706,8 @@ static Gen3CartMon cart_mon_result(Gen3CartResult r) {
         return Gen3CartMonOk;
     case Gen3CartSdError:
         return Gen3CartMonSdError;
+    case Gen3CartRefused: /* gen3_cart_mon_put's while a write is pending */
+        return Gen3CartMonPending;
     default:
         return Gen3CartMonBadArg;
     }
@@ -737,6 +767,7 @@ Gen3CartMon gen3_cart_mon_open(
     size_t* orig_len,
     Gen3Pkm* scratch) {
     if(!cart_mon_slot(c, box, slot)) return Gen3CartMonBadArg;
+    if(gen3_cart_pending(c)) return Gen3CartMonPending;
     if(box == GEN3_SAVE_PARTY) {
         uint8_t count = 0;
         const Gen3CartResult r = cart_party_count(c, &count);
@@ -808,6 +839,7 @@ Gen3CartMon gen3_cart_mon_place(
     bool new_mon,
     uint8_t mon[GEN3_PARTY_SIZE]) {
     if(!cart_mon_slot(c, box, slot)) return Gen3CartMonBadArg;
+    if(gen3_cart_pending(c)) return Gen3CartMonPending;
     /* Only a free slot: never over a Pokemon */
     if(box == GEN3_SAVE_PARTY) {
         uint8_t count = 0;
@@ -1023,8 +1055,6 @@ static Gen3CartResult cart_commit(Gen3Cart* c, const CartWrite* w) {
  * slot gets a valid signature only once every sector holds its image (multiboot-and-save.md §5.8) */
 static Gen3CartResult cart_flash(Gen3Cart* c, const CartWrite* w) {
     const Gen3SaveWritePlan* p = &w->plan;
-    c->wslot = p->target;
-    c->wcounter = p->counter;
     Gen3CartResult r = cart_wlink(
         c,
         gen3_hcli_arm_write(c->cli, c->flash_id, p->target, w->mode, c->slots.save_counter),
@@ -1182,6 +1212,9 @@ static Gen3CartResult cart_post_backup(Gen3Cart* c, const CartWrite* w, const ch
     if(r == Gen3CartOk) r = cart_build_work(c);
     if(r == Gen3CartOk) {
         c->wslot = GEN3_SAVE_NO_SECTOR;
+        /* Done, and the result says to power-cycle the GBA to play, which ends the helper: no job
+         * talks to it again before a reconnect, so none fails on a link that went with it */
+        c->linked = false;
         return Gen3CartOk;
     }
     st->remove(st->ctx, GEN3_CART_BACKUP_TMP);
@@ -1193,6 +1226,19 @@ static Gen3CartResult cart_post_backup(Gen3Cart* c, const CartWrite* w, const ch
     return Gen3CartWrittenNoBackup;
 }
 
+/* From here until it ends with a new backup, WrittenNoBackup, Changed or a discard, the write may
+ * have changed its slot: wslot, and all that a reconnect or attach needs to settle it, the CRCs
+ * its step 3 found included */
+static void cart_pend(Gen3Cart* c, const CartWrite* w, const char* stamp) {
+    c->wslot = w->plan.target;
+    c->wcounter = w->plan.counter;
+    c->wplan = w->plan;
+    c->wmode = w->mode;
+    snprintf(c->wfrom, sizeof(c->wfrom), "%s", w->from ? w->from : "");
+    memcpy(c->wcrc, c->exp_crc, sizeof(c->wcrc));
+    snprintf(c->wstamp, sizeof(c->wstamp), "%s", stamp);
+}
+
 /* Steps 3-10 of gen3_cart_write, for a write or a restore */
 static Gen3CartResult cart_write_slot(Gen3Cart* c, const CartWrite* w, const char* stamp) {
     Gen3CartResult r = cart_prepare(c, w);
@@ -1202,6 +1248,7 @@ static Gen3CartResult cart_write_slot(Gen3Cart* c, const CartWrite* w, const cha
         r = cart_kept_same(c, w);
         if(r == Gen3CartOk) {
             cart_step(c, Gen3CartStepPrepare, CART_SLOT_STEPS, CART_SLOT_STEPS);
+            cart_pend(c, w, stamp);
             r = cart_flash(c, w);
             if(r == Gen3CartOk) r = cart_verify(c, w);
             if(r != Gen3CartOk) {
@@ -1212,10 +1259,9 @@ static Gen3CartResult cart_write_slot(Gen3Cart* c, const CartWrite* w, const cha
             }
         }
     } else if(cart_view_written(c, w)) {
-        /* A run that a lost link interrupted after its last commit: these are step 9's checks,
-         * the footers first. Nothing is written again. */
-        c->wslot = w->plan.target;
-        c->wcounter = w->plan.counter;
+        /* A run that a lost link interrupted after its last commit, which no reconnect has
+         * settled yet: these are step 9's checks, the footers first. Nothing is written again. */
+        cart_pend(c, w, stamp);
         bool same = false;
         r = cart_dst_same(c, w, &same);
         if(r == Gen3CartOk && !same) r = Gen3CartChanged;
@@ -1227,10 +1273,48 @@ static Gen3CartResult cart_write_slot(Gen3Cart* c, const CartWrite* w, const cha
     return cart_post_backup(c, w, stamp);
 }
 
+/* A write or restore an earlier run left pending (wslot), once a connect found the cart as backed
+ * up but for its slot (cart_still_backed_up: seen holds the footers). Only reads, until it is
+ * found done:
+ * - the game loads its slot with its counter, and each sector there holds the image it put there
+ *   (SECTOR_CRC32 against wcrc): it got past its last commit. Its new backup is made
+ *   (cart_post_backup) from the same images, which its source still gives (no Pokemon is put
+ *   while it is pending, and a restore's file is never written), and it is finished;
+ * - the game loads its slot with its counter, and other data there: the game's own next save,
+ *   after a power cut. Changed: the backup and the edits go;
+ * - else it is still pending: cut short before its last commit, or a game save there torn, neither
+ *   of which the game loads. The next Write redoes it. */
+static Gen3CartResult cart_resolve(Gen3Cart* c) {
+    if(!gen3_cart_pending(c)) return Gen3CartOk;
+    const CartWrite w = {
+        .plan = c->wplan,
+        .mode = c->wmode,
+        .from = c->wfrom[0] ? c->wfrom : NULL,
+    };
+    const Gen3SaveSlots* v = &c->seen_slots;
+    if(!cart_slots_load(v) || v->active != w.plan.target || v->save_counter != w.plan.counter) {
+        return Gen3CartOk;
+    }
+    memcpy(c->exp_crc, c->wcrc, sizeof(c->exp_crc));
+    bool same = false;
+    Gen3CartResult r = v->strict_ok ? cart_dst_same(c, &w, &same) : Gen3CartOk;
+    if(r != Gen3CartOk) return r;
+    if(!same) {
+        cart_drop_backup(c);
+        cart_drop_edits(c);
+        return Gen3CartChanged;
+    }
+    r = cart_post_backup(c, &w, c->wstamp);
+    if(r == Gen3CartOk || r == Gen3CartWrittenNoBackup) {
+        c->finished = w.from ? Gen3CartFinishedRestore : Gen3CartFinishedWrite;
+    }
+    return r;
+}
+
 Gen3CartResult gen3_cart_write(Gen3Cart* c, const char* stamp) {
     if(!gen3_cart_writable(c, NULL)) return Gen3CartRefused;
     if(c->dirty == 0) return Gen3CartNothing;
-    if(!stamp || strlen(stamp) > CART_STAMP_MAX) return Gen3CartBadArg;
+    if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
     if(!c->linked) return Gen3CartLinkLost;
     const Gen3Store* st = &c->store;
     if(st->free_bytes(st->ctx) < CART_WRITE_SPACE) return Gen3CartSdFull;
@@ -1302,7 +1386,7 @@ Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stam
     Gen3CartResult r = cart_restore_read(c, name);
     if(r == Gen3CartSdError) return r;
     if(r != Gen3CartOk) return Gen3CartRefused;
-    if(!stamp || strlen(stamp) > CART_STAMP_MAX) return Gen3CartBadArg;
+    if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
     if(!c->linked) return Gen3CartLinkLost;
     const Gen3Store* st = &c->store;
     if(st->free_bytes(st->ctx) < CART_WRITE_SPACE) return Gen3CartSdFull;
@@ -1324,6 +1408,7 @@ Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stam
 
 Gen3CartResult gen3_cart_reconnect(Gen3Cart* c) {
     const bool had = c->backup_current;
+    c->finished = Gen3CartFinishedNone;
     Gen3CartResult r = gen3_cart_connect(c);
     if(r != Gen3CartOk || !had) return r;
     /* the connect found another header or flash id, and dropped the backup */
@@ -1331,7 +1416,7 @@ Gen3CartResult gen3_cart_reconnect(Gen3Cart* c) {
     bool same = false;
     r = cart_still_backed_up(c, &same);
     if(r != Gen3CartOk) return r;
-    if(same) return Gen3CartOk;
+    if(same) return cart_resolve(c);
     cart_drop_backup(c);
     return Gen3CartChanged;
 }
@@ -1346,9 +1431,24 @@ void gen3_cart_rom_name(const Gen3Cart* c, char out[GEN3_CART_NAME_MAX]) {
     snprintf(out, GEN3_CART_NAME_MAX, CART_ROM_FORMAT, c->id.code, (unsigned)c->id.version);
 }
 
+/* The .part's name: the ROM's, and the CRC-32 of the cart's header bytes 0xA0..0xBF (title, code,
+ * maker, version, complement) and its rom_size, as they were when the .part started. Only a cart
+ * that reads the same in both resumes it: another cart with the same code and version (a hack, a
+ * repro) starts its own copy instead of going on with this one. */
 static void cart_part_name(const Gen3Cart* c, char out[GEN3_CART_NAME_MAX]) {
+    const uint32_t rom = c->info.rom_size;
+    const uint8_t size[4] = {
+        (uint8_t)rom, (uint8_t)(rom >> 8), (uint8_t)(rom >> 16), (uint8_t)(rom >> 24)};
+    uint32_t reg =
+        gen3_crc32_update(0xFFFFFFFFu, c->info.header + CART_PART_ID_OFF, CART_PART_ID_LEN);
+    reg = gen3_crc32_update(reg, size, sizeof(size));
     snprintf(
-        out, GEN3_CART_NAME_MAX, CART_ROM_FORMAT ".part", c->id.code, (unsigned)c->id.version);
+        out,
+        GEN3_CART_NAME_MAX,
+        CART_ROM_FORMAT ".%08lx.part",
+        c->id.code,
+        (unsigned)c->id.version,
+        (unsigned long)~reg);
 }
 
 bool gen3_cart_rom_part(Gen3Cart* c, uint32_t* done_bytes) {
