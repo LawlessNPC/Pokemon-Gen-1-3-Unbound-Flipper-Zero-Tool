@@ -843,12 +843,44 @@ TEST(test_hp_commit_needs_program) {
 }
 
 /* CART_INFO scans the cart again, which may not be the one the arming checked: it disarms. */
+/* CART_INFO ends the arming, and the probe: until SAVE_PROBE runs again, the chip check refuses */
 TEST(test_hp_cart_info_disarms) {
     ASSERT_TRUE(setup());
     ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_OK);
     ASSERT_EQ(cmd(HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_CHIP);
+    ASSERT_EQ(cmd(HP_CMD_SAVE_PROBE, NULL, 0), HP_ST_OK);
     ASSERT_EQ(cmd1(HP_CMD_ERASE_SECTOR, 14), HP_ST_NOT_ARMED);
     ASSERT_TRUE(no_writes());
+}
+
+/* A cart swapped while the helper runs, a genuine MX Ruby for an SRAM repro with the same header,
+ * then the commands a reconnect sends: CART_INFO forgets the last probe, so SAVE_PROBE probes the
+ * new chip and finds the SRAM, and no flash command (a bank select, say) lands in it. Only the
+ * probe's own write and its undo reach the SRAM, which keeps every byte. */
+TEST(test_hp_cart_info_reprobes) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(cmd(HP_CMD_READ_FOOTERS, NULL, 0), HP_ST_OK);
+    fake_gba_rom_string(&gba, 0x500000, "SRAM_V113");
+    fake_gba_save(&gba, FakeSaveSram, 0);
+    for(uint32_t i = 0; i < FAKE_GBA_SRAM_LEN; i++) gba.flash[i] = (uint8_t)(i * 7u + 1u);
+    snapshot();
+    memset(&gba.counts, 0, sizeof(gba.counts));
+    ASSERT_EQ(cmd(HP_CMD_HELLO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(cmd(HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(cmd(HP_CMD_SAVE_PROBE, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(p[1], HpChipSram);
+    ASSERT_EQ(p[4], 1);
+    static const uint8_t reads[3] = {HP_CMD_READ_SECTOR, HP_CMD_READ_FOOTERS, HP_CMD_SECTOR_CRC32};
+    for(uint32_t i = 0; i < 3; i++) {
+        const uint16_t a = 3;
+        ASSERT_EQ(cmd(reads[i], &a, reads[i] == HP_CMD_READ_FOOTERS ? 0 : 1), HP_ST_UNSUPPORTED);
+    }
+    ASSERT_EQ(arm(MX, 1, 0, 4), HP_ST_REFUSED);
+    ASSERT_TRUE(unchanged());
+    ASSERT_EQ(counts().bank_selects, 0);
+    ASSERT_EQ(counts().sram_writes, 2); /* the probe's one write and its undo */
 }
 
 /* An erase or a new deferred write of a completed sector un-completes it, so the 14th completion,
@@ -1242,6 +1274,7 @@ int main(void) {
     RUN(test_hp_write_needs_defer);
     RUN(test_hp_commit_needs_program);
     RUN(test_hp_cart_info_disarms);
+    RUN(test_hp_cart_info_reprobes);
     RUN(test_hp_completed_forgets);
     RUN(test_hp_complete_needs_clear_slot);
     RUN(test_hp_arm_clears_erased_ok);

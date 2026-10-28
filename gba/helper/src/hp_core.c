@@ -157,9 +157,12 @@ static void hp_disarm(Hp* hp) {
 }
 
 /* CART_INFO: 96 header words; flags; ROM size (2 words); library kind; its offset (2 words). The
- * cart may have changed since an arming checked it, so it ends any arming. */
+ * cart may have changed since an arming checked it, or since the save chip was probed: it ends any
+ * arming, and forgets the probe, so no flash command reaches the chip until SAVE_PROBE has looked
+ * at it again (an SRAM cart swapped in would take a bank select as data). */
 static uint16_t hp_cart_info(Hp* hp) {
     hp_disarm(hp);
+    hp->probed = false;
     hp_cart_scan(&hp->cart);
     hp->cart_scanned = true;
     const HpCart* c = &hp->cart;
