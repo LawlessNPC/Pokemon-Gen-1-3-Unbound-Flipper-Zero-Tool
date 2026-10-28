@@ -358,6 +358,7 @@ static Gen3CartScreenHubIn hub_in(void) {
         .restorable = true,
         .has_rom = true,
         .changes = 0,
+        .pending = false,
     };
 }
 
@@ -405,12 +406,19 @@ TEST(test_hub) {
     hub(&in, &h);
     ASSERT_FALSE(h.browse);
 
-    /* Not linked (a command lost, or a Reconnect stopped before its end): Reconnect */
+    /* Not linked (a command lost, or a Reconnect stopped before its end): Reconnect. Write changes
+     * waits for it, as a write needs the helper; Discard changes, on the SD card, doesn't. */
     in = hub_in();
     in.linked = false;
     hub(&in, &h);
     ASSERT_TRUE(h.reconnect);
     ASSERT_TRUE(h.browse);
+    in.changes = 2;
+    hub(&in, &h);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.writing_off);
+    ASSERT_TRUE(h.discard);
+    ASSERT_TRUE(h.reconnect);
 
     /* No current backup of a save the helper can read: Back up again, and "Writing off: Save not
      * recognised" doesn't show, since the save isn't why. The edits can't be discarded without a
@@ -821,17 +829,128 @@ TEST(test_mon_texts) {
         {Gen3CartMonSdError, "SD card error."},
         {Gen3CartMonBadArg, "Invalid request."},
         {Gen3CartMonNoData, "Gen III data\nunreadable."},
-        {Gen3CartMonPending, "Finish the write\nfirst: Reconnect or\nWrite changes."},
     };
+    Gen3CartScreenHub h;
+    Gen3CartScreenHubIn in = hub_in();
+    hub(&in, &h);
     for(size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
-        ASSERT_STR_EQ(gen3_cart_screen_mon_text(want[k].m), want[k].text);
+        ASSERT_STR_EQ(gen3_cart_screen_mon_text(want[k].m, &h), want[k].text);
+        ASSERT_STR_EQ(gen3_cart_screen_mon_text(want[k].m, NULL), want[k].text);
         ASSERT_TRUE(fits(want[k].text, 3, GEN3_CART_SCREEN_LINE_LEN));
     }
-    ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonOk), "");
-    ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonEmpty), "");
-    ASSERT_STR_EQ(gen3_cart_screen_mon_text((Gen3CartMon)(Gen3CartMonPending + 1)), "");
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonOk, &h), "");
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text(Gen3CartMonEmpty, &h), "");
+    ASSERT_STR_EQ(gen3_cart_screen_mon_text((Gen3CartMon)(Gen3CartMonPending + 1), &h), "");
     ASSERT_TRUE(fits(GEN3_CART_SCREEN_CANT_EDIT, 1, GEN3_CART_SCREEN_TITLE_LEN));
     ASSERT_TRUE(fits(GEN3_CART_SCREEN_CANT_PUT, 1, GEN3_CART_SCREEN_TITLE_LEN));
+}
+
+static const char* pending_text(const Gen3CartScreenHub* h) {
+    return gen3_cart_screen_mon_text(Gen3CartMonPending, h);
+}
+
+/* t names an item of the hub only if h shows it: Reconnect, Write changes, Discard changes,
+ * Restore backup, wherever a line breaks */
+static bool names_only_shown(const char* t, const Gen3CartScreenHub* h) {
+    char flat[96];
+    snprintf(flat, sizeof(flat), "%s", t);
+    for(char* p = flat; *p; p++) {
+        if(*p == '\n') *p = ' ';
+    }
+    return (!strstr(flat, "Reconnect") || h->reconnect) &&
+           (!strstr(flat, "Write changes") || h->write) &&
+           (!strstr(flat, "Discard changes") || h->discard) &&
+           (!strstr(flat, "Restore backup") || h->restore);
+}
+
+/* A write or restore pending (cut short, and not settled since): no Pokemon is opened or put
+ * until it is. Discard changes ends it, even with no edits; and the text under "Can't edit" or
+ * "Can't put" names only the hub's items that settle or end it. */
+TEST(test_pending) {
+    Gen3CartScreenHub h;
+    Gen3CartScreenHubIn in = hub_in();
+
+    /* A restore cut short, with no edits, reconnected: no Write changes, but Restore backup again,
+     * or Discard changes */
+    in.pending = true;
+    hub(&in, &h);
+    ASSERT_TRUE(h.browse);
+    ASSERT_FALSE(h.write);
+    ASSERT_TRUE(h.discard);
+    ASSERT_TRUE(h.restore);
+    ASSERT_FALSE(h.reconnect);
+    ASSERT_STR_EQ(
+        pending_text(&h), "Finish the restore\nfirst: Restore backup\nor Discard changes.");
+    /* ... before the reconnect: Reconnect, and Discard changes still */
+    in.linked = false;
+    hub(&in, &h);
+    ASSERT_TRUE(h.reconnect);
+    ASSERT_TRUE(h.discard);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.restore);
+    ASSERT_STR_EQ(pending_text(&h), "Finish the write\nfirst: Reconnect or\nDiscard changes.");
+
+    /* A write cut short, its edits kept: Reconnect, and once linked Write changes */
+    in = hub_in();
+    in.pending = true;
+    in.changes = 1;
+    in.linked = false;
+    hub(&in, &h);
+    ASSERT_TRUE(h.reconnect);
+    ASSERT_FALSE(h.write);
+    ASSERT_TRUE(h.discard);
+    ASSERT_STR_EQ(pending_text(&h), "Finish the write\nfirst: Reconnect or\nDiscard changes.");
+    in.linked = true;
+    hub(&in, &h);
+    ASSERT_FALSE(h.reconnect);
+    ASSERT_TRUE(h.write);
+    ASSERT_TRUE(h.discard);
+    ASSERT_STR_EQ(pending_text(&h), "Finish the write\nfirst: Write changes\nor Discard changes.");
+
+    /* A restore cut short on a cart whose game loads no save (empty or corrupt): nothing to
+     * browse waits on it, and a discard needs a save the game loads: no Discard */
+    in = hub_in();
+    in.pending = true;
+    in.browsable = false;
+    in.writable = false;
+    in.why = Gen3CartRefuseSave;
+    in.work_ok = false;
+    hub(&in, &h);
+    ASSERT_FALSE(h.browse);
+    ASSERT_FALSE(h.discard);
+    ASSERT_TRUE(h.restore);
+
+    /* No hub (none read), or one without Discard: no item named */
+    ASSERT_STR_EQ(pending_text(NULL), "Finish the write\nfirst.");
+    in.busy = true;
+    hub(&in, &h);
+    ASSERT_STR_EQ(pending_text(&h), "Finish the write\nfirst.");
+
+    /* Every hub with something pending: Discard changes whenever the list (and so the reason)
+     * can show, and a text that fits and names only items shown */
+    for(uint32_t bits = 0; bits < (1u << 11); bits++) {
+        in = (Gen3CartScreenHubIn){
+            .busy = (bits >> 0) & 1u,
+            .linked = (bits >> 1) & 1u,
+            .backup_current = (bits >> 2) & 1u,
+            .can_read_save = (bits >> 3) & 1u,
+            .browsable = (bits >> 4) & 1u,
+            .writable = (bits >> 5) & 1u,
+            .why = ((bits >> 6) & 1u) ? Gen3CartRefuseSave : Gen3CartRefuseNone,
+            .work_ok = (bits >> 7) & 1u,
+            .restorable = (bits >> 8) & 1u,
+            .has_rom = (bits >> 9) & 1u,
+            .changes = ((bits >> 10) & 1u) ? 2u : 0u,
+            .pending = true,
+        };
+        hub(&in, &h);
+        const char* t = pending_text(&h);
+        ASSERT_TRUE(t[0] != '\0');
+        ASSERT_TRUE(fits(t, 3, GEN3_CART_SCREEN_LINE_LEN));
+        ASSERT_TRUE(names_only_shown(t, &h));
+        if(!in.busy && in.browsable && in.backup_current) ASSERT_TRUE(h.discard);
+        if(!in.linked) ASSERT_FALSE(h.write);
+    }
 }
 
 static Gen3MonSummary summary(Gen3MonKind kind, uint16_t national, uint8_t level) {
@@ -1342,6 +1461,7 @@ int main(void) {
     RUN(test_result_written);
     RUN(test_result_restore_rom);
     RUN(test_mon_texts);
+    RUN(test_pending);
     RUN(test_rows);
     RUN(test_put_text);
     RUN(test_ask_texts);

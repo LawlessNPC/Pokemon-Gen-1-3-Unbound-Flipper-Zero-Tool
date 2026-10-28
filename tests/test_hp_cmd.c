@@ -842,7 +842,6 @@ TEST(test_hp_commit_needs_program) {
     for(uint32_t s = 0; s < 14; s++) ASSERT_MEM_EQ(sector(s), before + s * SECTOR_LEN, SECTOR_LEN);
 }
 
-/* CART_INFO scans the cart again, which may not be the one the arming checked: it disarms. */
 /* CART_INFO ends the arming, and the probe: until SAVE_PROBE runs again, the chip check refuses */
 TEST(test_hp_cart_info_disarms) {
     ASSERT_TRUE(setup());

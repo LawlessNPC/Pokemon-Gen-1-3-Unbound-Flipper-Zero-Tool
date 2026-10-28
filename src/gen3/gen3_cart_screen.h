@@ -95,19 +95,22 @@ typedef struct {
     bool restorable; /* gen3_cart_restorable */
     bool has_rom; /* gen3_cart_rom_size > 0 */
     uint16_t changes; /* gen3_cart_changes */
+    bool pending; /* gen3_cart_pending */
 } Gen3CartScreenHubIn;
 /* The hub's input read from c, as the hub scene reads it: c NULL (a job runs) is busy */
 void gen3_cart_screen_hub_in(const Gen3Cart* c, Gen3CartScreenHubIn* in);
 /* The hub's items beyond Cart info, which is always there */
 typedef struct {
     bool browse; /* "Party and boxes" */
-    bool write; /* "Write changes (<n>)": writable, with changes */
+    bool write; /* "Write changes (<n>)": linked and writable, with changes */
     /* "Writing off: <why>", which opens Cart info: not writable, for the cart's reason or the
      * save's. Not when the save isn't why: no current backup (Back up again shows), or edits with
      * no working copy (Discard rebuilds it), which why also reads as Save. An empty or corrupt
      * save, with no working copy and no edits, is why. */
     bool writing_off;
-    bool discard; /* "Discard changes": changes, and a current backup to build them from */
+    /* "Discard changes": a current backup to build the working copy from, and changes, or a write
+     * or restore pending while there is a list of Pokemon, which it keeps shut until it ends */
+    bool discard;
     /* not linked: a command was lost, a connect (a Reconnect) didn't run to its end, or a write or
      * restore ended Ok, which says to power-cycle the GBA and so ends the helper */
     bool reconnect;
@@ -169,8 +172,9 @@ void gen3_cart_screen_leave(uint16_t changes, char out[GEN3_CART_SCREEN_LEAVE_SI
 /* The headers when a Pokemon isn't opened in the editor, or isn't put into a slot */
 #define GEN3_CART_SCREEN_CANT_EDIT "Can't edit"
 #define GEN3_CART_SCREEN_CANT_PUT "Can't put"
-/* Why, in at most 3 lines; "" for Ok, Empty, and a value outside the enum */
-const char* gen3_cart_screen_mon_text(Gen3CartMon m);
+/* Why, in at most 3 lines; "" for Ok, Empty, and a value outside the enum. Pending's names only
+ * the items of hub (the hub's, as it is now; NULL: none) that settle the write or end it. */
+const char* gen3_cart_screen_mon_text(Gen3CartMon m, const Gen3CartScreenHub* hub);
 
 /* A slot's row, numbered from 1 (slot 6 is "07"): "07 TREECKO Lv5", "07 EGG", "07 BAD EGG" or
  * "07 -- empty --", with '*' after it when changed. s NULL: the working copy couldn't give it

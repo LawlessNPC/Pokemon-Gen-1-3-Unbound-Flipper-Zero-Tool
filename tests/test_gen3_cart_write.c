@@ -1809,6 +1809,61 @@ TEST(test_resolve_uses_own_crcs) {
     ASSERT_EQ(watch.violations, 0);
 }
 
+/* A write cut right after its 14th commit, whose settling the reconnect couldn't finish (the
+ * helper answered its first SECTOR_CRC32 with an error, the link still up); then a restore of
+ * another file, which finds the slot written (the game loads it, with the counter both share) and
+ * loses the link in its check of that slot, at the first SECTOR_CRC32. It never found its own
+ * images there, so the write's record stays: the next reconnect checks the write's own images,
+ * finds them, and finishes it. Not Changed: the edit is on the cart and in the new backup. */
+TEST(test_resolve_after_restore_check_lost) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_party());
+    watch_write();
+    hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+    hook.unplug_nth = 14;
+    hook.unplug_len = FOREVER;
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(game_view(), ViewNew);
+    fake_helper_replug(&fh);
+    tap.over_code = GEN3_HCMD_SECTOR_CRC32;
+    tap.over_seen = 0;
+    tap.over_nth = 1;
+    tap.over_status = GEN3_HST_BAD_ARG;
+    tap.over_n = 2;
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartHelperError);
+    ASSERT_TRUE(gen3_cart_linked(&cart));
+    ASSERT_TRUE(gen3_cart_pending(&cart));
+    ASSERT_TRUE(put_other());
+    hook.unplug_code = GEN3_HCMD_SECTOR_CRC32;
+    hook.unplug_nth = calls(GEN3_HCMD_SECTOR_CRC32) + 1u;
+    hook.unplug_len = FOREVER;
+    const uint32_t arms = calls(GEN3_HCMD_ARM_WRITE);
+    ASSERT_EQ(gen3_cart_restore(&cart, OTHER_NAME, STAMP3), Gen3CartLinkLost);
+    ASSERT_EQ(calls(GEN3_HCMD_ARM_WRITE), arms);
+    ASSERT_EQ(hook.unplug_code, 0);
+    ASSERT_TRUE(gen3_cart_pending(&cart));
+    ASSERT_TRUE(gen3_cart_backup_current(&cart));
+    ASSERT_EQ(gen3_cart_changes(&cart), 1);
+    fake_helper_replug(&fh);
+    const FakeGbaCounts n = counts();
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_finished(&cart), Gen3CartFinishedWrite);
+    ASSERT_EQ(counts().erases, n.erases);
+    ASSERT_EQ(counts().programs, n.programs);
+    ASSERT_TRUE(written_and_backed_up());
+    ASSERT_STR_EQ(gen3_cart_backup_name(&cart), WRITE_NAME);
+    ASSERT_EQ(watch.violations, 0);
+    /* the edit, party 1 at level 50, in slot B with counter 5 */
+    const Gen3SaveSlots* s = gen3_cart_slots(&cart);
+    ASSERT_EQ(s->active, 1);
+    ASSERT_EQ(s->save_counter, 5);
+    uint8_t mon[100];
+    Gen3Pkm back;
+    ASSERT_TRUE(flash_mon(s->phys, GEN3_SAVE_PARTY, 0, mon));
+    ASSERT_TRUE(gen3_save_mon_to_pkm(mon, 100, &back));
+    ASSERT_EQ(gen3_pkm_get(&back, Gen3FieldLevel), 50);
+}
+
 /* A write or a restore that ends Ok leaves the cart unlinked: its result says to power-cycle the
  * GBA, which ends the helper, so a job needing it answers LinkLost without a word on the link,
  * until a reconnect. One that ends otherwise (WrittenNoBackup, here) stays linked, to back up. */
@@ -1846,7 +1901,8 @@ static Gen3CartScreenHub hub_now(void) {
 
 /* After "Power-cycle the GBA to play" (a write or a restore that ended Ok), the hub offers
  * Reconnect, not Restore backup or Copy ROM, which would fail on the helper the power cycle ends;
- * after the reconnect, both again. While a job runs (no cart), no item. */
+ * nor Write changes for an edit made then, which waits for the reconnect too, while Discard
+ * changes doesn't. After the reconnect, all of them again. While a job runs (no cart), no item. */
 TEST(test_hub_after_write) {
     ASSERT_TRUE(backed_up());
     Gen3CartScreenHub h = hub_now();
@@ -1864,9 +1920,19 @@ TEST(test_hub_after_write) {
     ASSERT_TRUE(h.browse);
     ASSERT_FALSE(h.write);
     ASSERT_FALSE(h.backup);
+    Gen3Pkm p;
+    ASSERT_TRUE(treecko(60, &p));
+    ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartOk);
+    h = hub_now();
+    ASSERT_TRUE(h.reconnect);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.writing_off);
+    ASSERT_TRUE(h.discard);
     ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
     h = hub_now();
     ASSERT_FALSE(h.reconnect);
+    ASSERT_TRUE(h.write);
+    ASSERT_TRUE(h.discard);
     ASSERT_TRUE(h.restore);
     ASSERT_TRUE(h.rom);
     ASSERT_EQ(gen3_cart_restore(&cart, BACKUP_NAME, STAMP3), Gen3CartOk);
@@ -1879,6 +1945,60 @@ TEST(test_hub_after_write) {
     ASSERT_TRUE(in.busy);
     gen3_cart_screen_hub(&in, &h);
     ASSERT_FALSE(h.reconnect || h.restore || h.rom || h.browse || h.write);
+}
+
+/* A restore cut short (the cable out right after its 7th commit), with no edits: pending, so no
+ * Pokemon is opened or put. The hub offers Discard changes, with Reconnect while unlinked, and
+ * once reconnected (still pending: the game loads the old save) with Restore backup, but never
+ * Write changes; the text under "Can't edit" names only those. A discard ends it: slot B holds 7
+ * sectors the backup doesn't, so the backup goes too (Changed), and the hub offers a new one. */
+TEST(test_hub_pending_restore) {
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(put_other());
+    hook.unplug_code = GEN3_HCMD_COMMIT_SECTOR;
+    hook.unplug_nth = 7;
+    hook.unplug_len = FOREVER;
+    ASSERT_EQ(gen3_cart_restore(&cart, OTHER_NAME, STAMP2), Gen3CartLinkLost);
+    ASSERT_TRUE(gen3_cart_pending(&cart));
+    ASSERT_EQ(gen3_cart_changes(&cart), 0);
+    ASSERT_EQ(
+        gen3_cart_mon_open(&cart, &ed, GEN3_SAVE_PARTY, 1, orig, &orig_len, &scratch),
+        Gen3CartMonPending);
+    Gen3CartScreenHub h = hub_now();
+    ASSERT_TRUE(h.browse);
+    ASSERT_TRUE(h.reconnect);
+    ASSERT_TRUE(h.discard);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.restore);
+    ASSERT_STR_EQ(
+        gen3_cart_screen_mon_text(Gen3CartMonPending, &h),
+        "Finish the write\nfirst: Reconnect or\nDiscard changes.");
+    fake_helper_replug(&fh);
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_finished(&cart), Gen3CartFinishedNone);
+    ASSERT_TRUE(gen3_cart_pending(&cart));
+    h = hub_now();
+    ASSERT_TRUE(h.browse);
+    ASSERT_FALSE(h.reconnect);
+    ASSERT_TRUE(h.discard);
+    ASSERT_FALSE(h.write);
+    ASSERT_TRUE(h.restore);
+    ASSERT_STR_EQ(
+        gen3_cart_screen_mon_text(Gen3CartMonPending, &h),
+        "Finish the restore\nfirst: Restore backup\nor Discard changes.");
+    const FakeGbaCounts n = counts();
+    ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartChanged);
+    ASSERT_EQ(counts().erases, n.erases);
+    ASSERT_EQ(counts().programs, n.programs);
+    ASSERT_FALSE(gen3_cart_pending(&cart));
+    h = hub_now();
+    ASSERT_FALSE(h.discard);
+    ASSERT_TRUE(h.backup);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP3), Gen3CartOk);
+    ASSERT_FALSE(gen3_cart_pending(&cart));
+    Gen3Pkm p;
+    ASSERT_TRUE(treecko(70, &p));
+    ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartOk);
 }
 
 /* Erase 0 of 14 is reported before the first erase runs, so the screen says not to power off for
@@ -2729,8 +2849,10 @@ int main(void) {
     RUN(test_resolve_game_saved_reconnect);
     RUN(test_resolve_cut_after_commits_then_edit);
     RUN(test_resolve_uses_own_crcs);
+    RUN(test_resolve_after_restore_check_lost);
     RUN(test_write_ok_unlinks);
     RUN(test_hub_after_write);
+    RUN(test_hub_pending_restore);
     RUN(test_write_reports_erase_first);
     RUN(test_attach_other_cart_same_save);
     RUN(test_kept_slot_compared);

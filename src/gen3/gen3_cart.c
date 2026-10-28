@@ -1260,11 +1260,14 @@ static Gen3CartResult cart_write_slot(Gen3Cart* c, const CartWrite* w, const cha
         }
     } else if(cart_view_written(c, w)) {
         /* A run that a lost link interrupted after its last commit, which no reconnect has
-         * settled yet: these are step 9's checks, the footers first. Nothing is written again. */
-        cart_pend(c, w, stamp);
+         * settled yet: these are step 9's checks, the footers first. Nothing is written again.
+         * The slot is this run's only once each sector there holds its image: until then a write
+         * still pending keeps its own record, so that other images (a restore of another file)
+         * whose check is cut short leave the next reconnect to settle that write by its own. */
         bool same = false;
         r = cart_dst_same(c, w, &same);
         if(r == Gen3CartOk && !same) r = Gen3CartChanged;
+        if(r == Gen3CartOk) cart_pend(c, w, stamp);
     } else {
         r = Gen3CartChanged;
     }

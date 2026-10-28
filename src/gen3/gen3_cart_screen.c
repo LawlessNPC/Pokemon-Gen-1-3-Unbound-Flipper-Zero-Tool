@@ -172,20 +172,24 @@ void gen3_cart_screen_hub_in(const Gen3Cart* c, Gen3CartScreenHubIn* in) {
     in->restorable = gen3_cart_restorable(c);
     in->has_rom = gen3_cart_rom_size(c) > 0;
     in->changes = gen3_cart_changes(c);
+    in->pending = gen3_cart_pending(c);
 }
 
 void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out) {
     memset(out, 0, sizeof(*out));
     if(in->busy) return;
     out->browse = in->browsable;
-    out->write = in->writable && in->changes > 0;
+    /* a write needs the helper: unlinked, Reconnect comes first */
+    out->write = in->linked && in->writable && in->changes > 0;
     /* The save as backed up is Save's cause only with a current backup, and a working copy unless
      * there are no edits: an empty or corrupt save has neither, and is why */
     out->writing_off = !in->writable &&
                        (in->why != Gen3CartRefuseSave ||
                         (in->backup_current && (in->work_ok || in->changes == 0)));
-    /* a discard rebuilds the working copy from the backup */
-    out->discard = in->changes > 0 && in->backup_current;
+    /* a discard rebuilds the working copy from the backup, and ends a write pending, edits or not
+     * (a restore's), which keeps the list's Pokemon shut; a cart with no list (no save the game
+     * loads) has nothing it keeps shut, nor a save for a discard to rebuild */
+    out->discard = in->backup_current && (in->changes > 0 || (in->pending && in->browsable));
     out->reconnect = !in->linked;
     out->backup = !in->backup_current && in->can_read_save;
     out->restore = in->linked && in->restorable;
@@ -423,7 +427,19 @@ void gen3_cart_screen_leave(uint16_t changes, char out[GEN3_CART_SCREEN_LEAVE_SI
 
 /* ---- The party and box screens ---- */
 
-const char* gen3_cart_screen_mon_text(Gen3CartMon m) {
+/* What settles a write or restore pending, or ends it, as the hub offers it: Reconnect (unlinked:
+ * the reconnect finishes one done on the cart); Write changes, which writes the edits again; with
+ * neither, while linked, what is pending has no edits, so it is a restore (a write keeps its edits
+ * until it ends), which Restore backup redoes; and Discard changes, which ends either. */
+static const char* cart_screen_pending(const Gen3CartScreenHub* hub) {
+    if(!hub || !hub->discard) return "Finish the write\nfirst.";
+    if(hub->reconnect) return "Finish the write\nfirst: Reconnect or\nDiscard changes.";
+    if(hub->write) return "Finish the write\nfirst: Write changes\nor Discard changes.";
+    if(hub->restore) return "Finish the restore\nfirst: Restore backup\nor Discard changes.";
+    return "Finish the write\nfirst, or choose\nDiscard changes.";
+}
+
+const char* gen3_cart_screen_mon_text(Gen3CartMon m, const Gen3CartScreenHub* hub) {
     switch(m) {
     case Gen3CartMonOk:
     case Gen3CartMonEmpty:
@@ -447,7 +463,7 @@ const char* gen3_cart_screen_mon_text(Gen3CartMon m) {
     case Gen3CartMonNoData:
         return "Gen III data\nunreadable.";
     case Gen3CartMonPending:
-        return "Finish the write\nfirst: Reconnect or\nWrite changes.";
+        return cart_screen_pending(hub);
     }
     return "";
 }

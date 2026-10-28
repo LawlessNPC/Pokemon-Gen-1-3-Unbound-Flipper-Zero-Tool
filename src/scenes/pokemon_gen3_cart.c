@@ -135,13 +135,18 @@ void gen3_cart_ui_box_name(PokemonFap* pokemon_fap, uint8_t box, char out[9]) {
 
 void gen3_cart_ui_mon_result(PokemonFap* pokemon_fap, bool put, Gen3CartMon m) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    Gen3CartScreenHubIn in;
+    Gen3CartScreenHub items;
 
+    /* the hub's items as they are now, which a pending write's text names */
+    gen3_cart_screen_hub_in(gen3_cart_ui_cart(pokemon_fap), &in);
+    gen3_cart_screen_hub(&in, &items);
     snprintf(
         ui->result_header,
         sizeof(ui->result_header),
         "%s",
         put ? GEN3_CART_SCREEN_CANT_PUT : GEN3_CART_SCREEN_CANT_EDIT);
-    ui->result_text = gen3_cart_screen_mon_text(m);
+    ui->result_text = gen3_cart_screen_mon_text(m, &items);
     ui->retry_mode = Gen3CartRetryNone;
     ui->result_back = PokemonSceneGen3CartSlots;
 }
