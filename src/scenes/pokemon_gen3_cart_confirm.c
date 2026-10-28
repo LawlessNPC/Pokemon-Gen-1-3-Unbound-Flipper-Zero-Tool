@@ -17,8 +17,9 @@
  *   job, or Cancel (or Back) to the hub.
  * - Restore backup? (Gen3CartRestoreAsk), over the hub once the file passed its check: both
  *   trainers, and the edits a restore drops; Restore runs the job, Cancel (or Back) to the hub.
- * - Copy ROM? or Resume copy? (Gen3CartRomAsk), over the hub: Copy, Resume, or Restart (which
- *   copies from the start, the old .part removed); Cancel (or Back) to the hub.
+ * - Copy ROM? or Resume copy? (Gen3CartRomAsk), over the hub: Copy, Resume, or Restart, which
+ *   asks Restart copy? first, since it copies from the start, the old .part removed; Cancel (or
+ *   Back) to the hub.
  * - Stop copying? (Gen3CartRomStop), over the ROM copy, which runs on: Stop cancels it; Keep
  *   going (or Back) returns to its progress. */
 
@@ -95,6 +96,8 @@ static void gen3_cart_confirm_rom_enter(PokemonFap* pokemon_fap) {
     uint32_t done = 0;
 
     ui->rom_resume = c && gen3_cart_rom_part(c, &done);
+    ui->rom_done = done;
+    ui->rom_restart = false;
     if(ui->rom_resume) {
         gen3_cart_screen_rom_resume(done, gen3_cart_rom_size(c), gen3_cart_confirm_text);
         gen3_cart_confirm_show(pokemon_fap, "Resume copy?", "Restart", "Resume");
@@ -102,6 +105,17 @@ static void gen3_cart_confirm_rom_enter(PokemonFap* pokemon_fap) {
         gen3_cart_screen_rom_ask(c ? gen3_cart_rom_size(c) : 0, gen3_cart_confirm_text);
         gen3_cart_confirm_show(pokemon_fap, "Copy ROM?", "Cancel", "Copy");
     }
+}
+
+/* Resume copy?'s Restart: the same scene asks again, since a restart removes the .part */
+static void gen3_cart_confirm_rom_restart(PokemonFap* pokemon_fap) {
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
+
+    ui->rom_restart = true;
+    gen3_cart_screen_rom_restart(
+        ui->rom_done, c ? gen3_cart_rom_size(c) : 0, gen3_cart_confirm_text);
+    gen3_cart_confirm_show(pokemon_fap, "Restart copy?", "Cancel", "Restart");
 }
 
 void pokemon_scene_gen3_cart_confirm_on_enter(void* context) {
@@ -181,8 +195,10 @@ static void gen3_cart_confirm_right(PokemonFap* pokemon_fap, uint32_t alias) {
         gen3_cart_ui_run_job(pokemon_fap, Gen3CartJobRestore, ui->restore_name);
         break;
     case PokemonSceneGen3CartRomAsk:
-        /* Copy, or Resume from the .part */
-        gen3_cart_ui_run_job(pokemon_fap, Gen3CartJobRom, ui->rom_resume ? "resume" : NULL);
+        /* Copy; Resume from the .part; or Restart, asked twice: a copy from the start removes the
+         * .part first */
+        gen3_cart_ui_run_job(
+            pokemon_fap, Gen3CartJobRom, ui->rom_resume && !ui->rom_restart ? "resume" : NULL);
         break;
     case PokemonSceneGen3CartRomStop:
         /* the copy shows Stopping until it has ended; the .part keeps what it checked */
@@ -196,11 +212,13 @@ static void gen3_cart_confirm_right(PokemonFap* pokemon_fap, uint32_t alias) {
 }
 
 static void gen3_cart_confirm_left(PokemonFap* pokemon_fap, uint32_t alias) {
+    const Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+
     if(alias == PokemonSceneGen3CartPut) {
         gen3_cart_confirm_put_cancel(pokemon_fap);
-    } else if(alias == PokemonSceneGen3CartRomAsk && gen3_cart_ui_get(pokemon_fap)->rom_resume) {
-        /* Restart: a copy from the start removes the .part first */
-        gen3_cart_ui_run_job(pokemon_fap, Gen3CartJobRom, NULL);
+    } else if(alias == PokemonSceneGen3CartRomAsk && ui->rom_resume && !ui->rom_restart) {
+        /* Restart: asked again before the .part is removed */
+        gen3_cart_confirm_rom_restart(pokemon_fap);
     } else {
         /* Cancel, Stay, or Keep going */
         scene_manager_previous_scene(pokemon_fap->scene_manager);

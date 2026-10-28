@@ -59,6 +59,8 @@ typedef struct Gen3CartUi {
     char restore_name[GEN3_CART_NAME_MAX];
     Gen3SaveTrainer restore_trainer;
     bool rom_resume; /* Copy ROM: a .part was found, so the question is Resume or Restart */
+    uint32_t rom_done; /* the bytes it holds */
+    bool rom_restart; /* Restart was chosen: Restart copy? asks before the .part is removed */
     /* A ROM copy's rate, from its first progress in this run: that progress's bytes and tick */
     bool rate_started;
     uint32_t rate_done;
@@ -89,6 +91,10 @@ const Gen3CartSessionStatus* gen3_cart_ui_status(PokemonFap* pokemon_fap);
 Gen3Cart* gen3_cart_ui_cart(PokemonFap* pokemon_fap);
 /* Pokemon slots changed and not written; 0 before the session exists, and while a job runs */
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap);
+/* The editor takes the save's trainer (gen3_cart_trainer), so a new Pokemon for this cart gets it
+ * as OT; nothing without one. Once a job that may leave another save's backup has ended Ok
+ * (gen3_cart_screen_new_trainer): the Connect, Back up again and Restore. */
+void gen3_cart_ui_take_trainer(PokemonFap* pokemon_fap);
 
 /* Opens the confirm scene (pokemon_gen3_cart_confirm.c) as scene: Gen3CartLeave, Gen3CartPut,
  * Gen3CartWriteAsk, Gen3CartDiscardAsk, Gen3CartRestoreAsk, Gen3CartRomAsk or Gen3CartRomStop.

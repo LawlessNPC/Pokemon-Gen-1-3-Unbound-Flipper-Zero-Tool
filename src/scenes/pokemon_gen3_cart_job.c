@@ -31,8 +31,12 @@ static void gen3_cart_job_end(PokemonFap* pokemon_fap, const Gen3CartSessionStat
         gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartRestoreAsk);
         return;
     }
-    gen3_cart_ui_set_result(
-        pokemon_fap, ui->job, st->step, st->result, false, PokemonSceneGen3Cart);
+    /* st is the status buffer, which the calls below read again */
+    const Gen3CartResult r = st->result;
+    const Gen3CartStep step = st->step;
+    /* A save backed up again, or restored, may be another trainer's */
+    if(gen3_cart_screen_new_trainer(ui->job, r)) gen3_cart_ui_take_trainer(pokemon_fap);
+    gen3_cart_ui_set_result(pokemon_fap, ui->job, step, r, false, PokemonSceneGen3Cart);
     scene_manager_next_scene(scene_manager, PokemonSceneGen3CartResult);
 }
 

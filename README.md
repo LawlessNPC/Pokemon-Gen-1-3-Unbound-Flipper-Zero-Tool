@@ -24,7 +24,7 @@ The video below trades a Bulbasaur from the Flipper to a Game Boy Color with Pok
 
 This is a Pokemon exchange application from Flipper Zero to Game Boy supporting Generation I and II games; Red, Blue, Yellow, Gold, Silver, and Crystal (all non-Japanese regions[^JPN]). It allows trading Pokemon to and from a Game Boy; allowing for customization and/or modification of Pokemon.
 
-Version 3.0 adds [Generation III](#gen-iii-game-boy-advance): Ruby, Sapphire, FireRed and LeafGreen (non-Japanese).
+Version 3.0 adds [Generation III](#gen-iii-game-boy-advance): Ruby, Sapphire, FireRed and LeafGreen (non-Japanese). Version 3.1 adds [Cartridge](#cartridge-save-access), a second app that backs up, edits and writes back the save of a Gen III cartridge over the link cable (experimental).
 
 [^JPN]: Japanese releases of all Generation I and II games use a different data layout, this application implements the data layout used in all other global regions. Attempting to trade between a Japanese cartridge and the Flipper [risks corrupting or erasing save data](https://web.archive.org/web/20221009111851/http://www.nintendo.com/consumer/systems/gameboy/trouble_specificgame.jsp#erasing)
 
@@ -92,7 +92,14 @@ This application can be installed through the [Flipper Application Catalog](http
 
 The application can also be built from source using [ufbt](https://github.com/flipperdevices/flipperzero-ufbt) or compiling the application against a firmware of choice using [fbt](https://github.com/flipperdevices/flipperzero-firmware/blob/dev/documentation/AppsOnSDCard.md). This will install the application to the `apps/GPIO/` folder on the Flipper's SD card.
 
-Manually built application can be copied to the SD card using [qFlipper](https://docs.flipper.net/qflipper).
+From version 3.1 the application is two apps, built together from this source:
+
+- `pokemon.fap`, Pokemon Trade Tool: Gen I, Gen II and Gen III trading and the editors;
+- `pokemon_cart.fap`, Pokemon Cartridge: the Gen III [cartridge save access](#cartridge-save-access).
+
+Install both, side by side in `apps/GPIO/` on the SD card. `ufbt` builds both into `dist/`; `ufbt launch` needs `APPID=pokemon` or `APPID=pokemon_cart` to say which one to install and start.
+
+Manually built applications (both `.fap` files) can be copied to the SD card using [qFlipper](https://docs.flipper.net/qflipper).
 
 <p align='center'>
 <img src="./docs/images/qFlipper.png" width="400" /><br />
@@ -394,7 +401,7 @@ Version 2.0 of the Pokemon Trade tool fixes a bug on MALVEKE boards that are Rev
 
 
 ## Gen III (Game Boy Advance)
-The main menu's `Gen III  (GBA non-JPN)` entry is for the Game Boy Advance games. Its menu has `Trade`, `Edit Pokemon`, `Load .pk3`, `Save .pk3`, `National Dex: Off`, and `Link Test` (`End trade` while trading).
+The main menu's `Gen III  (GBA non-JPN)` entry is for the Game Boy Advance games. Its menu has `Trade`, `Edit Pokemon`, `Load .pk3`, `Save .pk3`, `National Dex: Off`, `Link Test` and `Cartridge` (while trading, `End trade` in place of the last two).
 
 ### Games
 English Ruby, Sapphire, FireRed and LeafGreen. Not yet tested on hardware: the checklists in `docs/gen3/` (see [Link Test, log and checklists](#link-test-log-and-checklists)) are the test. Emerald is untested.
@@ -471,6 +478,35 @@ The species, move and item names and the learnsets are in `files/gen3_bulk.bin`,
 ### .pk3 files
 Files are PKHeX `.pk3` files in `apps_data/pokemon/gen3/` on the SD card. `Save .pk3` writes 80 bytes; `Load .pk3` reads 80 or 100 bytes. A loaded file is checked and tidied so the Pokemon is valid in game (stats recalculated, duplicate moves and move gaps removed, a held Mail item and any mail index removed), and the result says what was fixed.
 
+### Cartridge (save access)
+Experimental. `Cartridge` reads the save of the cartridge in the GBA over the link cable, backs it up to the SD card, and lets you browse and edit the Pokemon in its party and its 14 boxes, put new Pokemon into empty slots, and write the save back. It can also restore a backup and copy the ROM. Writing is allowed only for English Ruby, Sapphire, FireRed and LeafGreen. Not yet tested on hardware: [`docs/gen3/hardware-test-3.md`](docs/gen3/hardware-test-3.md) is the test.
+
+**A second app.** Cartridge is its own app, Pokemon Cartridge (`pokemon_cart.fap`), installed next to `pokemon.fap` (see [Installation Directions](#installation-directions)): the Flipper loads an app into its RAM whole, and the cartridge code doesn't fit beside the trade code. `Cartridge` is in the Gen III menu while no trade runs. Choosing it closes Pokemon Trade Tool and opens Pokemon Cartridge, which you can also open from the app list; leaving it returns to the app list. Closing Pokemon Trade Tool loses the Pokemon in its editor, so `Save .pk3` it first if you want to keep it. If `pokemon_cart.fap` isn't next to `pokemon.fap`, an `App missing` dialog says where to copy it. The pins are set in Pokemon Trade Tool's [Pinout](#pinout) screen, and Cartridge uses the same ones.
+
+**Connecting.** With the GBA off and the cartridge in it, put the cable's small plug into the Flipper and the other into the GBA, and press `Start`. Hold START+SELECT on the GBA and switch it on, holding them until the Nintendo logo is gone. The Flipper sends the GBA a small helper program over the cable (multiboot; the GBA's screen turns green), reads the cartridge, and backs up its save (about 70 s). Then the hub lists what you can do, headed by the game's name. `Cart info` shows the game code and revision, the save chip, the half of the chip the game loads, the trainer, whether writing is on (or why not), and the backup.
+
+**Backups.** Backups and `.pk3` files are in `apps_data/pokemon/gen3/` on the SD card, the backups in its `backups/` folder, named `<game code>_<TID>_<date>-<time>.sav`. Each is the whole 128 KB save chip, raw, as emulators and PKHeX load it, and is checked three ways before it counts: each piece's checksum on the link, the helper's own re-read of the chip, and a read-back from the SD card. Cartridge backs up at the first connect after it opens, again when a connect finds the save changed, and after every write and every restore. Nothing deletes old backups; delete the ones you no longer need yourself.
+
+**Editing.** `Party and boxes` lists the party and the 14 boxes. Open a Pokemon in the Gen III [editor](#editor), or in an empty slot choose `New Pokemon` (which takes the save's trainer as OT) or `Load .pk3`, then `Put` it there. Changed slots show `*`, and the hub shows `Write changes (<n>)` and `Discard changes`. The edits are kept on the SD card until you write them; closing Cartridge or saving in the game drops them. Eggs and Bad Eggs are left as they are. A Pokemon holding Mail can't be opened: take the Mail off in the game first. A Pokemon holding the ENIGMA BERRY, or an item Ruby doesn't have, can't be opened or put. The game's Pokedex isn't updated for the Pokemon you add.
+
+**Writing.** The game keeps two copies of its save on the chip and loads the newer valid one. `Write changes` writes your edits into the copy the game isn't using, with a save counter one higher, and checks every piece written; the copy the game was loading is kept until the end, as the fallback. It is designed so that if the cable comes out or the GBA loses power during a write, the game loads either the old save or the whole new one; `Retry` then reconnects, and `Write changes` again finishes the write. Every write ends with a new backup of the cart as it now is, checked against the chip. Then switch the GBA off and on to play. Nothing is written without a checked backup of the save as it was, and the chip's last four sectors (the Hall of Fame and the e-Reader or Trainer Tower data) are never written.
+
+**Which cartridges.** The Flipper and the helper each check the cartridge before any write: the game code (`AXVE`, `AXPE`, `BPRE` or `BPGE`), the save chip (a 128 KB Macronix or Sanyo flash, ID `09C2` or `1362`) and the ROM's save library. The helper refuses a write on its own if any check fails.
+
+- Genuine English Ruby, Sapphire, FireRed and LeafGreen: writing allowed.
+- Emerald, and Ruby, Sapphire, FireRed and LeafGreen in other Western languages: back up, browse and copy the ROM, no writing (`Writing off: Emerald: read only` or `English carts only`).
+- Japanese cartridges: back up and copy the ROM only.
+- Reproduction cartridges (an SRAM save, an unknown save chip, a ROM patched for another save type) are never written, and an SRAM save or a chip that isn't a 128 KB flash isn't read either. `Cart info` says why.
+- A save last written by another tool, or an empty or corrupt one, shows `Writing off: Save not recognised`. Save once in the game, then connect again.
+
+**Restore.** `Restore backup` writes a backup of this game, picked from `backups/`, onto the cart in the same way as a write, and shows both trainers first. It keeps the cart's Hall of Fame and e-Reader or Trainer Tower data. It also works on an empty or corrupt save, but not on a save another tool wrote last, which the game still loads: save once in the game first. Edits not yet written are lost, and the question says so.
+
+**Copy ROM.** `Copy ROM` copies the cartridge's ROM to `apps_data/pokemon/gen3/roms/<game code>_v<revision>.gba`, checking each piece against the helper and the SD card. A 16 MB game takes about 2.5 hours; keep both powered. Back offers to stop, and `Copy ROM` later resumes where it stopped.
+
+**Log.** Cartridge logs to `apps_data/pokemon/gen3_cart.log`, which it creates anew at the first `Start` after it opens. After a problem, copy it off the SD card before you open Cartridge again.
+
+**The helper.** The program the Flipper sends to the GBA is built from `gba/helper/` with the ufbt toolchain (`make -C gba/helper install`), which writes `files/gen3_helper.mb`; both apps ship that file. Never edit it by hand. `make -C gba/helper check` rebuilds it and checks that the result is byte for byte the committed file. Releasing: if `files/gen3_helper.mb` differs from the one in the last release, bump `HP_BUILD_ID` in `gba/helper/include/hp_version.h` (the tests in `tests/test_hp_link.c` that pin build 1 change with it), then run `make -C gba/helper install`. Development builds keep build 1, which version 3.1 ships.
+
 ### Link Test, log and checklists
 `Link Test` checks the link without trading: the Flipper acts as the other player in the game's Cable Club Trade Center, and shows the cable, the link's state, and the GBA player's name and TID. Plug in the cable as in [Cable](#cable).
 
@@ -482,6 +518,7 @@ The hardware checklists:
 - [Editor and `.pk3` files](docs/gen3/editor-test.md)
 - [Trading with Ruby](docs/gen3/hardware-test-2.md)
 - [FireRed: Link Test, trading, editor, `.pk3` files and a cartridge swap](docs/gen3/hardware-test-frlg.md)
+- [Cartridge: connect, backup, browse, edit and write, restore, ROM copy, with Ruby and FireRed](docs/gen3/hardware-test-3.md)
 
 ## How Does it Work?
 

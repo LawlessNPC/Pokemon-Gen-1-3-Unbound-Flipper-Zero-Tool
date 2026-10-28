@@ -107,6 +107,17 @@ uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap) {
     return c ? gen3_cart_changes(c) : 0;
 }
 
+void gen3_cart_ui_take_trainer(PokemonFap* pokemon_fap) {
+    const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
+    Gen3SaveTrainer t;
+    Gen3Trainer ot;
+
+    /* c: NULL while a job runs, which none does once the job has ended */
+    if(!c || !pokemon_fap->gen3_editor || !gen3_cart_trainer(c, &t)) return;
+    gen3_cart_trainer_ot(&t, &ot);
+    gen3_edit_set_trainer(pokemon_fap->gen3_editor, &ot);
+}
+
 void gen3_cart_ui_confirm(PokemonFap* pokemon_fap, uint32_t scene) {
     scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3CartLeave, scene);
     scene_manager_next_scene(pokemon_fap->scene_manager, scene);

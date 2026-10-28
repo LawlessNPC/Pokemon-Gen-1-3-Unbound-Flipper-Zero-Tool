@@ -1,8 +1,6 @@
 #include <src/scenes/include/pokemon_gen3_cart.h>
 
 #include <furi.h>
-#include <src/gen3/gen3_cart_id.h>
-#include <src/gen3/gen3_edit.h>
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* The Cartridge app's first scene: how to start the GBA, then the Connect job (send the helper,
@@ -52,18 +50,6 @@ static void gen3_cart_connect_start(PokemonFap* pokemon_fap) {
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewGen3CartProgress);
 }
 
-/* The editor's trainer is the save's, so a new Pokemon for this cart gets it as OT */
-static void gen3_cart_connect_trainer(PokemonFap* pokemon_fap) {
-    const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
-    Gen3SaveTrainer t;
-    Gen3Trainer ot;
-
-    /* c: NULL while a job runs, which none does once the Connect has ended */
-    if(!c || !pokemon_fap->gen3_editor || !gen3_cart_trainer(c, &t)) return;
-    gen3_cart_trainer_ot(&t, &ot);
-    gen3_edit_set_trainer(pokemon_fap->gen3_editor, &ot);
-}
-
 /* The job ended: the hub on Ok (with the dropped edits' notice first), else the failure, whose
  * OK and Retry both come back to the instructions */
 static void gen3_cart_connect_done(PokemonFap* pokemon_fap, const Gen3CartSessionStatus* st) {
@@ -78,7 +64,7 @@ static void gen3_cart_connect_done(PokemonFap* pokemon_fap, const Gen3CartSessio
         scene_manager_next_scene(scene_manager, PokemonSceneGen3CartResult);
         return;
     }
-    gen3_cart_connect_trainer(pokemon_fap);
+    gen3_cart_ui_take_trainer(pokemon_fap);
     scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, 0);
     scene_manager_next_scene(scene_manager, PokemonSceneGen3Cart);
     if(dropped) {

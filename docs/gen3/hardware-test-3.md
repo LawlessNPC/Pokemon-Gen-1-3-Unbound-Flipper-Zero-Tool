@@ -12,7 +12,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GB
 - **Save the Pokemon you are editing first.** Opening Cartridge closes Pokemon Trade Tool, and with it the Pokemon in its editor. Use `Save .pk3` first if you want to keep it.
 - **Assets.** After the first Cartridge start, `apps_assets/pokemon_cart/gen3_helper.mb` and `apps_assets/pokemon_cart/gen3_bulk.bin` exist on the SD card. The Flipper unpacks them from `pokemon_cart.fap`.
 - **Pins.** Set the pins in Pokemon Trade Tool's Pinout screen. Cartridge copies them at every start; it has no Pinout screen of its own.
-- **The log** is `apps_data/pokemon/gen3_cart.log`. It is created again on every Cartridge start (Start on the instructions), so after a failed run copy it off the SD card **before you open Cartridge again**. Keep the log from every failed run.
+- **The log** is `apps_data/pokemon/gen3_cart.log`. Cartridge creates it again at the first `Start` on the instructions after it opens, and later Starts in the same run add to it. So after a failed run, copy it off the SD card **before you open Cartridge again**. Keep the log from every failed run.
 - **Backups** are in `apps_data/pokemon/gen3/backups/`, named `<game code>_<TID>_<date>-<time>.sav`, for example `AXVE_12345_20261027-093015.sav`. Each is the whole 128 KB flash chip, as emulators and PKHeX load it. Cartridge never deletes one.
 - **The instructions screen** (`Cartridge`) reads: `GBA off, cart in.` / `Small plug: Flipper.` / `Hold START+SELECT` / `and power on.`, with `Back` and `Start`.
 - **The progress screen** shows what is happening on top, two lines under it, a bar, and at the bottom `Back: stop` (Back stops the step), `Do not power off` (while the save is being written), or nothing.
@@ -42,7 +42,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GB
 2. **The backup file.** In `apps_data/pokemon/gen3/backups/` there is `AXVE_<tid>_<date>-<time>.sav`, 131,072 bytes, whose date and time match Cart info's last line.
 3. **Optional:** it loads in mGBA (as the save of a Ruby ROM) or in PKHeX and shows your party.
 
-**The hub's items** from here on, each only when it applies: `Party and boxes`; `Write changes (<n>)` (n Pokemon changed and not yet written) or, when the cart can't be written, `Writing off: <why>`, which opens Cart info; `Discard changes`; `Reconnect`; `Back up again`; `Restore backup` (a cart that can be written, with a current backup, even if its save is empty or damaged); `Copy ROM`; `Cart info`. `Restore backup` and `Copy ROM` hide while `Reconnect` shows.
+**The hub's items** from here on, each only when it applies: `Party and boxes`; `Write changes (<n>)` (n Pokemon changed and not yet written) or, when the cart can't be written, `Writing off: <why>`, which opens Cart info; `Discard changes`; `Reconnect`; `Back up again`; `Restore backup` (a cart that can be written, with a current backup, even if its save is empty or damaged); `Copy ROM`; `Cart info`. `Restore backup` and `Copy ROM` hide while `Reconnect` shows. A save another tool wrote last, or an empty or corrupt one, shows `Writing off: Save not recognised`. On another tool's save, which the game still loads, `Restore backup` is hidden too: save once in the game, then connect again.
 
 ## C. Browse (Ruby)
 
@@ -81,14 +81,38 @@ The backup to restore is the `.sav` that A.3's connect made, from before D and E
 2. **Restore.** Choose `Restore backup` and pick the file again, then `Restore` (about 40 s). The Flipper shows `Writing` with `Do not power off`, then `Verifying` and `Saving backup`; Back does nothing meanwhile. Then `Restored`: `Restored and` / `verified. Power-cycle` / `the GBA to play.`
 3. **Play.** Switch the GBA off and on without the keys, and choose Continue. The game loads the save as it was at A: the party levels from before D, and none of E's Pokemon.
 4. **A save that was corrupt.** Restoring onto a cart whose save was corrupt: until you save once in the game, it may say `The save file is corrupt…` at each start. Save in the game once.
-5. **An edit not written.** Connect again, change a Pokemon, then choose `Restore backup` and pick any `.sav`: the question has a fourth line, `1 change is lost.` Choose `Cancel`: the hub still shows `Write changes (1)`. Discard the change.
+5. **An edit not written.** Connect again, change a Pokemon, then choose `Restore backup` and pick a `.sav` of this game (an `AXVE_...` file; one of another game gives `Can't restore` / `Not a valid backup` / `for this game.`): the question has a fourth line, `1 change is lost.` Choose `Cancel`: the hub still shows `Write changes (1)`. Discard the change.
 
 ## G. Copy ROM (Ruby)
 
 1. **Ask.** Choose `Copy ROM`: `Copy ROM?` / `16 MB, about` / `2 h 30 min.` / `Keep both powered.`, with `Cancel` and `Copy`.
 2. **Copy, then stop.** Choose `Copy`. The Flipper shows `Copying ROM`, the percent under it, the bar, and after about 10 s `<h> h <m> min left`; every two or three minutes `Checking ROM` shows for a moment. After 1 min, press Back: `Stop copying?` / `You can resume` / `later.`, with `Keep going` and `Stop`. `Keep going` returns to the copy, which went on meanwhile. Press Back again and choose `Stop`: `Stopping`, then `ROM copy stopped`: `Copy ROM again` / `to resume.`
-3. **Resume.** Choose `Copy ROM` again: `Resume copy?` / `<pct>% done`, with `Restart` and `Resume`. Choose `Resume`: the percent goes on from there, not from 0. (`Restart` would copy from 0 %.)
+3. **Resume.** Choose `Copy ROM` again: `Resume copy?` / `<pct>% done`, with `Restart` and `Resume`. Choose `Restart`: it asks again, `Restart copy?` / `<pct>% done is lost:` / `the copy starts` / `again from 0%.`, with `Cancel` and `Restart`. Choose `Cancel`: the hub. Choose `Copy ROM` again, then `Resume`: the percent goes on from there, not from 0.
 4. **Optional: finish** (about 2.5 h). `ROM copied`: `Verified.` / `roms/AXVE_v<n>.gba`. On the SD card, `apps_data/pokemon/gen3/roms/AXVE_v<n>.gba` is 16,777,216 bytes, and on a computer its `shasum` matches your revision's SHA-1 in `docs/gen3/multiboot-and-save.md` §3.6.
+
+## H. FireRed
+
+Repeat A–E with the FireRed cartridge in place of Ruby. A.4–A.7 may be skipped this time; D.6 (the link drop) may not. What differs:
+
+1. **Connect (A.3).** The hub is headed `POKEMON FIRE`.
+2. **Cart info and backup (B).** Cart info's header is `BPRE v0` or `BPRE v1`, and the backup is `BPRE_<tid>_<date>-<time>.sav`.
+3. **Browse, edit and write (C, D).** The party, the box names and the levels are FireRed's. After D.3 the game loads the edit (D.4) with no corrupt-save message, and after D.6 too.
+4. **Put (E).** In E.1, use BULBASAUR in place of TREECKO. After E.4, open the new BULBASAUR's summary in the game and write down what its trainer memo says.
+
+LeafGreen, if you have it (optional): the same, with `POKEMON LEAF` and `BPGE`.
+
+## R. Regression (Pokemon Trade Tool)
+
+1. **Link Test.** In Pokemon Trade Tool, Gen III → `Link Test` with Ruby still reaches `in Trade Center`: `docs/gen3/hardware-test-1.md` steps 4–8. Cartridge added a second link mode; the trade's own is unchanged.
+2. **Cartridge hides during a trade.** Gen III → `Trade`, then Back to the Gen III menu: it shows `End trade`, and neither `Link Test` nor `Cartridge`. Choose `End trade` (and `End` if it asks); once the trade has ended, the menu shows `Link Test` and `Cartridge` again. The Gen III menu now has seven items, ending `Link Test`, `Cartridge`; `docs/gen3/editor-test.md` A.1, written before Cartridge, counts six.
+3. **Gen I and Gen II.** Back to the main menu: `Gen I` and `Gen II` each open their own editors as before (`docs/gen3/editor-test.md` A.13).
+4. **Data missing.** Exit the app. On a computer, rename `apps_assets/pokemon/gen3_bulk.bin` to `gen3_bulk.bak`. Start Pokemon Trade Tool → Gen III → `Edit Pokemon`: `Data missing` shows, with `Gen III data file missing.` / `Delete apps_assets/pokemon` / `on the SD card, then reopen.`, and OK returns to the Gen III menu. Exit, delete the folder `apps_assets/pokemon`, and start the app again: `Edit Pokemon` opens the editor (`docs/gen3/editor-test.md` E.1).
+
+## M. Memory
+
+1. **Pokemon Trade Tool.** Start a trade and enter the Trade Center with Ruby (Gen III → `Trade`), then open `Edit Pokemon`. In the qFlipper CLI (or `ufbt cli`), run `free` and write down `Free heap size`. It must be at least 12,000, as in `docs/gen3/hardware-test-2.md` K.
+2. **Pokemon Cartridge.** During a Connect, while `Backing up save` shows, run `free` again and write down `Free heap size`. If it is under 4,000, report it.
+3. **No crash.** Neither app crashed or froze anywhere in A–H.
 
 ## Results
 
@@ -131,3 +155,37 @@ The backup to restore is the `.sav` that A.3's connect made, from before D and E
 | G.2 Time left shown; Keep going; Stop: `ROM copy stopped` | | |
 | G.3 `Resume copy?` (___ % done); the percent goes on | | |
 | G.4 ROM copied, size and SHA-1 match (optional) | | |
+| H.1 FireRed: hub `POKEMON FIRE` | | |
+| H.2 Cart info `BPRE v__`, backup `BPRE_...` | | |
+| H.3 FireRed: browse, edit, write; the game loads it (D.6 too) | | |
+| H.4 FireRed: put and write; trainer memo: ____ | | |
+| H LeafGreen (optional) | | |
+| R.1 Link Test reaches `in Trade Center` | | |
+| R.2 `Cartridge` hidden during a trade, back after it | | |
+| R.3 Gen I and Gen II editors | | |
+| R.4 Pokemon Trade Tool's `Data missing` | | |
+| M.1 Pokemon Trade Tool, free heap in a trade: ______ bytes | | |
+| M.2 Pokemon Cartridge, free heap while backing up: ______ bytes | | |
+| M.3 No crash in A–H | | |
+
+## On failure
+
+Report the step (for example `D.6`), what the Flipper and the GBA showed, and `apps_data/pokemon/gen3_cart.log`, copied off the SD card before you opened Cartridge again. For R.1, report `apps_data/pokemon/gen3_link.log` instead, as `docs/gen3/hardware-test-1.md` says.
+
+If a write or a restore failed, report it before you play the game. The backups in `backups/` hold the save from before.
+
+## If it fails (for whoever reads the log)
+
+The log's `cart` line is the cart as the helper found it; its `why` is the reason writing is off (1 header, 2 not a Pokemon game, 3 Japanese, 4 SRAM, 5 save chip, 6 save library, 7 region, 8 Emerald, 9 the save). The `mb` lines are the helper upload's; `last_fail` is 2 for a bad header, 8 for a bad CRC, and 9 when its 20 s ran out. `docs/gen3/multiboot-and-save.md` has the background.
+
+| Symptom | Likely cause | Try |
+|---|---|---|
+| Never leaves `Waiting for GBA` | the plugs (the small one goes in the Flipper), or START+SELECT not held while the GBA powered on | swap the plugs; switch the GBA off, then on holding START+SELECT until the logo is gone |
+| The log shows `mb restart` lines with `last_fail 2` (header) or `8` (CRC) | the GBA's boot ROM and the Flipper's timing, or its state after a bad header (multiboot-and-save.md M3, M4) | report the log |
+| `Connect failed`: `Power the GBA off,` / `hold START+SELECT,` / `power on, then Retry.` | the upload failed 4 times, or ran out of its 20 s (multiboot-and-save.md M4) | do as it says |
+| `Link lost` often during long jobs (backup, ROM copy) | stream mode's load on the Flipper (multiboot-and-save.md M18) | raise `GEN3_CART_GAP_TICKS` in `src/gen3/gen3_cart_furi.c` (1, then 2), and rebuild |
+| `Write failed` with `The GBA stopped answering.` or `Flash write failed.` | the chip's erase or program time (multiboot-and-save.md M10) | report the log's `cmd` lines |
+| `Writing off: ROM patched save type` on a genuine cart | a false hit in the helper's scan of the ROM for save-library names (multiboot-and-save.md §3.3) | report the log's `cart` line (`why 6`) and the game's revision |
+| `Writing off: Unknown save chip` on a genuine cart | a chip not in the table (multiboot-and-save.md §3.5) | report the log's `cart` line, whose `flash` is the chip's ID |
+| ROM copy ends `Check failed`, or `Bad cartridge header` on a genuine cart | ROM reads unstable at the helper's wait states (WAITCNT) | set `HP_WAITCNT` to `0x0003` in `gba/helper/gba/main.c`, run `make -C gba/helper install`, rebuild with `ufbt`, and install `pokemon_cart.fap` again |
+| `Helper file missing.` | `apps_assets/pokemon_cart/gen3_helper.mb` is missing or damaged | install `pokemon_cart.fap` again, or delete `apps_assets/pokemon_cart` and reopen Cartridge |

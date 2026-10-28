@@ -26,6 +26,24 @@ Gen3CartBack gen3_cart_screen_back(Gen3CartJob job) {
     return Gen3CartBackStop;
 }
 
+bool gen3_cart_screen_new_trainer(Gen3CartJob job, Gen3CartResult r) {
+    if(r != Gen3CartOk) return false;
+    switch(job) {
+    case Gen3CartJobConnect:
+    case Gen3CartJobBackup:
+    case Gen3CartJobRestore:
+        return true;
+    /* A write changes only the party and the boxes; the others keep the backup they had */
+    case Gen3CartJobWrite:
+    case Gen3CartJobDiscard:
+    case Gen3CartJobRestoreCheck:
+    case Gen3CartJobRom:
+    case Gen3CartJobReconnect:
+        break;
+    }
+    return false;
+}
+
 /* A write's or restore's flash steps: a power cut there leaves the slot being written half done */
 static bool cart_screen_flashing(Gen3CartJob job, Gen3CartStep step) {
     if(job != Gen3CartJobWrite && job != Gen3CartJobRestore) return false;
@@ -131,9 +149,11 @@ void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out)
     if(in->busy) return;
     out->browse = in->browsable;
     out->write = in->writable && in->changes > 0;
-    /* The save as backed up is Save's cause only with a current backup and its working copy */
+    /* The save as backed up is Save's cause only with a current backup, and a working copy unless
+     * there are no edits: an empty or corrupt save has neither, and is why */
     out->writing_off = !in->writable &&
-                       (in->why != Gen3CartRefuseSave || (in->backup_current && in->work_ok));
+                       (in->why != Gen3CartRefuseSave ||
+                        (in->backup_current && (in->work_ok || in->changes == 0)));
     /* a discard rebuilds the working copy from the backup */
     out->discard = in->changes > 0 && in->backup_current;
     out->reconnect = !in->linked;
@@ -591,6 +611,17 @@ void gen3_cart_screen_rom_resume(
         out,
         GEN3_CART_SCREEN_ASK_SIZE,
         "%u%% done",
+        (unsigned)(rom_size ? (uint64_t)done * 100u / rom_size : 0u));
+}
+
+void gen3_cart_screen_rom_restart(
+    uint32_t done,
+    uint32_t rom_size,
+    char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    snprintf(
+        out,
+        GEN3_CART_SCREEN_ASK_SIZE,
+        "%u%% done is lost:\nthe copy starts\nagain from 0%%.",
         (unsigned)(rom_size ? (uint64_t)done * 100u / rom_size : 0u));
 }
 

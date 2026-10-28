@@ -86,6 +86,21 @@ TEST(test_back) {
     ASSERT_EQ(gen3_cart_screen_back(Gen3CartJobRom), Gen3CartBackAsk);
 }
 
+/* The editor's trainer is the save's: taken again after each job that may leave another save's
+ * backup, so a new Pokemon gets the OT of the save now on the cart */
+TEST(test_new_trainer) {
+    for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
+        const Gen3CartJob job = all_jobs[j];
+        const bool takes = job == Gen3CartJobConnect || job == Gen3CartJobBackup ||
+                           job == Gen3CartJobRestore;
+        ASSERT_EQ(gen3_cart_screen_new_trainer(job, Gen3CartOk), takes);
+        /* Anything else leaves no new backup, or none at all: the trainer stays */
+        for(int r = Gen3CartOk + 1; r <= Gen3CartLinkBusy; r++) {
+            ASSERT_FALSE(gen3_cart_screen_new_trainer(job, (Gen3CartResult)r));
+        }
+    }
+}
+
 TEST(test_progress_connect_steps) {
     Gen3CartScreenProgress p;
 
@@ -458,14 +473,20 @@ TEST(test_hub) {
     ASSERT_FALSE(h.restore);
     ASSERT_FALSE(h.rom);
     ASSERT_TRUE(h.reconnect);
-    /* Restore needs only can_write and a current backup, not a save to write: an empty one */
+    /* Restore needs only can_write and a current backup, not a save to write: an empty or corrupt
+     * one, which the game doesn't load, so it has no working copy and no edits. The save is why
+     * writing is off, and the hub says so. */
     in = hub_in();
     in.browsable = false;
     in.writable = false;
     in.why = Gen3CartRefuseSave;
+    in.work_ok = false;
     hub(&in, &h);
     ASSERT_TRUE(h.restore);
     ASSERT_TRUE(h.writing_off);
+    ASSERT_FALSE(h.discard);
+    ASSERT_FALSE(h.backup);
+    ASSERT_FALSE(h.browse);
 
     /* While a job runs, the cart isn't read: none of them */
     in = hub_in();
@@ -975,12 +996,22 @@ TEST(test_rom_texts) {
     ASSERT_STR_EQ(t, "98% done");
     gen3_cart_screen_rom_resume(5, 0, t);
     ASSERT_STR_EQ(t, "0% done");
+    /* Resume copy?'s Restart asks again: what it removes */
+    gen3_cart_screen_rom_restart(4u * 1048576u, 16u * 1048576u, t);
+    ASSERT_STR_EQ(t, "25% done is lost:\nthe copy starts\nagain from 0%.");
+    gen3_cart_screen_rom_restart(16u * 1048576u - 0x40000u, 16u * 1048576u, t);
+    ASSERT_STR_EQ(t, "98% done is lost:\nthe copy starts\nagain from 0%.");
+    gen3_cart_screen_rom_restart(5, 0, t);
+    ASSERT_STR_EQ(t, "0% done is lost:\nthe copy starts\nagain from 0%.");
+    gen3_cart_screen_rom_restart(100, 100, t);
+    ASSERT_TRUE(fits(t, 4, GEN3_CART_SCREEN_LINE_LEN));
     gen3_cart_screen_rom_done("roms/AXVE_v1.gba", t);
     ASSERT_STR_EQ(t, "Verified.\nroms/AXVE_v1.gba");
     gen3_cart_screen_rom_done("roms/BPRE_v255.gba", t);
     ASSERT_TRUE(fits(t, 3, GEN3_CART_SCREEN_LINE_LEN));
-    static const char* const headers[] = {"Copy ROM?", "Resume copy?", "Stop copying?"};
-    for(size_t k = 0; k < 3; k++) ASSERT_TRUE(fits(headers[k], 1, GEN3_CART_SCREEN_TITLE_LEN));
+    static const char* const headers[] = {
+        "Copy ROM?", "Resume copy?", "Restart copy?", "Stop copying?"};
+    for(size_t k = 0; k < 4; k++) ASSERT_TRUE(fits(headers[k], 1, GEN3_CART_SCREEN_TITLE_LEN));
     ASSERT_TRUE(fits("You can resume\nlater.", 4, GEN3_CART_SCREEN_LINE_LEN));
 }
 
@@ -1234,6 +1265,7 @@ TEST(test_leave_text) {
 
 int main(void) {
     RUN(test_back);
+    RUN(test_new_trainer);
     RUN(test_progress_connect_steps);
     RUN(test_progress_cable);
     RUN(test_power_hint);

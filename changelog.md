@@ -1,5 +1,11 @@
 # Changelog - Patch Notes
 
+## Version 3.1
+**New Features**
+- Gen III cartridge save access (experimental): back up, browse and edit the party and boxes, write back with verify, restore, copy ROM
+- Cartridge is a second app, `pokemon_cart.fap`; install it next to `pokemon.fap`
+- Writing is allowed only for English Ruby, Sapphire, FireRed and LeafGreen; not yet tested on hardware. The hardware checklist is `docs/gen3/hardware-test-3.md`
+
 ## Version 3.0
 **New Features**
 - Gen III (Game Boy Advance, non-Japanese): Cable Club trades with Ruby, Sapphire, FireRed and LeafGreen, one Pokemon at a time and back again without leaving the Trade Center

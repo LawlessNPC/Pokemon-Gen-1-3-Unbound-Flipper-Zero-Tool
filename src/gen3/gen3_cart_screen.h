@@ -38,6 +38,11 @@ typedef enum {
 } Gen3CartBack;
 Gen3CartBack gen3_cart_screen_back(Gen3CartJob job);
 
+/* The job ended with r and may have left the backup of another save than the one the editor's
+ * trainer came from: a Connect, a Back up again or a Restore that is Ok. The editor then takes the
+ * save's trainer again (gen3_cart_trainer), so a new Pokemon gets the OT of the save on the cart. */
+bool gen3_cart_screen_new_trainer(Gen3CartJob job, Gen3CartResult r);
+
 /* Which status the progress screen shows */
 typedef enum {
     /* the job was just handed to the session: its status may still hold the last job's step */
@@ -88,8 +93,9 @@ typedef struct {
     bool browse; /* "Party and boxes" */
     bool write; /* "Write changes (<n>)": writable, with changes */
     /* "Writing off: <why>", which opens Cart info: not writable, for the cart's reason or the
-     * save's. Not when the save isn't why: no current backup (Back up again shows) or no working
-     * copy (Discard rebuilds it), which why also reads as Save. */
+     * save's. Not when the save isn't why: no current backup (Back up again shows), or edits with
+     * no working copy (Discard rebuilds it), which why also reads as Save. An empty or corrupt
+     * save, with no working copy and no edits, is why. */
     bool writing_off;
     bool discard; /* "Discard changes": changes, and a current backup to build them from */
     /* not linked: a command was lost, or a connect (a Reconnect) didn't run to its end */
@@ -250,6 +256,12 @@ void gen3_cart_screen_restore_ask(
 void gen3_cart_screen_rom_ask(uint32_t rom_size, char out[GEN3_CART_SCREEN_ASK_SIZE]);
 /* Under "Resume copy?": "<pct>% done" (done of rom_size, rounded down) */
 void gen3_cart_screen_rom_resume(
+    uint32_t done,
+    uint32_t rom_size,
+    char out[GEN3_CART_SCREEN_ASK_SIZE]);
+/* Under "Restart copy?", which Resume copy?'s Restart asks before the .part is removed:
+ * "<pct>% done is lost:\nthe copy starts\nagain from 0%." (pct as gen3_cart_screen_rom_resume) */
+void gen3_cart_screen_rom_restart(
     uint32_t done,
     uint32_t rom_size,
     char out[GEN3_CART_SCREEN_ASK_SIZE]);

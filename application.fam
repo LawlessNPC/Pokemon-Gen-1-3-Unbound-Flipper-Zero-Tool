@@ -5,7 +5,7 @@ App(
     entry_point="pokemon_app",
     requires=["gui"],
     stack_size=2 * 1024,
-    fap_version=[3,0],
+    fap_version=[3,1],
     fap_category="GPIO",
     sources=["*.c*", "!tests", "!gba", "!cart", "!pokemon_gen3_cart*.c"],
     fap_icon="pokemon_10px.png",
@@ -30,7 +30,7 @@ App(
     entry_point="pokemon_cart_app",
     requires=["gui"],
     stack_size=2 * 1024,
-    fap_version=[3,0],
+    fap_version=[3,1],
     fap_category="GPIO",
     cdefines=["POKEMON_CART_APP"],
     sources=[

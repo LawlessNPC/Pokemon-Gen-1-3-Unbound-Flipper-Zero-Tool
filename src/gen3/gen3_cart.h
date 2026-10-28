@@ -265,7 +265,9 @@ Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stam
 /* gen3_cart_restore's own condition, before the file: can_write (not writable: a save the Flipper
  * won't write over may still be restored over), a current backup, and on it either a save to keep
  * (strict, not padded) or none the game loads (Empty or Corrupt). A save the game loads that is
- * neither is Refused: writing the other slot could leave the game loading neither. */
+ * padded or not strict is Refused: the slot it is in is the one a restore keeps, and the helper's
+ * full-length check fails a padded kept slot; and a slot that isn't strict has no counter the game
+ * is sure to beat. */
 bool gen3_cart_restorable(const Gen3Cart* c);
 /* After LinkLost or BusyTimeout: gen3_cart_connect (HELLO tried for the lost command's budget,
  * CART_INFO, SAVE_PROBE); then, if there was a current backup, the cart must still be its cart
