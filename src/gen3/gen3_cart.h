@@ -494,6 +494,9 @@ typedef struct {
     Gen3MbStatus mb; /* Connect: the multiboot sender's, during MbWait and MbSend */
     bool link_up; /* the helper answered the last command */
     bool dropped; /* Connect: edits that were pending were dropped (gen3_cart_attach) */
+    /* Connect and Reconnect: a write or restore cut short that it found done, and finished
+     * (gen3_cart_finished) */
+    Gen3CartFinished finished;
     Gen3SaveTrainer restore_trainer; /* RestoreCheck: the backup's trainer */
     bool restore_has_trainer;
 } Gen3CartSessionStatus;

@@ -493,6 +493,7 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     r = gen3_cart_attach(&s->cart, s->stamp, &dropped);
     cart_lock(s);
     s->status.dropped = dropped;
+    s->status.finished = gen3_cart_finished(&s->cart);
     cart_unlock(s);
     return r;
 }
@@ -531,6 +532,9 @@ static Gen3CartResult cart_job(Gen3CartSession* s, Gen3CartJob job) {
         return gen3_cart_rom_dump(c, arg && strcmp(arg, "resume") == 0);
     case Gen3CartJobReconnect: {
         const Gen3CartResult r = gen3_cart_reconnect(c);
+        cart_lock(s);
+        s->status.finished = gen3_cart_finished(c);
+        cart_unlock(s);
         /* Ok or Changed: its connect ran to its end */
         if(r == Gen3CartOk || r == Gen3CartChanged) cart_log_cart(s);
         return r;
@@ -566,10 +570,11 @@ static void cart_run_one(Gen3CartSession* s, Gen3CartJob job) {
     const Gen3CartResult r = cart_job(s, job);
     CART_LOG(
         s,
-        "job %s end %s resends %lu",
+        "job %s end %s resends %lu finished %u",
         cart_job_name(job),
         cart_result_name(r),
-        (unsigned long)(s->cli.resends - resends));
+        (unsigned long)(s->cli.resends - resends),
+        (unsigned)s->status.finished);
     if(s->cart_ready && job != Gen3CartJobDiscard && job != Gen3CartJobRestoreCheck &&
        job != Gen3CartJobRom) {
         cart_log_slots(s);
@@ -600,6 +605,7 @@ static int32_t cart_worker(void* ctx) {
             s->status.done = 0;
             s->status.total = 0;
             s->status.dropped = false;
+            s->status.finished = Gen3CartFinishedNone;
             s->status.restore_has_trainer = false;
             /* A Connect's multiboot starts afresh: never show the last run's */
             if(job == Gen3CartJobConnect) memset(&s->status.mb, 0, sizeof(s->status.mb));

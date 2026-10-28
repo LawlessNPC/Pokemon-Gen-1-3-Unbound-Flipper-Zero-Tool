@@ -50,15 +50,18 @@ static void gen3_cart_connect_start(PokemonFap* pokemon_fap) {
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewGen3CartProgress);
 }
 
-/* The job ended: the hub on Ok (with the dropped edits' notice first), else the failure, whose
- * OK and Retry both come back to the instructions */
+/* The job ended: the hub on Ok (with the dropped edits' notice first, or the result of a write or
+ * restore cut short that the Connect finished), else the failure, whose OK and Retry both come
+ * back to the instructions */
 static void gen3_cart_connect_done(PokemonFap* pokemon_fap, const Gen3CartSessionStatus* st) {
     SceneManager* scene_manager = pokemon_fap->scene_manager;
+    /* st is the status buffer, which the calls below read again */
     const Gen3CartResult r = st->result;
     const Gen3CartStep step = st->step;
     const bool dropped = st->dropped;
+    const Gen3CartJob job = gen3_cart_screen_result_job(Gen3CartJobConnect, r, st->finished);
 
-    if(r != Gen3CartOk) {
+    if(r != Gen3CartOk && job == Gen3CartJobConnect) {
         gen3_cart_ui_set_result(
             pokemon_fap, Gen3CartJobConnect, step, r, false, PokemonSceneGen3CartConnect);
         scene_manager_next_scene(scene_manager, PokemonSceneGen3CartResult);
@@ -67,9 +70,8 @@ static void gen3_cart_connect_done(PokemonFap* pokemon_fap, const Gen3CartSessio
     gen3_cart_ui_take_trainer(pokemon_fap);
     scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, 0);
     scene_manager_next_scene(scene_manager, PokemonSceneGen3Cart);
-    if(dropped) {
-        gen3_cart_ui_set_result(
-            pokemon_fap, Gen3CartJobConnect, step, r, true, PokemonSceneGen3Cart);
+    if(dropped || job != Gen3CartJobConnect) {
+        gen3_cart_ui_set_result(pokemon_fap, job, step, r, dropped, PokemonSceneGen3Cart);
         scene_manager_next_scene(scene_manager, PokemonSceneGen3CartResult);
     }
 }

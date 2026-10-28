@@ -9,6 +9,7 @@
 #include <hp_save.h>
 #include <stdbool.h>
 #include <src/gen3/gen3_cart.h>
+#include <src/gen3/gen3_cart_screen.h>
 #include <src/gen3/gen3_edit.h>
 #include <src/gen3/gen3_hcli.h>
 #include <src/gen3/gen3_hlink.h>
@@ -1834,6 +1835,52 @@ TEST(test_write_ok_unlinks) {
     ASSERT_TRUE(gen3_cart_linked(&cart));
 }
 
+/* The hub's items as the hub scene reads them from the cart */
+static Gen3CartScreenHub hub_now(void) {
+    Gen3CartScreenHubIn in;
+    Gen3CartScreenHub h;
+    gen3_cart_screen_hub_in(&cart, &in);
+    gen3_cart_screen_hub(&in, &h);
+    return h;
+}
+
+/* After "Power-cycle the GBA to play" (a write or a restore that ended Ok), the hub offers
+ * Reconnect, not Restore backup or Copy ROM, which would fail on the helper the power cycle ends;
+ * after the reconnect, both again. While a job runs (no cart), no item. */
+TEST(test_hub_after_write) {
+    ASSERT_TRUE(backed_up());
+    Gen3CartScreenHub h = hub_now();
+    ASSERT_FALSE(h.reconnect);
+    ASSERT_TRUE(h.restore);
+    ASSERT_TRUE(h.rom);
+    ASSERT_TRUE(edit_party());
+    h = hub_now();
+    ASSERT_TRUE(h.write);
+    ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartOk);
+    h = hub_now();
+    ASSERT_TRUE(h.reconnect);
+    ASSERT_FALSE(h.restore);
+    ASSERT_FALSE(h.rom);
+    ASSERT_TRUE(h.browse);
+    ASSERT_FALSE(h.write);
+    ASSERT_FALSE(h.backup);
+    ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
+    h = hub_now();
+    ASSERT_FALSE(h.reconnect);
+    ASSERT_TRUE(h.restore);
+    ASSERT_TRUE(h.rom);
+    ASSERT_EQ(gen3_cart_restore(&cart, BACKUP_NAME, STAMP3), Gen3CartOk);
+    h = hub_now();
+    ASSERT_TRUE(h.reconnect);
+    ASSERT_FALSE(h.restore);
+    ASSERT_FALSE(h.rom);
+    Gen3CartScreenHubIn in;
+    gen3_cart_screen_hub_in(NULL, &in);
+    ASSERT_TRUE(in.busy);
+    gen3_cart_screen_hub(&in, &h);
+    ASSERT_FALSE(h.reconnect || h.restore || h.rom || h.browse || h.write);
+}
+
 /* Erase 0 of 14 is reported before the first erase runs, so the screen says not to power off for
  * that one as well */
 TEST(test_write_reports_erase_first) {
@@ -2683,6 +2730,7 @@ int main(void) {
     RUN(test_resolve_cut_after_commits_then_edit);
     RUN(test_resolve_uses_own_crcs);
     RUN(test_write_ok_unlinks);
+    RUN(test_hub_after_write);
     RUN(test_write_reports_erase_first);
     RUN(test_attach_other_cart_same_save);
     RUN(test_kept_slot_compared);

@@ -44,6 +44,21 @@ bool gen3_cart_screen_new_trainer(Gen3CartJob job, Gen3CartResult r) {
     return false;
 }
 
+Gen3CartJob
+    gen3_cart_screen_result_job(Gen3CartJob job, Gen3CartResult r, Gen3CartFinished finished) {
+    if(job != Gen3CartJobConnect && job != Gen3CartJobReconnect) return job;
+    if(r != Gen3CartOk && r != Gen3CartWrittenNoBackup) return job;
+    switch(finished) {
+    case Gen3CartFinishedWrite:
+        return Gen3CartJobWrite;
+    case Gen3CartFinishedRestore:
+        return Gen3CartJobRestore;
+    case Gen3CartFinishedNone:
+        break;
+    }
+    return job;
+}
+
 /* A write's or restore's flash steps: a power cut there leaves the slot being written half done */
 static bool cart_screen_flashing(Gen3CartJob job, Gen3CartStep step) {
     if(job != Gen3CartJobWrite && job != Gen3CartJobRestore) return false;
@@ -142,6 +157,21 @@ bool gen3_cart_screen_power_hint(const Gen3CartSessionStatus* st) {
     return st->busy && st->job == Gen3CartJobConnect && st->step == Gen3CartStepMbWait &&
            st->cable_ok && st->mb.waiting_us >= GEN3_CART_SCREEN_HINT_US && st->mb.restarts == 0 &&
            st->mb.last_fail == Gen3MbFailNone;
+}
+
+void gen3_cart_screen_hub_in(const Gen3Cart* c, Gen3CartScreenHubIn* in) {
+    memset(in, 0, sizeof(*in));
+    in->busy = c == NULL;
+    if(!c) return;
+    in->linked = gen3_cart_linked(c);
+    in->backup_current = gen3_cart_backup_current(c);
+    in->can_read_save = gen3_cart_id(c)->can_read_save;
+    in->browsable = gen3_cart_browsable(c);
+    in->writable = gen3_cart_writable(c, &in->why);
+    in->work_ok = gen3_cart_work_ok(c);
+    in->restorable = gen3_cart_restorable(c);
+    in->has_rom = gen3_cart_rom_size(c) > 0;
+    in->changes = gen3_cart_changes(c);
 }
 
 void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out) {

@@ -40,8 +40,16 @@ Gen3CartBack gen3_cart_screen_back(Gen3CartJob job);
 
 /* The job ended with r and may have left the backup of another save than the one the editor's
  * trainer came from: a Connect, a Back up again or a Restore that is Ok. The editor then takes the
- * save's trainer again (gen3_cart_trainer), so a new Pokemon gets the OT of the save on the cart. */
+ * save's trainer again (gen3_cart_trainer), so a new Pokemon gets the OT of the save on the cart.
+ * job: gen3_cart_screen_result_job's, so that a Reconnect that finished a restore counts. */
 bool gen3_cart_screen_new_trainer(Gen3CartJob job, Gen3CartResult r);
+
+/* The job whose result the screens show for job, which ended with r: a Connect or Reconnect that
+ * found a write or restore an earlier run left cut short, done on the cart, finished it
+ * (gen3_cart_finished, the status's finished): Ok or WrittenNoBackup, as that Write or Restore
+ * ending so ("Written", "Power-cycle the GBA to play"). Any other: job itself. */
+Gen3CartJob
+    gen3_cart_screen_result_job(Gen3CartJob job, Gen3CartResult r, Gen3CartFinished finished);
 
 /* Which status the progress screen shows */
 typedef enum {
@@ -88,6 +96,8 @@ typedef struct {
     bool has_rom; /* gen3_cart_rom_size > 0 */
     uint16_t changes; /* gen3_cart_changes */
 } Gen3CartScreenHubIn;
+/* The hub's input read from c, as the hub scene reads it: c NULL (a job runs) is busy */
+void gen3_cart_screen_hub_in(const Gen3Cart* c, Gen3CartScreenHubIn* in);
 /* The hub's items beyond Cart info, which is always there */
 typedef struct {
     bool browse; /* "Party and boxes" */
@@ -98,11 +108,13 @@ typedef struct {
      * save, with no working copy and no edits, is why. */
     bool writing_off;
     bool discard; /* "Discard changes": changes, and a current backup to build them from */
-    /* not linked: a command was lost, or a connect (a Reconnect) didn't run to its end */
+    /* not linked: a command was lost, a connect (a Reconnect) didn't run to its end, or a write or
+     * restore ended Ok, which says to power-cycle the GBA and so ends the helper */
     bool reconnect;
     bool backup; /* "Back up again": no current backup of a save the helper can read */
     /* "Restore backup" and "Copy ROM": linked, so that the cart's id and ROM size are the last
-     * whole connect's, and restorable or a ROM there; the hub offers Reconnect otherwise */
+     * whole connect's and the helper still runs, and restorable or a ROM there; the hub offers
+     * Reconnect otherwise */
     bool restore;
     bool rom;
 } Gen3CartScreenHub;

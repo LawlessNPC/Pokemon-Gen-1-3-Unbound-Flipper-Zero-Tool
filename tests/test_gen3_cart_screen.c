@@ -617,6 +617,63 @@ TEST(test_result_dropped) {
     ASSERT_STR_EQ(r.header, "Backed up");
 }
 
+/* A Connect or Reconnect that finished a write or restore cut short shows that one's result: the
+ * header and text of a Write or Restore that ended so, no Retry; and a Reconnect that finished a
+ * restore takes the new save's trainer, as a Restore does */
+TEST(test_result_finished) {
+    static const struct {
+        Gen3CartFinished finished;
+        Gen3CartJob job;
+    } as[] = {
+        {Gen3CartFinishedWrite, Gen3CartJobWrite},
+        {Gen3CartFinishedRestore, Gen3CartJobRestore},
+    };
+    static const Gen3CartJob by[] = {Gen3CartJobConnect, Gen3CartJobReconnect};
+    for(size_t i = 0; i < 2; i++) {
+        for(size_t b = 0; b < 2; b++) {
+            ASSERT_EQ(gen3_cart_screen_result_job(by[b], Gen3CartOk, as[i].finished), as[i].job);
+            ASSERT_EQ(
+                gen3_cart_screen_result_job(by[b], Gen3CartWrittenNoBackup, as[i].finished),
+                as[i].job);
+            /* nothing finished, or it didn't end so: the job's own */
+            ASSERT_EQ(gen3_cart_screen_result_job(by[b], Gen3CartOk, Gen3CartFinishedNone), by[b]);
+            ASSERT_EQ(gen3_cart_screen_result_job(by[b], Gen3CartLinkLost, as[i].finished), by[b]);
+            ASSERT_EQ(gen3_cart_screen_result_job(by[b], Gen3CartChanged, as[i].finished), by[b]);
+        }
+        /* only a Connect or a Reconnect settles one */
+        for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
+            const Gen3CartJob job = all_jobs[j];
+            if(job == Gen3CartJobConnect || job == Gen3CartJobReconnect) continue;
+            ASSERT_EQ(gen3_cart_screen_result_job(job, Gen3CartOk, as[i].finished), job);
+        }
+    }
+    Gen3CartScreenResult r;
+    const Gen3CartJob w =
+        gen3_cart_screen_result_job(Gen3CartJobReconnect, Gen3CartOk, Gen3CartFinishedWrite);
+    gen3_cart_screen_result(w, Gen3CartStepPostBackup, Gen3CartOk, false, false, &r);
+    ASSERT_STR_EQ(r.header, "Written");
+    ASSERT_STR_EQ(r.text, "Written and verified.\nPower-cycle the GBA\nto play.");
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    const Gen3CartJob rs =
+        gen3_cart_screen_result_job(Gen3CartJobConnect, Gen3CartOk, Gen3CartFinishedRestore);
+    gen3_cart_screen_result(rs, Gen3CartStepPostBackup, Gen3CartOk, false, false, &r);
+    ASSERT_STR_EQ(r.header, "Restored");
+    ASSERT_STR_EQ(r.text, "Restored and\nverified. Power-cycle\nthe GBA to play.");
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+    ASSERT_TRUE(gen3_cart_screen_new_trainer(rs, Gen3CartOk));
+    gen3_cart_screen_result(
+        gen3_cart_screen_result_job(
+            Gen3CartJobConnect, Gen3CartWrittenNoBackup, Gen3CartFinishedWrite),
+        Gen3CartStepPostBackup,
+        Gen3CartWrittenNoBackup,
+        false,
+        true,
+        &r);
+    ASSERT_STR_EQ(r.header, "Written");
+    ASSERT_STR_EQ(r.text, gen3_cart_result_text(Gen3CartWrittenNoBackup));
+    ASSERT_EQ(r.retry, Gen3CartRetryNone);
+}
+
 TEST(test_result_texts_fit) {
     for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
         for(int res = Gen3CartOk; res <= Gen3CartLinkBusy; res++) {
@@ -1278,6 +1335,7 @@ int main(void) {
     RUN(test_result_retry);
     RUN(test_result_after_commit);
     RUN(test_result_dropped);
+    RUN(test_result_finished);
     RUN(test_result_texts_fit);
     RUN(test_result_retry_unlinked);
     RUN(test_result_stopped);

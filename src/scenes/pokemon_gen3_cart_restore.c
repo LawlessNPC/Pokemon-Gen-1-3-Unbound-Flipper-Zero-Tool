@@ -9,7 +9,8 @@
 /* Restore backup: the file browser in the backups folder, then the Restore check job on the file
  * picked (gen3_cart_restore_check), whose Ok goes on to Restore backup? over the hub
  * (Gen3CartRestoreAsk). The browser's Back returns to the hub. The hub offers this only while
- * gen3_cart_restorable: can_write, not writable, so a cart whose save is empty or damaged can
+ * linked and gen3_cart_restorable, which asks for the identification's can_write, not for
+ * gen3_cart_writable: a cart whose save is empty or damaged, which isn't writable, can still
  * have a backup put back. */
 
 #define GEN3_CART_RESTORE_DIR GEN3_SHARED_DATA_DIR "/" GEN3_CART_BACKUP_DIR

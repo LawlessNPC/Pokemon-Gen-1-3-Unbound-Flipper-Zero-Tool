@@ -280,24 +280,12 @@ void pokemon_scene_gen3_cart_on_enter(void* context) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
     /* NULL while a job runs: then only Cart info, which waits for it too */
     Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
-    Gen3CartRefuse why = Gen3CartRefuseNone;
-    Gen3CartScreenHubIn in = {.busy = c == NULL};
+    Gen3CartScreenHubIn in;
     Gen3CartScreenHub items;
 
     /* Back here, nothing in the editor goes into a slot any more */
     ui->edit_mode = Gen3CartEditNone;
-    if(c) {
-        in.linked = gen3_cart_linked(c);
-        in.backup_current = gen3_cart_backup_current(c);
-        in.can_read_save = gen3_cart_id(c)->can_read_save;
-        in.browsable = gen3_cart_browsable(c);
-        in.writable = gen3_cart_writable(c, &why);
-        in.why = why;
-        in.work_ok = gen3_cart_work_ok(c);
-        in.restorable = gen3_cart_restorable(c);
-        in.has_rom = gen3_cart_rom_size(c) > 0;
-        in.changes = gen3_cart_changes(c);
-    }
+    gen3_cart_screen_hub_in(c, &in);
     gen3_cart_screen_hub(&in, &items);
 
     submenu_reset(submenu);
@@ -317,7 +305,7 @@ void pokemon_scene_gen3_cart_on_enter(void* context) {
             gen3_cart_writing_off_label,
             sizeof(gen3_cart_writing_off_label),
             "Writing off: %s",
-            gen3_cart_refuse_text(why));
+            gen3_cart_refuse_text(in.why));
         gen3_cart_add(pokemon_fap, gen3_cart_writing_off_label, GEN3_CART_ITEM_WRITING_OFF);
     }
     if(items.discard) gen3_cart_add(pokemon_fap, "Discard changes", GEN3_CART_ITEM_DISCARD);
