@@ -123,6 +123,17 @@ typedef struct {
     /* The latest failure, counted or not: a palette wait that saw only 0x7202 sets Palette */
     Gen3MbFail last_fail;
     uint8_t restarts; /* counted failures (all after detection succeeded) */
+    uint8_t cc; /* the slave's byte from its latest 0x73cc; 0 until one came */
+    uint8_t rr; /* the slave's byte from its latest 0x73rr; 0 until one came */
+    /* Every restart wait, counted or not (a detection drain, a palette wait that saw only
+     * 0x7202), up to UINT16_MAX */
+    uint16_t all_restarts;
+    /* Valid 0x7202 replies in the latest palette wait, up to UINT16_MAX: how long a slave took
+     * against GEN3_MB_PALETTE_US, at one reply a tick */
+    uint16_t palette_busy;
+    /* The latest Final that got its 0x0075: the time from its first 0x0065 to the end of the frame
+     * that 0x0075 came in, in link ticks (real time), against GEN3_MB_FINAL_US; 0 until one came */
+    uint32_t final_us;
     uint32_t sent; /* payload bytes acknowledged */
     uint32_t total; /* payload bytes to send: len - GEN3_MB_HEADER_LEN */
     uint32_t waiting_us; /* time in Wait and Detect since the last 0x7202 (UI hint after 3 s) */
@@ -139,6 +150,9 @@ typedef struct Gen3Mb {
     uint8_t restarts;
     uint8_t cc; /* the slave's byte from 0x73cc */
     uint8_t rr; /* the slave's byte from 0x73rr */
+    uint16_t all_restarts; /* every mb_wait */
+    uint16_t palette_busy; /* valid 0x7202 replies since Palette was last entered */
+    uint32_t final_us; /* Final: phase_us when the 0x0075 came */
     uint8_t junk; /* Detect: other replies since entering it */
     uint8_t tx_count; /* words in the frame in flight */
     bool stale; /* Detect: the next unmarked reply answers a word sent before Detect began */
@@ -167,6 +181,6 @@ void gen3_mb_init(Gen3Mb* mb, const uint8_t* img, uint32_t len, uint32_t seed);
 void gen3_mb_frame(Gen3Mb* mb, const MlinkRx* rx, MlinkTx* tx, uint32_t elapsed_us);
 
 /* Safe to call from a thread while the ISR runs: phase is one aligned field, written once per
- * change. sent, total, restarts, last_fail and waiting_us may be read mid-update: they are
- * progress only. */
+ * change. The other fields may be read mid-update: they are progress, and the log's record of the
+ * waits, only. */
 void gen3_mb_status(const Gen3Mb* mb, Gen3MbStatus* out);

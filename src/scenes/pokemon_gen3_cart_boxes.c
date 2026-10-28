@@ -3,6 +3,7 @@
 #include <stdio.h>
 
 #include <furi.h>
+#include <src/scenes/include/pokemon_gen3_menu.h>
 
 /* Party and boxes: the party with its count, then the save's 14 boxes by name, from the working
  * copy. Choosing one lists its slots. The scene state keeps the highlighted row. */
@@ -25,7 +26,10 @@ void pokemon_scene_gen3_cart_boxes_on_enter(void* context) {
 
     submenu_reset(submenu);
     submenu_set_header(submenu, "Party and boxes");
-    if(c && gen3_cart_browsable(c)) {
+    if(!gen3_menu_editor_ready(pokemon_fap)) {
+        /* The bulk file, opened again if a read failed since, is what the lists below need */
+        view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_EVENT_DATA_MISSING);
+    } else if(c && gen3_cart_browsable(c)) {
         snprintf(label, sizeof(label), "Party (%u/6)", (unsigned)gen3_cart_party_count(c));
         submenu_add_item(
             submenu, label, GEN3_CART_ITEM_BOXES, gen3_cart_boxes_callback, pokemon_fap);
@@ -56,6 +60,9 @@ bool pokemon_scene_gen3_cart_boxes_on_event(void* context, SceneManagerEvent eve
     if(event.type != SceneManagerEventTypeCustom) return false; /* Back: the hub */
     if(event.event == GEN3_CART_EVENT_HUB) {
         scene_manager_search_and_switch_to_previous_scene(scene_manager, PokemonSceneGen3Cart);
+        consumed = true;
+    } else if(event.event == GEN3_EVENT_DATA_MISSING) {
+        gen3_menu_show_data_missing(pokemon_fap);
         consumed = true;
     } else if(
         event.event >= GEN3_CART_ITEM_BOXES &&

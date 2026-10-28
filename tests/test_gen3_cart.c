@@ -1175,9 +1175,15 @@ TEST(test_job_mon_put_sd_error) {
     Gen3Pkm p;
     ASSERT_TRUE(level50(&p));
     fake_store_fail_write_after(&store, 0);
+    ASSERT_TRUE(gen3_cart_work_ok(&cart));
     ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartSdError);
+    ASSERT_FALSE(gen3_cart_work_ok(&cart));
     ASSERT_FALSE(gen3_cart_browsable(&cart));
-    ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
+    /* not the save's fault: the backup is current, and its save one to write */
+    ASSERT_TRUE(gen3_cart_backup_current(&cart));
+    Gen3CartRefuse why = Gen3CartRefuseNone;
+    ASSERT_FALSE(gen3_cart_writable(&cart, &why));
+    ASSERT_EQ(why, Gen3CartRefuseSave);
     /* even a first edit that failed counts as a change: Discard and the leave warning show */
     ASSERT_EQ(gen3_cart_changes(&cart), 1);
     ASSERT_TRUE(gen3_cart_mon_changed(&cart, 1, 19));
@@ -1188,6 +1194,7 @@ TEST(test_job_mon_put_sd_error) {
     ASSERT_EQ(gen3_cart_mon_put(&cart, 1, 19, &p), Gen3CartBadArg);
     fake_store_fail_write_after(&store, 1000);
     ASSERT_EQ(gen3_cart_discard(&cart), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_work_ok(&cart));
     ASSERT_TRUE(gen3_cart_browsable(&cart));
     ASSERT_TRUE(gen3_cart_writable(&cart, NULL));
     ASSERT_TRUE(work_is(flash(), &spec, 0));
@@ -1298,6 +1305,41 @@ TEST(test_job_rom_resume_space) {
     ASSERT_TRUE(api.remove(api.ctx, ROM_NAME));
     store.capacity = 800000u;
     ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartSdFull);
+}
+
+/* A copy from the start removes the .part first: its room counts as free, and nothing of it is
+ * kept */
+TEST(test_job_rom_restart_removes_part) {
+    ASSERT_TRUE(connected());
+    prog.cancel_step = Gen3CartStepRomRead;
+    prog.cancel_at = 600u * KIB;
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartCancelled);
+    uint32_t size = 0;
+    ASSERT_TRUE(file(PART_NAME, &size) != NULL);
+    ASSERT_EQ(size, 2u * REGION);
+    cancel = false;
+    prog.cancel_step = Gen3CartStepNone;
+    /* room for the whole ROM and a sector only once the .part has gone */
+    store.capacity = MIB + SECTOR_LEN + 1000u;
+    memset(hook.calls, 0, sizeof(hook.calls));
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartOk);
+    const uint8_t* rom = file(ROM_NAME, &size);
+    ASSERT_TRUE(rom != NULL);
+    ASSERT_EQ(size, MIB);
+    ASSERT_TRUE(is_rom(rom, size));
+    ASSERT_EQ(calls(GEN3_HCMD_ROM_READ), 256);
+    ASSERT_EQ(fake_store_count(&store, ".part"), 0);
+    /* not linked: nothing is removed */
+    prog.cancel_step = Gen3CartStepRomRead;
+    prog.cancel_at = 300u * KIB;
+    store.capacity = 64u * MIB;
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartCancelled);
+    cancel = false;
+    prog.cancel_step = Gen3CartStepNone;
+    cart.linked = false;
+    ASSERT_EQ(gen3_cart_rom_dump(&cart, false), Gen3CartLinkLost);
+    ASSERT_TRUE(file(PART_NAME, &size) != NULL);
+    ASSERT_EQ(size, REGION);
 }
 
 /* The card gives a region back differently: read once more, then VerifyFailed */
@@ -1507,7 +1549,7 @@ static Gen3CartMon open_at(uint8_t box, uint8_t slot) {
 }
 
 static Gen3CartMon close_at(uint8_t box, uint8_t slot, bool* put) {
-    return gen3_cart_mon_close(&cart, &ed, box, slot, orig, orig_len, rmon, put);
+    return gen3_cart_mon_close(&cart, &ed, box, slot, orig, orig_len, rmon, &scratch, put);
 }
 
 /* The slot's bytes in the working copy equal want's first len */
@@ -1610,8 +1652,9 @@ TEST(test_mon_open_party_slots) {
     ASSERT_EQ(open_at(1, 18), Gen3CartMonBadArg);
 }
 
-/* The editor can't load it (the bulk file unreadable, for the default moveset): nothing is opened,
- * the editor keeps what it held, and a close can't put that into the slot */
+/* The editor can't load it (the bulk file unreadable, for the default moveset): NoData, nothing is
+ * opened, staged or changed, and the editor keeps byte for byte what it held (an edit of another
+ * slot's Pokemon). Once the file reads again, the slot opens. */
 TEST(test_mon_open_needs_bulk) {
     ASSERT_TRUE(crafted_backed_up());
     ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 0), Gen3CartMonOk);
@@ -1646,6 +1689,78 @@ TEST(test_mon_close_puts_edit) {
     ASSERT_TRUE(slot_is(1, 19, rmon, 80));
     ASSERT_EQ(gen3_cart_changes(&cart), 2);
     ASSERT_EQ(gen3_cart_party_count(&cart), 3);
+}
+
+/* The slot's Pokemon, decrypted */
+static bool slot_pkm(uint8_t box, uint8_t slot, Gen3Pkm* out) {
+    uint8_t m[100];
+    size_t n = 0;
+    return gen3_cart_mon_get(&cart, box, slot, m, &n) == Gen3CartOk &&
+           gen3_save_mon_to_pkm(m, n, out);
+}
+
+/* A species changed in the editor makes a new Pokemon, met in Ruby: put back, it is this cart's
+ * game's again. Any other edit keeps where it was met. */
+static void mod_met_sapphire(Gen3Pkm* p) {
+    gen3_pkm_set(p, Gen3FieldMetGame, 1);
+}
+
+TEST(test_mon_close_species_met_game) {
+    /* a FireRed save whose party slot 0 and box 2 slot 20 hold a Pokemon met in Sapphire */
+    ASSERT_TRUE(default_save_for(FakeGameFRLG));
+    ASSERT_TRUE(crafted(mod_met_sapphire, party[0]));
+    fake_save_put_party(img, &spec, 0, 3, (const uint8_t(*)[100])party);
+    fake_save_put_box_mon(img, &spec, 0, 1, 19, party[0]);
+    insert("BPRE", MIB, FakeSaveFlash);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
+    ASSERT_EQ(gen3_cart_id(&cart)->met_game, 4);
+    Gen3Pkm p;
+    ASSERT_TRUE(slot_pkm(GEN3_SAVE_PARTY, 0, &p));
+    const uint32_t met = gen3_pkm_get(&p, Gen3FieldMetGame);
+    const uint32_t species = gen3_pkm_get(&p, Gen3FieldSpecies);
+    ASSERT_EQ(met, 1);
+    bool put = false;
+    /* a level: met where it was */
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 0), Gen3CartMonOk);
+    gen3_edit_set_level(&ed, 50);
+    ASSERT_EQ(close_at(GEN3_SAVE_PARTY, 0, &put), Gen3CartMonOk);
+    ASSERT_TRUE(put);
+    ASSERT_TRUE(slot_pkm(GEN3_SAVE_PARTY, 0, &p));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldMetGame), met);
+    /* another species: FireRed */
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 0), Gen3CartMonOk);
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 255));
+    ASSERT_EQ(gen3_pkm_get(&ed.pkm, Gen3FieldMetGame), GEN3_EDIT_MET_GAME);
+    ASSERT_EQ(close_at(GEN3_SAVE_PARTY, 0, &put), Gen3CartMonOk);
+    ASSERT_TRUE(put);
+    ASSERT_TRUE(slot_pkm(GEN3_SAVE_PARTY, 0, &p));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldMetGame), 4);
+    ASSERT_TRUE(gen3_pkm_get(&p, Gen3FieldSpecies) != species);
+    gen3_save_pkm_to_mon(&ed.pkm, 100, rmon);
+    ASSERT_TRUE(slot_is(GEN3_SAVE_PARTY, 0, rmon, 100));
+    /* one met in Ruby already: its species tells */
+    ASSERT_TRUE(slot_pkm(GEN3_SAVE_PARTY, 1, &p));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldMetGame), GEN3_EDIT_MET_GAME);
+    ASSERT_EQ(open_at(GEN3_SAVE_PARTY, 1), Gen3CartMonOk);
+    ASSERT_TRUE(gen3_edit_set_species(&ed, 255));
+    ASSERT_EQ(close_at(GEN3_SAVE_PARTY, 1, &put), Gen3CartMonOk);
+    ASSERT_TRUE(put);
+    ASSERT_TRUE(slot_pkm(GEN3_SAVE_PARTY, 1, &p));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldMetGame), 4);
+    /* another species and back again: still a new Pokemon, met in Ruby by the editor */
+    ASSERT_EQ(open_at(1, 19), Gen3CartMonOk);
+    ASSERT_TRUE(slot_pkm(1, 19, &p));
+    const uint32_t box_species = gen3_pkm_get(&p, Gen3FieldSpecies);
+    const uint16_t national = gen3_edit_national(&ed);
+    ASSERT_TRUE(gen3_edit_set_species(&ed, national == 252 ? 255 : 252));
+    ASSERT_TRUE(gen3_edit_set_species(&ed, national));
+    ASSERT_EQ(gen3_pkm_get(&ed.pkm, Gen3FieldSpecies), box_species);
+    ASSERT_EQ(close_at(1, 19, &put), Gen3CartMonOk);
+    ASSERT_TRUE(put);
+    ASSERT_TRUE(slot_pkm(1, 19, &p));
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldMetGame), 4);
+    ASSERT_EQ(gen3_pkm_get(&p, Gen3FieldSpecies), box_species);
 }
 
 /* An edited Pokemon the offer rules refuse, or gen3_pkm_check, isn't put; the slot keeps its own */
@@ -1839,6 +1954,7 @@ int main(void) {
     RUN(test_job_rom_resume);
     RUN(test_job_rom_resume_space);
     RUN(test_job_rom_resume_checks_last_region);
+    RUN(test_job_rom_restart_removes_part);
     RUN(test_job_rom_sd_readback_differs);
     RUN(test_job_rom_region_retry);
     RUN(test_job_rom_region_fails_twice);
@@ -1850,6 +1966,7 @@ int main(void) {
     RUN(test_mon_open_party_slots);
     RUN(test_mon_open_needs_bulk);
     RUN(test_mon_close_puts_edit);
+    RUN(test_mon_close_species_met_game);
     RUN(test_mon_close_refused);
     RUN(test_mon_place);
     RUN(test_result_texts);

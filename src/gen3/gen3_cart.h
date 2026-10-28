@@ -258,9 +258,15 @@ Gen3CartResult gen3_cart_restore_check(
  * itself is never written. A cart whose save is strict and not padded keeps it as the fallback:
  * the backup's goes to the slot the game doesn't load, with the counter N + 1. A cart with no save
  * the game loads (Empty or Corrupt) gets the backup's own counter and rotation. Refused unless
- * gen3_cart_restore_check is Ok (an SdError stays one), can_write, a current backup, and one of
- * those two saves; then as gen3_cart_write. Sectors 28..31 are never written. */
+ * gen3_cart_restorable, and then unless gen3_cart_restore_check is Ok (an SdError stays one); then
+ * as gen3_cart_write. Sectors 28..31 are never written. Ok drops the edits not written: the
+ * working copy is built again from the new backup. */
 Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stamp);
+/* gen3_cart_restore's own condition, before the file: can_write (not writable: a save the Flipper
+ * won't write over may still be restored over), a current backup, and on it either a save to keep
+ * (strict, not padded) or none the game loads (Empty or Corrupt). A save the game loads that is
+ * neither is Refused: writing the other slot could leave the game loading neither. */
+bool gen3_cart_restorable(const Gen3Cart* c);
 /* After LinkLost or BusyTimeout: gen3_cart_connect (HELLO tried for the lost command's budget,
  * CART_INFO, SAVE_PROBE); then, if there was a current backup, the cart must still be its cart
  * (header and flash id) with the same footers (READ_FOOTERS), the slot of a write or restore not
@@ -285,8 +291,12 @@ bool gen3_cart_backup_current(const Gen3Cart* c);
 bool gen3_cart_browsable(const Gen3Cart* c);
 /* can_write, and a current backup whose save is strict_ok and not padded, with its working copy.
  * When false, *why (why may be NULL) is the identification's reason, else Gen3CartRefuseSave: the
- * save as backed up isn't one to write, or there is no current backup of it. */
+ * save as backed up isn't one to write, or there is no current backup of it, or no working copy
+ * (gen3_cart_work_ok). */
 bool gen3_cart_writable(const Gen3Cart* c, Gen3CartRefuse* why);
+/* The working copy holds the backup's loaded slot plus exactly the edits counted. False after a
+ * store failure while editing (until gen3_cart_discard), or with no save to browse. */
+bool gen3_cart_work_ok(const Gen3Cart* c);
 
 /* The working copy, while browsable; box GEN3_SAVE_PARTY is the party. Each call reads or writes
  * the store. */
@@ -314,7 +324,9 @@ uint16_t gen3_cart_changes(const Gen3Cart* c); /* Pokemon slots changed */
 /* Opening a slot's Pokemon in the editor, and putting the editor's Pokemon into a slot: the only
  * ways the Cartridge app changes a Pokemon in the save. Nothing goes in that the game would not
  * take back as it was, or that the Flipper can't write back whole: the offer rules of a trade to
- * Ruby (gen3_trade_offer_check) hold for every Pokemon put, as gen3_pkm_check does. */
+ * Ruby (gen3_trade_offer_check) hold for every Pokemon put, as gen3_pkm_check does.
+ * gen3_cart_mon_open, _close and _place are for the app's thread only, while no job runs: they
+ * read and write the working copy, and the editor is the app's. */
 typedef enum {
     Gen3CartMonOk,
     Gen3CartMonEmpty, /* open: no Pokemon there; a new one may be put */
@@ -347,17 +359,21 @@ Gen3CartMon gen3_cart_mon_open(
     size_t* orig_len,
     Gen3Pkm* scratch);
 /* Puts the editor's Pokemon back into the slot gen3_cart_mon_open opened, if it was edited: its
- * orig_len bytes as the slot keeps them (into mon, the caller's) differ from orig. Only one that
- * gen3_pkm_check accepts and the offer rules allow is put (gen3_cart_mon_put); else their reason,
- * and nothing is put. *put: it was put. */
+ * orig_len bytes as the slot keeps them (into mon, the caller's) differ from orig. A species
+ * changed in the editor made a new Pokemon there, met in Ruby (gen3_edit_set_species): if its
+ * species or its MetGame isn't orig's, its MetGame becomes this cart's game, as a new one's does.
+ * Only one that gen3_pkm_check accepts and the offer rules allow is put (gen3_cart_mon_put); else
+ * their reason, and nothing is put. *put: it was put. mon and scratch: the caller's (not stack
+ * locals). */
 Gen3CartMon gen3_cart_mon_close(
     Gen3Cart* c,
-    const Gen3Editor* ed,
+    Gen3Editor* ed,
     uint8_t box,
     uint8_t slot,
     const uint8_t* orig,
     size_t orig_len,
     uint8_t mon[GEN3_PARTY_SIZE],
+    Gen3Pkm* scratch,
     bool* put);
 /* Puts the editor's Pokemon into a free slot: an empty box slot, or the party slot after the last,
  * which adds it to the party; another slot is Taken, so no Pokemon is ever written over. new_mon:
@@ -382,10 +398,11 @@ bool gen3_cart_rom_part(Gen3Cart* c, uint32_t* done_bytes);
  * appended to the .part, then the region's ROM_CRC32 and an SD read-back must both equal the CRC
  * of what came; a region that differs is read once more, then VerifyFailed. The .part keeps only
  * checked regions: any failure, cancel included, cuts it back to the last one. resume starts at
- * gen3_cart_rom_part's length, after checking the last region it keeps again. SdFull before any
- * ROM_READ unless rom_size - that length + 4096 is free. At the end the .part is renamed to
- * gen3_cart_rom_name's, replacing an older copy. Refused when rom_size is 0. Progress RomRead and
- * RomVerify in bytes; cancel between ROM_READs. */
+ * gen3_cart_rom_part's length, after checking the last region it keeps again; a copy that doesn't
+ * resume removes any .part first, so its room counts as free. SdFull before any ROM_READ unless
+ * rom_size - that length + 4096 is free. At the end the .part is renamed to gen3_cart_rom_name's,
+ * replacing an older copy. Refused when rom_size is 0, LinkLost unless linked, both before any
+ * file is touched. Progress RomRead and RomVerify in bytes; cancel between ROM_READs. */
 Gen3CartResult gen3_cart_rom_dump(Gen3Cart* c, bool resume);
 
 /* ---- The jobs as the Cartridge session runs them ---- */

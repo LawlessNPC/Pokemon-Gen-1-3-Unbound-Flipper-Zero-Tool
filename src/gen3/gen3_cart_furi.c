@@ -418,24 +418,30 @@ static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
     return Gen3CartOk;
 }
 
-/* cc and rr aren't in Gen3MbStatus: read for the log only, a byte each, so never torn */
+/* The sender's status, for the hardware check of its budgets: restarts counted and all, the
+ * slave's bytes, the latest palette wait's busy replies (GEN3_MB_PALETTE_US), and the time from
+ * the first 0x0065 to the 0x0075 (GEN3_MB_FINAL_US) */
 static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus* st) {
     CART_LOG(
         s,
-        "mb %s restarts %u last_fail %u cc %02x rr %02x sent %lu",
+        "mb %s restarts %u all %u last_fail %u cc %02x rr %02x palette_busy %u final_us %lu "
+        "sent %lu",
         what,
         (unsigned)st->restarts,
+        (unsigned)st->all_restarts,
         (unsigned)st->last_fail,
-        (unsigned)s->mb.cc,
-        (unsigned)s->mb.rr,
+        (unsigned)st->cc,
+        (unsigned)st->rr,
+        (unsigned)st->palette_busy,
+        (unsigned long)st->final_us,
         (unsigned long)st->sent);
 }
 
-/* Runs the sender to Done or Failed, MbWait while it looks for the GBA and MbSend after */
+/* Runs the sender to Done or Failed, MbWait while it looks for the GBA and MbSend after. Each
+ * restart is logged, counted or not; those between two polls in one line. */
 static Gen3CartResult cart_multiboot(Gen3CartSession* s) {
     Gen3MbStatus st;
-    uint8_t restarts = 0;
-    Gen3MbFail last_fail = Gen3MbFailNone;
+    uint16_t all_restarts = 0;
     for(;;) {
         gen3_mb_status(&s->mb, &st);
         const bool waiting = st.phase == Gen3MbPhaseWait || st.phase == Gen3MbPhaseDetect;
@@ -453,9 +459,8 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s) {
             cart_log_mb(s, "failed", &st);
             return Gen3CartMultibootFailed;
         }
-        if(st.restarts != restarts || st.last_fail != last_fail) {
-            restarts = st.restarts;
-            last_fail = st.last_fail;
+        if(st.all_restarts != all_restarts) {
+            all_restarts = st.all_restarts;
             cart_log_mb(s, "restart", &st);
         }
         if(s->cancel) return Gen3CartCancelled;

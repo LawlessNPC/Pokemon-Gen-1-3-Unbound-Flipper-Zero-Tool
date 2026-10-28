@@ -58,7 +58,8 @@ static void gen3_cart_connect_trainer(PokemonFap* pokemon_fap) {
     Gen3SaveTrainer t;
     Gen3Trainer ot;
 
-    if(!pokemon_fap->gen3_editor || !gen3_cart_trainer(c, &t)) return;
+    /* c: NULL while a job runs, which none does once the Connect has ended */
+    if(!c || !pokemon_fap->gen3_editor || !gen3_cart_trainer(c, &t)) return;
     gen3_cart_trainer_ot(&t, &ot);
     gen3_edit_set_trainer(pokemon_fap->gen3_editor, &ot);
 }

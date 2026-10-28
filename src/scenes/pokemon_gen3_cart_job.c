@@ -5,7 +5,9 @@
 
 /* Runs the job gen3_cart_ui_run_job set, once per run, on the progress view, then shows its
  * result. Coming back to it (from a scene over it) finds the job running and doesn't start it
- * again. Back stops a job that can stop; a Write, Restore or Discard runs to its end. */
+ * again. Back stops a job that can stop; a ROM copy asks first (Gen3CartRomStop), and runs on
+ * under the question; a Write, Restore or Discard runs to its end. A Restore check that passed
+ * goes on to Restore backup? instead of a result. */
 
 /* The session takes the job once the last one has ended; until then it is tried on every tick */
 static void gen3_cart_job_start(PokemonFap* pokemon_fap) {
@@ -15,6 +17,23 @@ static void gen3_cart_job_start(PokemonFap* pokemon_fap) {
     ui->job_started =
         gen3_cart_session_run(ui->session, ui->job, ui->arg[0] != '\0' ? ui->arg : NULL);
     if(ui->job_started) gen3_cart_ui_progress(pokemon_fap, Gen3CartScreenStarting);
+}
+
+/* The job ended */
+static void gen3_cart_job_end(PokemonFap* pokemon_fap, const Gen3CartSessionStatus* st) {
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    SceneManager* scene_manager = pokemon_fap->scene_manager;
+
+    if(ui->job == Gen3CartJobRestoreCheck && st->result == Gen3CartOk && st->restore_has_trainer) {
+        /* The file is a backup of this game: ask, over the hub, which Cancel returns to */
+        ui->restore_trainer = st->restore_trainer;
+        scene_manager_search_and_switch_to_previous_scene(scene_manager, PokemonSceneGen3Cart);
+        gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartRestoreAsk);
+        return;
+    }
+    gen3_cart_ui_set_result(
+        pokemon_fap, ui->job, st->step, st->result, false, PokemonSceneGen3Cart);
+    scene_manager_next_scene(scene_manager, PokemonSceneGen3CartResult);
 }
 
 static void gen3_cart_job_tick(PokemonFap* pokemon_fap) {
@@ -30,19 +49,28 @@ static void gen3_cart_job_tick(PokemonFap* pokemon_fap) {
             pokemon_fap, ui->job_stopping ? Gen3CartScreenStopping : Gen3CartScreenRunning);
         return;
     }
-    gen3_cart_ui_set_result(
-        pokemon_fap, ui->job, st->step, st->result, false, PokemonSceneGen3Cart);
-    scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartResult);
+    gen3_cart_job_end(pokemon_fap, st);
 }
 
 static void gen3_cart_job_back(PokemonFap* pokemon_fap) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
 
     if(!ui->job_started) return; /* nothing runs yet: its first tick starts it */
-    if(ui->job_stopping || gen3_cart_screen_back(ui->job) != Gen3CartBackStop) return;
-    gen3_cart_session_cancel(ui->session);
-    ui->job_stopping = true;
-    gen3_cart_ui_progress(pokemon_fap, Gen3CartScreenStopping);
+    if(ui->job_stopping) return;
+    switch(gen3_cart_screen_back(ui->job)) {
+    case Gen3CartBackIgnore:
+        break;
+    case Gen3CartBackAsk:
+        /* Stop copying? over this scene; one that has just ended shows its result instead */
+        if(gen3_cart_ui_status(pokemon_fap)->busy) {
+            gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartRomStop);
+        }
+        break;
+    case Gen3CartBackStop:
+        gen3_cart_ui_stop_job(pokemon_fap);
+        gen3_cart_ui_progress(pokemon_fap, Gen3CartScreenStopping);
+        break;
+    }
 }
 
 void pokemon_scene_gen3_cart_job_on_enter(void* context) {

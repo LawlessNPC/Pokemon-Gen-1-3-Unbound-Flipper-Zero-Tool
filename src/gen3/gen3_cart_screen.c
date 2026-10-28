@@ -15,10 +15,11 @@ Gen3CartBack gen3_cart_screen_back(Gen3CartJob job) {
     case Gen3CartJobRestore:
     case Gen3CartJobDiscard:
         return Gen3CartBackIgnore;
+    case Gen3CartJobRom:
+        return Gen3CartBackAsk;
     case Gen3CartJobConnect:
     case Gen3CartJobBackup:
     case Gen3CartJobRestoreCheck:
-    case Gen3CartJobRom:
     case Gen3CartJobReconnect:
         break;
     }
@@ -87,7 +88,7 @@ void gen3_cart_screen_progress(
         out->title = "Stopping";
         return;
     }
-    if(gen3_cart_screen_back(st->job) == Gen3CartBackStop) out->hint = CART_SCREEN_BACK_STOP;
+    if(gen3_cart_screen_back(st->job) != Gen3CartBackIgnore) out->hint = CART_SCREEN_BACK_STOP;
     /* Until the worker takes the job, its step and cable flag may be the last job's */
     if(state == Gen3CartScreenStarting) return;
 
@@ -130,10 +131,15 @@ void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out)
     if(in->busy) return;
     out->browse = in->browsable;
     out->write = in->writable && in->changes > 0;
-    out->writing_off = !in->writable;
-    out->discard = in->changes > 0;
+    /* The save as backed up is Save's cause only with a current backup and its working copy */
+    out->writing_off = !in->writable &&
+                       (in->why != Gen3CartRefuseSave || (in->backup_current && in->work_ok));
+    /* a discard rebuilds the working copy from the backup */
+    out->discard = in->changes > 0 && in->backup_current;
     out->reconnect = !in->linked;
     out->backup = !in->backup_current && in->can_read_save;
+    out->restore = in->linked && in->restorable;
+    out->rom = in->linked && in->has_rom;
 }
 
 /* A job Back stopped: what it was, not that it failed */
@@ -226,6 +232,13 @@ void gen3_cart_screen_result(
     if(job == Gen3CartJobWrite && r == Gen3CartOk) {
         out->text = "Written and verified.\nPower-cycle the GBA\nto play.";
     }
+    if(job == Gen3CartJobRestore && r == Gen3CartOk) {
+        out->text = "Restored and\nverified. Power-cycle\nthe GBA to play.";
+    }
+    /* Its name follows on screen (gen3_cart_screen_rom_done) */
+    if(job == Gen3CartJobRom && r == Gen3CartOk) out->text = "Verified.";
+    /* The .part keeps every region already checked */
+    if(job == Gen3CartJobRom && r == Gen3CartCancelled) out->text = "Copy ROM again\nto resume.";
     /* Each commit makes one more sector of the new slot valid, and after the last the game loads
      * that slot: once a commit may have gone out, the cart may load either save, and the write's
      * next run, after a Reconnect, finds which */
@@ -461,6 +474,149 @@ const char* gen3_cart_screen_check_text(Gen3Check c) {
     /* the one check text over a line: "Gen III data unreadable" */
     if(c == Gen3CheckNoData) return "Gen III data\nunreadable";
     return gen3_check_text(c);
+}
+
+Gen3CartSlotDo gen3_cart_screen_slot_entry(uint32_t state, Gen3CartEditMode mode) {
+    bool made = false;
+    switch(mode) {
+    case Gen3CartEditExisting:
+        if(state == Gen3CartSlotEdit) return Gen3CartSlotDoClose;
+        return Gen3CartSlotDoOpen;
+    case Gen3CartEditNew:
+    case Gen3CartEditLoaded:
+        made = true;
+        break;
+    case Gen3CartEditNone:
+        break;
+    }
+    if(made && state == Gen3CartSlotEdit) return Gen3CartSlotDoPut;
+    if(made && state == Gen3CartSlotReedit) return Gen3CartSlotDoEdit;
+    return Gen3CartSlotDoOpen;
+}
+
+/* ---- Restore and ROM copy ---- */
+
+Gen3CartScreenName gen3_cart_screen_restore_name(
+    const char* path,
+    const char* dir,
+    char name[GEN3_CART_NAME_MAX]) {
+    const size_t n = strlen(dir);
+    if(strncmp(path, dir, n) != 0 || path[n] != '/' || path[n + 1u] == '\0') {
+        return Gen3CartScreenNameOutside;
+    }
+    const char* rest = path + n + 1u;
+    const size_t len = strlen(rest);
+    if(len >= GEN3_CART_NAME_MAX) return Gen3CartScreenNameTooLong;
+    memcpy(name, rest, len + 1u);
+    return Gen3CartScreenNameOk;
+}
+
+const char* gen3_cart_screen_restore_name_text(Gen3CartScreenName n) {
+    switch(n) {
+    case Gen3CartScreenNameOk:
+        break;
+    case Gen3CartScreenNameOutside:
+        return "Pick a file in\ngen3/backups.";
+    case Gen3CartScreenNameTooLong:
+        return "File name too long.";
+    }
+    return "";
+}
+
+/* "Cart: BRENDAN 12345", or "Cart: no save" */
+static int
+    cart_screen_trainer(char* out, size_t size, const char* what, const Gen3SaveTrainer* t) {
+    if(!t) return snprintf(out, size, "%s: no save", what);
+    return snprintf(out, size, "%s: %.7s %05u", what, t->name, (unsigned)t->tid);
+}
+
+/* Appends what snprintf wrote at out + pos, keeping pos inside the buffer */
+static size_t cart_screen_at(size_t pos, int n, size_t size) {
+    if(n < 0) return pos;
+    pos += (size_t)n;
+    return pos < size ? pos : size - 1u;
+}
+
+void gen3_cart_screen_restore_ask(
+    const Gen3SaveTrainer* cart,
+    const Gen3SaveTrainer* file,
+    uint16_t changes,
+    char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    const size_t size = GEN3_CART_SCREEN_ASK_SIZE;
+    size_t pos = cart_screen_at(0, cart_screen_trainer(out, size, "Cart", cart), size);
+    pos = cart_screen_at(pos, snprintf(out + pos, size - pos, "\n"), size);
+    pos = cart_screen_at(pos, cart_screen_trainer(out + pos, size - pos, "File", file), size);
+    pos = cart_screen_at(pos, snprintf(out + pos, size - pos, "\nHall of Fame is kept."), size);
+    if(changes > 0) {
+        snprintf(
+            out + pos,
+            size - pos,
+            "\n%u %s lost.",
+            (unsigned)changes,
+            changes == 1 ? "change is" : "changes are");
+    }
+}
+
+/* "2 h 30 min", or "40 min" under an hour */
+static void cart_screen_h_min(char* out, size_t size, uint32_t minutes) {
+    if(minutes < 60u) {
+        snprintf(out, size, "%lu min", (unsigned long)minutes);
+    } else {
+        snprintf(
+            out,
+            size,
+            "%lu h %lu min",
+            (unsigned long)(minutes / 60u),
+            (unsigned long)(minutes % 60u));
+    }
+}
+
+void gen3_cart_screen_rom_ask(uint32_t rom_size, char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    const uint32_t s = rom_size / GEN3_CART_SCREEN_ROM_RATE;
+    char time[16];
+    cart_screen_h_min(time, sizeof(time), (s + 300u) / 600u * 10u);
+    snprintf(
+        out,
+        GEN3_CART_SCREEN_ASK_SIZE,
+        "%lu MB, about\n%s.\nKeep both powered.",
+        (unsigned long)(rom_size / 1048576u),
+        time);
+}
+
+void gen3_cart_screen_rom_resume(
+    uint32_t done,
+    uint32_t rom_size,
+    char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    snprintf(
+        out,
+        GEN3_CART_SCREEN_ASK_SIZE,
+        "%u%% done",
+        (unsigned)(rom_size ? (uint64_t)done * 100u / rom_size : 0u));
+}
+
+void gen3_cart_screen_rom_done(const char* name, char out[GEN3_CART_SCREEN_ASK_SIZE]) {
+    snprintf(out, GEN3_CART_SCREEN_ASK_SIZE, "Verified.\n%.21s", name);
+}
+
+void gen3_cart_screen_time_left(
+    uint32_t done0,
+    uint32_t done,
+    uint32_t total,
+    uint32_t elapsed_ms,
+    char out[GEN3_CART_SCREEN_LEFT_SIZE]) {
+    out[0] = '\0';
+    if(done <= done0 || done >= total || elapsed_ms < GEN3_CART_SCREEN_RATE_MS) return;
+    /* the bytes left at the rate so far, in ms rounded up: under 2^32 * 2^32, so no overflow */
+    const uint64_t copied = done - done0;
+    const uint64_t left_ms = ((uint64_t)(total - done) * elapsed_ms + copied - 1u) / copied;
+    const uint64_t minutes = (left_ms + 59999u) / 60000u;
+    if(minutes >= 100u * 60u) {
+        snprintf(out, GEN3_CART_SCREEN_LEFT_SIZE, "over 99 h left");
+        return;
+    }
+    char time[16];
+    cart_screen_h_min(time, sizeof(time), (uint32_t)minutes);
+    snprintf(out, GEN3_CART_SCREEN_LEFT_SIZE, "%s left", time);
 }
 
 void gen3_cart_screen_wrap(char* text) {

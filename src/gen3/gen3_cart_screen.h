@@ -11,9 +11,9 @@
 
 /* What the Cartridge app's screens show and offer, decided from the session's status and the
  * cart: the progress screen, the hub's items, Cart info, the result after a job, the leave
- * warning, and the party and box screens. Pure C, no heap, no file-scope state, so the host tests
- * check every text fits the 128-pixel screen, which breaks lines only at '\n': a line of at most
- * 21 characters, a title or header of at most 16. */
+ * warning, the party and box screens, and the restore and ROM copy questions. Pure C, no heap, no
+ * file-scope state, so the host tests check every text fits the 128-pixel screen, which breaks
+ * lines only at '\n': a line of at most 21 characters, a title or header of at most 16. */
 
 #define GEN3_CART_SCREEN_LINE_LEN 21u
 #define GEN3_CART_SCREEN_TITLE_LEN 16u
@@ -32,6 +32,9 @@ typedef enum {
     /* Back does nothing: Write, Restore and Discard run to their end, a cancel or not */
     Gen3CartBackIgnore,
     Gen3CartBackStop, /* gen3_cart_session_cancel, and wait for the job to end */
+    /* "Stop copying?" first (Gen3CartRomStop), the ROM copy running on under it: an hours-long
+     * job isn't stopped by one stray press */
+    Gen3CartBackAsk,
 } Gen3CartBack;
 Gen3CartBack gen3_cart_screen_back(Gen3CartJob job);
 
@@ -74,17 +77,28 @@ typedef struct {
     bool can_read_save;
     bool browsable; /* gen3_cart_browsable */
     bool writable; /* gen3_cart_writable */
+    Gen3CartRefuse why; /* gen3_cart_writable's, when not writable */
+    bool work_ok; /* gen3_cart_work_ok */
+    bool restorable; /* gen3_cart_restorable */
+    bool has_rom; /* gen3_cart_rom_size > 0 */
     uint16_t changes; /* gen3_cart_changes */
 } Gen3CartScreenHubIn;
 /* The hub's items beyond Cart info, which is always there */
 typedef struct {
     bool browse; /* "Party and boxes" */
     bool write; /* "Write changes (<n>)": writable, with changes */
-    bool writing_off; /* "Writing off: <why>", which opens Cart info: not writable */
-    bool discard; /* "Discard changes": changes */
+    /* "Writing off: <why>", which opens Cart info: not writable, for the cart's reason or the
+     * save's. Not when the save isn't why: no current backup (Back up again shows) or no working
+     * copy (Discard rebuilds it), which why also reads as Save. */
+    bool writing_off;
+    bool discard; /* "Discard changes": changes, and a current backup to build them from */
     /* not linked: a command was lost, or a connect (a Reconnect) didn't run to its end */
     bool reconnect;
     bool backup; /* "Back up again": no current backup of a save the helper can read */
+    /* "Restore backup" and "Copy ROM": linked, so that the cart's id and ROM size are the last
+     * whole connect's, and restorable or a ROM there; the hub offers Reconnect otherwise */
+    bool restore;
+    bool rom;
 } Gen3CartScreenHub;
 /* While a job runs, none of them */
 void gen3_cart_screen_hub(const Gen3CartScreenHubIn* in, Gen3CartScreenHub* out);
@@ -165,7 +179,7 @@ void gen3_cart_screen_put(
 
 /* Under "Write changes?": "<n> changes. The save\nis backed up. Keep\nthe GBA on."; under
  * "Discard changes?": "<n> changes." ("1 change" for one) */
-#define GEN3_CART_SCREEN_ASK_SIZE 64u
+#define GEN3_CART_SCREEN_ASK_SIZE 96u
 void gen3_cart_screen_write_ask(uint16_t changes, char out[GEN3_CART_SCREEN_ASK_SIZE]);
 void gen3_cart_screen_discard_ask(uint16_t changes, char out[GEN3_CART_SCREEN_ASK_SIZE]);
 
@@ -176,3 +190,80 @@ const char* gen3_cart_screen_check_text(Gen3Check c);
  * dropping any leading '\n': "\nFixed: mail moves level ability" (gen3_load_changes) becomes
  * "Fixed: mail moves\nlevel ability". A word over 21 characters stays whole. */
 void gen3_cart_screen_wrap(char* text);
+
+/* What the slot router (Gen3CartSlot) holds in the editor, and what coming back from the editor
+ * does with it: Existing goes back into its slot if it was edited (gen3_cart_mon_close); New
+ * (made for this save) and Loaded (a .pk3) are put into the free slot once Put is confirmed
+ * (gen3_cart_mon_place). None: the editor holds nothing that may go into a slot. */
+typedef enum {
+    Gen3CartEditNone,
+    Gen3CartEditExisting,
+    Gen3CartEditNew,
+    Gen3CartEditLoaded,
+} Gen3CartEditMode;
+
+/* The slot router's scene state */
+typedef enum {
+    Gen3CartSlotOpen, /* just chosen in the list: decide */
+    Gen3CartSlotMenu, /* a free slot: New Pokemon, Load .pk3 */
+    Gen3CartSlotNotice, /* what loading the .pk3 fixed, before the editor */
+    Gen3CartSlotEdit, /* the editor is over it: coming back closes or asks to put */
+    Gen3CartSlotReedit, /* Back on Put: the editor again */
+} Gen3CartSlotState;
+typedef enum {
+    Gen3CartSlotDoOpen, /* afresh: the mode back to None, then open the slot or offer it */
+    Gen3CartSlotDoClose, /* gen3_cart_mon_close */
+    Gen3CartSlotDoPut, /* Put? */
+    Gen3CartSlotDoEdit, /* the editor again, on the Pokemon made or loaded */
+} Gen3CartSlotDo;
+/* What the router does on entering, from its state and the mode: Close, Put or Edit only for a
+ * Pokemon the editor opened, made or loaded for this slot (mode not None), coming back from the
+ * editor (Edit, Reedit), so that whatever the editor held before never reaches a slot */
+Gen3CartSlotDo gen3_cart_screen_slot_entry(uint32_t state, Gen3CartEditMode mode);
+
+/* ---- Restore and ROM copy ---- */
+
+typedef enum {
+    Gen3CartScreenNameOk,
+    Gen3CartScreenNameOutside, /* not a file inside the folder */
+    Gen3CartScreenNameTooLong, /* GEN3_CART_NAME_MAX characters or more */
+} Gen3CartScreenName;
+/* A file the browser picked, as the jobs name it: path past dir and its '/' ("backups/....sav").
+ * Ok copies it into name; else name is left as it was. A name is never cut. */
+Gen3CartScreenName
+    gen3_cart_screen_restore_name(const char* path, const char* dir, char name[GEN3_CART_NAME_MAX]);
+/* The text under "Can't restore" for a name that isn't Ok; "" for Ok */
+const char* gen3_cart_screen_restore_name_text(Gen3CartScreenName n);
+/* Under "Restore backup?": "Cart: <name> <tid>" ("Cart: no save" for NULL: none the game loads),
+ * "File: <name> <tid>", "Hall of Fame is kept.", and with changes not written "<n> changes are
+ * lost." ("1 change is lost."): a restore drops them */
+void gen3_cart_screen_restore_ask(
+    const Gen3SaveTrainer* cart,
+    const Gen3SaveTrainer* file,
+    uint16_t changes,
+    char out[GEN3_CART_SCREEN_ASK_SIZE]);
+
+/* A ROM copy's bytes per second (multiboot-and-save.md §6.6, stream mode): Copy ROM?'s estimate */
+#define GEN3_CART_SCREEN_ROM_RATE 1850u
+/* Under "Copy ROM?": "<MB> MB, about\n<h> h <m> min.\nKeep both powered.", the time at
+ * GEN3_CART_SCREEN_ROM_RATE to the nearest 10 minutes ("<m> min." under an hour) */
+void gen3_cart_screen_rom_ask(uint32_t rom_size, char out[GEN3_CART_SCREEN_ASK_SIZE]);
+/* Under "Resume copy?": "<pct>% done" (done of rom_size, rounded down) */
+void gen3_cart_screen_rom_resume(
+    uint32_t done,
+    uint32_t rom_size,
+    char out[GEN3_CART_SCREEN_ASK_SIZE]);
+/* Under "ROM copied": "Verified.\n<name>" (gen3_cart_rom_name) */
+void gen3_cart_screen_rom_done(const char* name, char out[GEN3_CART_SCREEN_ASK_SIZE]);
+/* A ROM copy's time left, under its bar: the rate is measured from its first progress, done0
+ * bytes elapsed_ms ago, to done now. "" until GEN3_CART_SCREEN_RATE_MS have passed with bytes
+ * copied, and once done reaches total; else "<h> h <m> min left" ("<m> min left" under an hour),
+ * rounded up to the minute, or "over 99 h left". */
+#define GEN3_CART_SCREEN_RATE_MS 10000u
+#define GEN3_CART_SCREEN_LEFT_SIZE 24u
+void gen3_cart_screen_time_left(
+    uint32_t done0,
+    uint32_t done,
+    uint32_t total,
+    uint32_t elapsed_ms,
+    char out[GEN3_CART_SCREEN_LEFT_SIZE]);

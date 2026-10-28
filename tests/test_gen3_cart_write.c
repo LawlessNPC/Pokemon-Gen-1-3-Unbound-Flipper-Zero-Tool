@@ -812,6 +812,7 @@ TEST(test_write_refused_no_flash_ops) {
         ASSERT_EQ(gen3_cart_backup(&cart, STAMP), carts[i].backup);
         if(carts[i].backup == Gen3CartOk) ASSERT_TRUE(edit_party());
         ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartRefused);
+        ASSERT_FALSE(gen3_cart_restorable(&cart));
         ASSERT_EQ(gen3_cart_restore(&cart, BACKUP_NAME, STAMP2), Gen3CartRefused);
         ASSERT_EQ(calls(GEN3_HCMD_ARM_WRITE), 0);
         const FakeGbaCounts n = counts();
@@ -1994,6 +1995,7 @@ TEST(test_restore_ok) {
     memcpy(x, file(BACKUP_NAME, &size), SAVE_LEN);
     ASSERT_TRUE(edit_party());
     ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_restorable(&cart));
     Gen3SaveTrainer t;
     bool has = false;
     ASSERT_EQ(gen3_cart_restore_check(&cart, BACKUP_NAME, &t, &has), Gen3CartOk);
@@ -2058,6 +2060,8 @@ static void restore_onto_no_save(void) {
     ASSERT_EQ(gen3_cart_id(&cart)->why, Gen3CartRefuseSave);
     ASSERT_TRUE(gen3_cart_id(&cart)->can_write);
     ASSERT_FALSE(gen3_cart_writable(&cart, NULL));
+    /* not writable, and restorable all the same: can_write and a current backup */
+    ASSERT_TRUE(gen3_cart_restorable(&cart));
     ASSERT_TRUE(put_other());
     Gen3SaveTrainer t;
     bool has = false;
@@ -2237,6 +2241,7 @@ TEST(test_restore_no_backup) {
     fake_store_report_free(&store, 64u * MIB);
     ASSERT_EQ(gen3_cart_restore(&cart, OTHER_NAME, STAMP2), Gen3CartWrittenNoBackup);
     ASSERT_FALSE(gen3_cart_backup_current(&cart));
+    ASSERT_FALSE(gen3_cart_restorable(&cart));
     ASSERT_FALSE(cart.work_ok);
     ASSERT_FALSE(gen3_cart_browsable(&cart));
     ASSERT_EQ(fake_store_count(&store, ".tmp"), 0);
@@ -2254,6 +2259,7 @@ TEST(test_restore_refused) {
     fake_store_fail_write_after(&store, 0);
     ASSERT_EQ(gen3_cart_backup(&cart, STAMP2), Gen3CartSdError);
     fake_store_fail_write_after(&store, 1000);
+    ASSERT_FALSE(gen3_cart_restorable(&cart));
     ASSERT_EQ(gen3_cart_restore(&cart, BACKUP_NAME, STAMP2), Gen3CartRefused);
     /* a save the game loads but that isn't strict, or is padded: neither a slot to keep nor no
      * save */
@@ -2268,6 +2274,9 @@ TEST(test_restore_refused) {
         ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
         ASSERT_EQ(gen3_cart_backup(&cart, STAMP), Gen3CartOk);
         ASSERT_EQ(gen3_cart_slots(&cart)->padded, i == 1);
+        ASSERT_TRUE(gen3_cart_id(&cart)->can_write);
+        ASSERT_TRUE(gen3_cart_backup_current(&cart));
+        ASSERT_FALSE(gen3_cart_restorable(&cart));
         ASSERT_TRUE(put_other());
         ASSERT_EQ(gen3_cart_restore(&cart, OTHER_NAME, STAMP2), Gen3CartRefused);
         ASSERT_EQ(calls(GEN3_HCMD_READ_FOOTERS), 0);

@@ -70,7 +70,8 @@ void pokemon_scene_gen3_cart_slots_on_enter(void* context) {
     } else {
         gen3_cart_ui_box_name(pokemon_fap, gen3_cart_ui_get(pokemon_fap)->box, name);
         submenu_set_header(submenu, name);
-        if(!gen3_cart_slots_rows(pokemon_fap, c)) {
+        /* the bulk file opened again if a read failed since, for the species names */
+        if(!gen3_menu_editor_ready(pokemon_fap) || !gen3_cart_slots_rows(pokemon_fap, c)) {
             /* The edits stay in the working copy, below the hub */
             view_dispatcher_send_custom_event(
                 pokemon_fap->view_dispatcher, GEN3_EVENT_DATA_MISSING);

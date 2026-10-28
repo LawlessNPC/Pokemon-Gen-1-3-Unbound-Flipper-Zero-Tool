@@ -231,7 +231,10 @@ TEST(test_mb_boot) {
     Gen3MbStatus st = status();
     ASSERT_EQ(st.phase, Gen3MbPhaseDone);
     ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
     ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+    ASSERT_EQ(st.cc, 0x5A);
+    ASSERT_EQ(st.rr, 0xC3);
     ASSERT_EQ(st.total, 0x1000 - GEN3_MB_HEADER_LEN);
     ASSERT_EQ(st.sent, st.total);
     ASSERT_EQ(fake_bios_phase(&bios), FakeBiosBooted);
@@ -344,6 +347,71 @@ TEST(test_mb_busy_slave) {
     ASSERT_TRUE(busy_final >= 200);
 }
 
+/* The valid 0x7202 replies to the palette word in the last palette wait of the run logged */
+static uint32_t palette_busy_last(void) {
+    uint32_t busy = 0;
+    for(uint32_t i = 1; i < bench_n; i++) {
+        if(bench_log[i - 1].phase != Gen3MbPhasePalette) continue;
+        /* a new palette wait: its first poll */
+        if(i < 2 || bench_log[i - 2].phase != Gen3MbPhasePalette) busy = 0;
+        const BenchFrame* f = &bench_log[i];
+        if(is_frame(f, 0x6300 | GEN3_MB_PALETTE) && f->replied && f->reply == 0x7202) busy++;
+    }
+    return busy;
+}
+
+/* What the cart log records for the hardware check of the budgets: the slave's two bytes, the
+ * busy replies of the last palette wait, the time from the first 0x0065 to the 0x0075 (the frames
+ * in between, idle ones too), and every restart wait, counted or not */
+TEST(test_mb_status_detail) {
+    bench_init(0x1000, 0x5A, 0xC3);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.cc, 0);
+    ASSERT_EQ(st.rr, 0);
+    ASSERT_EQ(st.palette_busy, 0);
+    ASSERT_EQ(st.final_us, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    fake_bios_set_busy(&bios, 50000, 3500000);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.cc, 0x5A);
+    ASSERT_EQ(st.rr, 0xC3);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_TRUE(palette_busy_last() >= 40);
+    ASSERT_EQ(st.palette_busy, palette_busy_last());
+    uint32_t i = 0;
+    while(i < bench_n && !is_frame(&bench_log[i], 0x0065)) i++;
+    ASSERT_TRUE(i < bench_n);
+    uint64_t final_us = 0;
+    for(; i < bench_n; i++) {
+        final_us += bench_log[i].us;
+        const BenchFrame* f = &bench_log[i];
+        if(is_frame(f, 0x0065) && f->replied && f->reply == 0x0075) break;
+    }
+    ASSERT_TRUE(i < bench_n);
+    ASSERT_TRUE(final_us >= 3500000u);
+    ASSERT_EQ(st.final_us, final_us);
+
+    /* A palette wait whose slave resets in it counts; the next one starts its count afresh */
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_set_busy(&bios, 1000000, 0);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhasePalette, 1000));
+    run(&mb, &bios, 300);
+    ASSERT_TRUE(status().palette_busy >= 250);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.all_restarts, 1);
+    ASSERT_EQ(st.palette_busy, palette_busy_last());
+    ASSERT_TRUE(st.palette_busy < 1000000u / MLINK_TICK_US + 2u);
+}
+
 /* The palette budget, one 0x63pp per tick: the last poll it allows is the one whose reply comes
  * at or past GEN3_MB_PALETTE_US. A slave whose 0x73cc comes on that poll is taken; one busy for
  * one poll longer times the wait out. That wait saw only valid 0x7202 replies, so it is not
@@ -375,10 +443,11 @@ TEST(test_mb_palette_timeout) {
             timeouts++;
         }
     }
-    /* none counted; the attempt budget ends it */
+    /* none counted, each a restart all the same; the attempt budget ends it */
     ASSERT_EQ(timeouts, 4);
     ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
     ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 4);
     ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
 }
 
@@ -443,7 +512,9 @@ TEST(test_mb_final_timeout) {
     st = status();
     ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
     ASSERT_EQ(st.restarts, 3);
+    ASSERT_EQ(st.all_restarts, 3);
     ASSERT_EQ(st.last_fail, Gen3MbFailPowerCycle);
+    ASSERT_EQ(st.final_us, 0); /* no 0x0075 came */
     ASSERT_EQ(fake_bios_boots(&bios), 0);
 }
 
@@ -553,6 +624,7 @@ TEST(test_mb_header_glitch) {
     Gen3MbStatus st = status();
     ASSERT_EQ(st.phase, Gen3MbPhaseDone);
     ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.all_restarts, 1);
     ASSERT_EQ(st.last_fail, Gen3MbFailHeader);
     ASSERT_EQ(fake_bios_boots(&bios), 1);
     ASSERT_TRUE(image_received(0x1000));
@@ -799,6 +871,7 @@ TEST(test_mb_junk_wait) {
     }
     Gen3MbStatus st = status();
     ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 200); /* none counted, each a restart all the same */
     ASSERT_EQ(st.last_fail, Gen3MbFailNone);
     ASSERT_EQ(st.waiting_us, total_us);
     ASSERT_TRUE(min_us >= 70000u && min_us < 80000u);
@@ -956,6 +1029,7 @@ int main(void) {
     RUN(test_mb_length_delay);
     RUN(test_mb_poll_spacing);
     RUN(test_mb_busy_slave);
+    RUN(test_mb_status_detail);
     RUN(test_mb_palette_timeout);
     RUN(test_mb_palette_stuck_busy);
     RUN(test_mb_palette_reset_counts);

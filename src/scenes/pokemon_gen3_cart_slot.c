@@ -22,12 +22,8 @@
  * loaded or made it (edit_mode not None), so whatever the editor held before never reaches a slot.
  * The slot is the ui's box and slot. */
 
-/* Scene state */
-#define GEN3_CART_SLOT_OPEN 0 /* just chosen in the list: decide */
-#define GEN3_CART_SLOT_MENU 1 /* a free slot: New Pokemon, Load .pk3 */
-#define GEN3_CART_SLOT_NOTICE 2 /* what loading the .pk3 fixed, before the editor */
-#define GEN3_CART_SLOT_EDIT 3 /* the editor is over it: coming back closes or asks to put */
-#define GEN3_CART_SLOT_REEDIT 4 /* Back on Put: the editor again */
+/* The scene state is a Gen3CartSlotState (gen3_cart_screen.h), which decides on entering
+ * (gen3_cart_screen_slot_entry) */
 
 /* Its events to itself, and the free slot's items */
 #define GEN3_CART_SLOT_EVENT_EDIT 0x47330560u
@@ -55,7 +51,7 @@ static void gen3_cart_slot_callback(void* context, uint32_t index) {
 
 /* The editor, on the Pokemon just opened, made or loaded, from its first row */
 static void gen3_cart_slot_to_editor(PokemonFap* pokemon_fap) {
-    gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_EDIT);
+    gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotEdit);
     scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Edit, 0);
     scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3Edit);
 }
@@ -67,7 +63,7 @@ static void gen3_cart_slot_menu(PokemonFap* pokemon_fap) {
     char box[9];
     char header[24]; /* "ABCDEFGH slot 30": 16 characters */
 
-    gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_MENU);
+    gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotMenu);
     gen3_cart_ui_box_name(pokemon_fap, ui->box, box);
     snprintf(header, sizeof(header), "%s slot %u", box, (unsigned)ui->slot + 1u);
     submenu_reset(submenu);
@@ -85,7 +81,8 @@ static void gen3_cart_slot_open(PokemonFap* pokemon_fap) {
     Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     Gen3CartMon m = Gen3CartMonBadArg;
 
-    if(!pokemon_fap->gen3_editor) {
+    /* the bulk file opened again if a read failed since: names and the editor need it */
+    if(!gen3_menu_editor_ready(pokemon_fap)) {
         m = Gen3CartMonNoData;
     } else if(c) {
         m = gen3_cart_mon_open(
@@ -94,7 +91,7 @@ static void gen3_cart_slot_open(PokemonFap* pokemon_fap) {
     switch(m) {
     case Gen3CartMonOk:
         ui->edit_mode = Gen3CartEditExisting;
-        gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_EDIT);
+        gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotEdit);
         scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Edit, 0);
         gen3_cart_slot_send(pokemon_fap, GEN3_CART_SLOT_EVENT_EDIT);
         break;
@@ -111,24 +108,27 @@ static void gen3_cart_slot_open(PokemonFap* pokemon_fap) {
     }
 }
 
-/* Back from the editor */
-static void gen3_cart_slot_back(PokemonFap* pokemon_fap) {
+/* Back from the editor on the Pokemon opened from this slot */
+static void gen3_cart_slot_close(PokemonFap* pokemon_fap) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
-
-    if(ui->edit_mode != Gen3CartEditExisting) {
-        /* made or loaded for this free slot */
-        gen3_cart_slot_send(pokemon_fap, GEN3_CART_SLOT_EVENT_PUT);
-        return;
-    }
     Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     Gen3CartMon m = Gen3CartMonBadArg;
     bool put = false;
-    if(c) {
+
+    if(c && pokemon_fap->gen3_editor) {
         m = gen3_cart_mon_close(
-            c, pokemon_fap->gen3_editor, ui->box, ui->slot, ui->orig, ui->orig_len, ui->mon, &put);
+            c,
+            pokemon_fap->gen3_editor,
+            ui->box,
+            ui->slot,
+            ui->orig,
+            ui->orig_len,
+            ui->mon,
+            &ui->pkm,
+            &put);
     }
     ui->edit_mode = Gen3CartEditNone;
-    gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_OPEN);
+    gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotOpen);
     if(m == Gen3CartMonOk) {
         gen3_cart_slot_send(pokemon_fap, GEN3_CART_SLOT_EVENT_LIST);
     } else {
@@ -138,25 +138,31 @@ static void gen3_cart_slot_back(PokemonFap* pokemon_fap) {
 }
 
 void gen3_cart_slot_reedit(PokemonFap* pokemon_fap) {
-    gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_REEDIT);
+    gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotReedit);
     scene_manager_previous_scene(pokemon_fap->scene_manager);
 }
 
 void pokemon_scene_gen3_cart_slot_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
-    const uint32_t state = gen3_cart_slot_state(pokemon_fap);
-    const bool made = ui->edit_mode == Gen3CartEditNew || ui->edit_mode == Gen3CartEditLoaded;
 
-    if(state == GEN3_CART_SLOT_EDIT && ui->edit_mode != Gen3CartEditNone) {
-        gen3_cart_slot_back(pokemon_fap);
-    } else if(state == GEN3_CART_SLOT_REEDIT && made) {
-        gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_EDIT);
+    switch(gen3_cart_screen_slot_entry(gen3_cart_slot_state(pokemon_fap), ui->edit_mode)) {
+    case Gen3CartSlotDoClose:
+        gen3_cart_slot_close(pokemon_fap);
+        break;
+    case Gen3CartSlotDoPut:
+        /* made or loaded for this free slot */
+        gen3_cart_slot_send(pokemon_fap, GEN3_CART_SLOT_EVENT_PUT);
+        break;
+    case Gen3CartSlotDoEdit:
+        gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotEdit);
         gen3_cart_slot_send(pokemon_fap, GEN3_CART_SLOT_EVENT_EDIT);
-    } else {
+        break;
+    case Gen3CartSlotDoOpen:
         ui->edit_mode = Gen3CartEditNone;
-        gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_OPEN);
+        gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotOpen);
         gen3_cart_slot_open(pokemon_fap);
+        break;
     }
 }
 
@@ -171,8 +177,10 @@ static void gen3_cart_slot_new(PokemonFap* pokemon_fap) {
         scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartResult);
         return;
     }
-    /* false: the bulk file can't be read, and nothing may go into the slot */
-    if(!gen3_cart_new_mon(
+    /* false: the bulk file can't be read (opened again first if a read failed since), and
+     * nothing may go into the slot */
+    if(!gen3_menu_editor_ready(pokemon_fap) ||
+       !gen3_cart_new_mon(
            pokemon_fap->gen3_editor, &t, gen3_cart_id(c)->met_game, furi_hal_random_get())) {
         ui->edit_mode = Gen3CartEditNone;
         gen3_menu_show_data_missing(pokemon_fap);
@@ -213,7 +221,7 @@ __attribute__((noinline)) static void
     gen3_load_changes(&info, ui->notice, sizeof(ui->notice));
     gen3_cart_screen_wrap(ui->notice);
     if(ui->notice[0] != '\0') {
-        gen3_cart_slot_set_state(pokemon_fap, GEN3_CART_SLOT_NOTICE);
+        gen3_cart_slot_set_state(pokemon_fap, Gen3CartSlotNotice);
         gen3_menu_show_notice(pokemon_fap, "Loaded", ui->notice);
     } else {
         gen3_cart_slot_to_editor(pokemon_fap);
@@ -280,13 +288,13 @@ bool pokemon_scene_gen3_cart_slot_on_event(void* context, SceneManagerEvent even
         gen3_menu_show_data_missing(pokemon_fap);
         break;
     case GEN3_CART_SLOT_ITEM_NEW:
-        if(state == GEN3_CART_SLOT_MENU) gen3_cart_slot_new(pokemon_fap);
+        if(state == Gen3CartSlotMenu) gen3_cart_slot_new(pokemon_fap);
         break;
     case GEN3_CART_SLOT_ITEM_LOAD:
-        if(state == GEN3_CART_SLOT_MENU) gen3_cart_slot_load(pokemon_fap);
+        if(state == Gen3CartSlotMenu) gen3_cart_slot_load(pokemon_fap);
         break;
     case GEN3_EVENT_NOTICE_OK:
-        if(state == GEN3_CART_SLOT_NOTICE && ui->edit_mode == Gen3CartEditLoaded) {
+        if(state == Gen3CartSlotNotice && ui->edit_mode == Gen3CartEditLoaded) {
             gen3_cart_slot_to_editor(pokemon_fap);
         }
         break;

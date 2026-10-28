@@ -68,6 +68,10 @@ static uint32_t mb_add(uint32_t a, uint32_t b) {
     return a > UINT32_MAX - b ? UINT32_MAX : a + b;
 }
 
+static void mb_count(uint16_t* n) {
+    if(*n < UINT16_MAX) (*n)++;
+}
+
 static void mb_enter(Gen3Mb* mb, Gen3MbPhase phase) {
     mb->phase_us = 0;
     mb->poll_us = GEN3_MB_POLL_US; /* Final polls at once */
@@ -75,6 +79,8 @@ static void mb_enter(Gen3Mb* mb, Gen3MbPhase phase) {
     mb->junk = 0;
     mb->palette_other = false;
     mb->stale = phase == Gen3MbPhaseDetect;
+    /* kept once the wait ends, for the status: each palette wait counts afresh */
+    if(phase == Gen3MbPhasePalette) mb->palette_busy = 0;
     mb->phase = phase;
 }
 
@@ -82,6 +88,7 @@ static void mb_wait(Gen3Mb* mb) {
     mb->wait_us =
         GEN3_MB_RESTART_MIN_US + gen3_rng_next(&mb->rng) % (GEN3_MB_RESTART_RAND_US + 1u);
     mb->sent = 0;
+    mb_count(&mb->all_restarts);
     mb_enter(mb, Gen3MbPhaseWait);
 }
 
@@ -166,7 +173,11 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
             mb_enter(mb, Gen3MbPhaseHandshake);
             break;
         }
-        if(!mb_valid(mb, rx, 0) || r != MB_DETECT_REPLY) mb->palette_other = true;
+        if(!mb_valid(mb, rx, 0) || r != MB_DETECT_REPLY) {
+            mb->palette_other = true;
+        } else {
+            mb_count(&mb->palette_busy);
+        }
         if(mb->phase_us < GEN3_MB_PALETTE_US) break;
         if(mb->palette_other) {
             mb_fail(mb, Gen3MbFailPalette);
@@ -206,6 +217,8 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
         break;
     case Gen3MbPhaseFinal:
         if(mb_valid(mb, rx, 0) && r == 0x0075u) {
+            /* the first 0x0065 went out as Final began, so phase_us is the time since */
+            mb->final_us = mb->phase_us;
             mb_enter(mb, Gen3MbPhaseCrc);
         } else if(mb->phase_us >= GEN3_MB_FINAL_US) {
             mb_fail(mb, Gen3MbFailFinal);
@@ -327,6 +340,11 @@ void gen3_mb_status(const Gen3Mb* mb, Gen3MbStatus* out) {
     out->phase = mb->phase;
     out->last_fail = mb->last_fail;
     out->restarts = mb->restarts;
+    out->cc = mb->cc;
+    out->rr = mb->rr;
+    out->all_restarts = mb->all_restarts;
+    out->palette_busy = mb->palette_busy;
+    out->final_us = mb->final_us;
     out->sent = mb->sent;
     out->total = mb->len > GEN3_MB_HEADER_LEN ? mb->len - GEN3_MB_HEADER_LEN : 0;
     out->waiting_us = mb->waiting_us;

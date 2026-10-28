@@ -543,6 +543,10 @@ bool gen3_cart_browsable(const Gen3Cart* c) {
     return c->id.can_browse && c->backup_current && cart_loads(c) && c->work_ok;
 }
 
+bool gen3_cart_work_ok(const Gen3Cart* c) {
+    return c->work_ok;
+}
+
 bool gen3_cart_writable(const Gen3Cart* c, Gen3CartRefuse* why) {
     const bool ok = c->id.can_write && gen3_cart_browsable(c) && c->slots.strict_ok &&
                     !c->slots.padded;
@@ -756,7 +760,7 @@ Gen3CartMon gen3_cart_mon_open(
     case Gen3MonBad:
         return Gen3CartMonBadEgg;
     }
-    if(!gen3_save_mon_to_pkm(orig, len, scratch)) return Gen3CartMonBadEgg;
+    if(!gen3_save_mon_to_pkm(orig, len, scratch)) return Gen3CartMonBadData;
     const Gen3CartMon m = cart_mon_rules(scratch);
     if(m != Gen3CartMonOk) return m;
     /* false leaves the editor as it was: nothing of it may reach a slot */
@@ -772,18 +776,27 @@ Gen3CartMon gen3_cart_mon_open(
 
 Gen3CartMon gen3_cart_mon_close(
     Gen3Cart* c,
-    const Gen3Editor* ed,
+    Gen3Editor* ed,
     uint8_t box,
     uint8_t slot,
     const uint8_t* orig,
     size_t orig_len,
     uint8_t mon[GEN3_PARTY_SIZE],
+    Gen3Pkm* scratch,
     bool* put) {
     *put = false;
     const size_t len = box == GEN3_SAVE_PARTY ? GEN3_PARTY_SIZE : GEN3_BOX_SIZE;
     if(!cart_mon_slot(c, box, slot) || orig_len != len) return Gen3CartMonBadArg;
     gen3_save_pkm_to_mon(&ed->pkm, len, mon);
     if(memcmp(mon, orig, len) == 0) return Gen3CartMonOk;
+    /* Only a species change sets MetGame in the editor, which then makes a new Pokemon, met in
+     * Ruby: that one is this cart's game's, as a new Pokemon put here is (gen3_cart_mon_place) */
+    if(!gen3_save_mon_to_pkm(orig, len, scratch)) return Gen3CartMonBadArg;
+    if(gen3_pkm_get(scratch, Gen3FieldSpecies) != gen3_pkm_get(&ed->pkm, Gen3FieldSpecies) ||
+       gen3_pkm_get(scratch, Gen3FieldMetGame) != gen3_pkm_get(&ed->pkm, Gen3FieldMetGame)) {
+        gen3_pkm_set(&ed->pkm, Gen3FieldMetGame, c->id.met_game);
+        gen3_pkm_fix_checksum(&ed->pkm);
+    }
     return cart_mon_put(c, &ed->pkm, box, slot, put);
 }
 
@@ -1278,8 +1291,14 @@ Gen3CartResult gen3_cart_restore_check(
     return Gen3CartOk;
 }
 
+bool gen3_cart_restorable(const Gen3Cart* c) {
+    if(!c->id.can_write || !c->backup_current || !c->analyzed) return false;
+    return (c->slots.strict_ok && !c->slots.padded) || c->slots.result == Gen3SaveEmpty ||
+           c->slots.result == Gen3SaveCorrupt;
+}
+
 Gen3CartResult gen3_cart_restore(Gen3Cart* c, const char* name, const char* stamp) {
-    if(!c->id.can_write || !c->backup_current || !c->analyzed) return Gen3CartRefused;
+    if(!gen3_cart_restorable(c)) return Gen3CartRefused;
     Gen3CartResult r = cart_restore_read(c, name);
     if(r == Gen3CartSdError) return r;
     if(r != Gen3CartOk) return Gen3CartRefused;
@@ -1436,7 +1455,12 @@ Gen3CartResult gen3_cart_rom_dump(Gen3Cart* c, bool resume) {
     char part[GEN3_CART_NAME_MAX];
     cart_part_name(c, part);
     uint32_t start = 0;
-    if(resume) gen3_cart_rom_part(c, &start); /* 0 without a .part to resume */
+    if(resume) {
+        gen3_cart_rom_part(c, &start); /* 0 without a .part to resume */
+    } else {
+        /* From the start: nothing of an earlier copy is kept, and its room counts as free */
+        st->remove(st->ctx, part);
+    }
     if(st->free_bytes(st->ctx) < (uint64_t)(rom - start) + GEN3_CART_BUF_SIZE) {
         return Gen3CartSdFull;
     }
