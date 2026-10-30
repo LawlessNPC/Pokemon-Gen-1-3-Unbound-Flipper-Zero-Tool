@@ -32,8 +32,8 @@ Goal: the Gen III Pokemon editor on the Flipper shows and changes a Pokemon corr
 
 ## B. Species
 
-1. **Sprites.** Open the `Pokemon` row. #001 to #251 each show a sprite; step through a few with Left/Right.
-2. **No sprite.** #252 TREECKO shows the `?` frame and the type `GRASS`.
+1. **Sprites.** Open the `Pokemon` row. #001 to #386 each show a sprite; step through a few with Left/Right, some from #252 up.
+2. **Gen III sprites.** #252 TREECKO shows its sprite and the type `GRASS`, and #386 DEOXYS its sprite and `PSYCHC`. None shows the `?` frame (that is only for a sprite the Flipper can't read from the SD card).
 3. **Wrapping and jumps.** Left from #001 goes to #386 DEOXYS. Up and Down jump by 10 (Down from #005 and Up from #380 wrap around). Holding Right scrolls.
 4. **Pick a species.** OK on TREECKO → the menu shows `Pokemon: TREECKO` with nickname `TREECKO`, the level unchanged and the OT unchanged.
 5. **Nickname kept.** Set the nickname to `X`, then pick TREECKO again → the nickname is still `X`.
@@ -103,7 +103,7 @@ On any failure, report the step, what the screen showed, and the `.pk3` file inv
 | A12 Kept on Back | | |
 | A13 Gen I / Gen II | | |
 | B1 Sprites | | |
-| B2 No sprite | | |
+| B2 Gen III sprites | | |
 | B3 Wrapping and jumps | | |
 | B4 Pick a species | | |
 | B5 Nickname kept | | |

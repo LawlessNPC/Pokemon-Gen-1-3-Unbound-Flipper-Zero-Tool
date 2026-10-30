@@ -6,8 +6,8 @@
 #include <stdint.h>
 #include <gui/view_dispatcher.h>
 
-/* Gen III species picker: national 1..386. Sprites exist for 1..251 (GEN3_SPRITE_MAX_NATIONAL);
- * the rest show a "?" frame. */
+/* Gen III species picker: national 1..386, each with a sprite (GEN3_SPRITE_MAX_NATIONAL); a
+ * sprite that can't be read from the SD card shows a "?" frame. */
 
 /* Called with the national number when OK is pressed. */
 typedef void (*Gen3SpeciesSelectCallback)(void* context, uint16_t national);
