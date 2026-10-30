@@ -457,7 +457,7 @@ The link keeps running behind every Gen III screen: the editor, its keyboards an
 ### Editor
 `Edit Pokemon` can change:
 
-- Pokemon (all 386 species; species 252-386 show a `?` image instead of a sprite)
+- Pokemon (all 386 species, each with its sprite)
 - Nickname
 - Level
 - IV/EV preset (Max EV means 85 per stat, 510 in total)
@@ -611,6 +611,8 @@ It's possible to cut a cable directly without using a socket, but it's important
 To generate the graphical interface, the [**FUI-Editor**](https://ilin.pt/stuff/fui-editor/) tool was used.
 
 The sprites for each Pokemon were hand-made for the monochrome screen of the Flipper. The source models are based on sprites from a selection of all Gen I and Gen II games; the ones used we're our favorites. Huge thanks to [ProteanReverie](https://github.com/ProteanReverie) for all of the help and support!
+
+The Gen III sprites (#252-386) are converted from Pokemon Ruby's front sprites by `tools/gen3_sprites.py`; see `sprites/README.md`.
 
 ##  Tested In
 The Gen I/II trade, with a Game Boy or Game Boy Color game running on:
