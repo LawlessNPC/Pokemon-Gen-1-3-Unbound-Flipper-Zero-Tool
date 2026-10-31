@@ -32,16 +32,17 @@
  * The wire (MlinkWire, mlink_hw_start_wire) sets what a transfer is. Everything above is the
  * MultiPlay wire, the default. The Normal wire (GBA Normal mode, over a GBC cable; stream mode
  * only) clocks one 32-bit word per transfer on SC at 256 kHz, MSB first: (tx.hi[t] << 16) |
- * tx.word[t] out, and the reply's upper half in as rx.word[t]. SD isn't used. A slot runs only
- * once the slave is ready (SI low): while SI reads high it waits, one tick at a time, for up to
- * MLINK_NORMAL_STALL_TICKS ticks, then it is reported not ready (rx.notready_mask and
- * rx.timeout_mask bit t, word MLINK_NO_DATA, nothing clocked) and the frame goes on with the next
- * slot. rx.ticks counts the frame's ticks: 1 per delivered slot plus each tick it waited, 1 for a
- * count-0 frame. The driver zeroes next.hi before every Normal-wire frame callback. The Normal
- * wire has no cable guard.
+ * tx.word[t] out, and the reply's upper half in as rx.word[t]. SD isn't used. Gated (the default,
+ * mlink_hw_set_normal_gate), a slot runs only once the slave is ready (SI low): while SI reads
+ * high it waits, one tick at a time, for up to MLINK_NORMAL_STALL_TICKS ticks, then it is reported
+ * not ready (rx.notready_mask and rx.timeout_mask bit t, word MLINK_NO_DATA, nothing clocked) and
+ * the frame goes on with the next slot. Ungated, every slot clocks on its tick with no SI check
+ * (a slave that isn't there reads 0xFFFF) and is never not ready. rx.ticks counts the frame's
+ * ticks: 1 per delivered slot plus each tick it waited, 1 for a count-0 frame. The driver zeroes
+ * next.hi before every Normal-wire frame callback. The Normal wire has no cable guard.
  *
- * alloc/free/check_cable/start/stop are app-context calls; use them from one thread, never from
- * the frame callback. mlink_hw_cable_ok may be called from any thread. */
+ * alloc/free/check_cable/start/stop/set_normal_gate are app-context calls; use them from one
+ * thread, never from the frame callback. mlink_hw_cable_ok may be called from any thread. */
 
 typedef struct {
     /* SC: frame clock, driven by the parent: push-pull output, idle high. SC and SO keep their
@@ -124,3 +125,10 @@ bool mlink_hw_cable_ok(const MlinkHw* hw);
 
 /* Pins back to GpioModeAnalog, TIM2 off, ISR cleared. Does nothing if not running. */
 void mlink_hw_stop(MlinkHw* hw);
+
+/* Normal wire: true (from mlink_hw_alloc, D3) waits for the slave's ready (SI low) before each
+ * slot; false clocks every slot on its tick, no SI check, no settle, 1 tick a slot, never not
+ * ready (the BIOS phase of multiboot, multiboot-and-save.md §7.3). The ISR reads it once per slot,
+ * so it takes effect from the next slot. May be called while the driver is stopped or running;
+ * kept across starts and stops. The MultiPlay wire ignores it. */
+void mlink_hw_set_normal_gate(MlinkHw* hw, bool gate);

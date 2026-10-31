@@ -146,6 +146,9 @@ struct MlinkHw {
     /* MultiPlay: written by the ISR at each frame start; Normal: true from the start. Read by any
      * thread. */
     volatile bool cable_ok;
+    /* Normal wire: wait for the slave's ready (SI low) before each slot (D3). Written by the app
+     * (mlink_hw_set_normal_gate), read by the ISR once per slot; true from mlink_hw_alloc. */
+    volatile bool normal_gate;
 
     /* Owned by the TIM2 ISR while running. */
     volatile uint8_t si_seen_high; /* 1: an idle tick read SI high since the last frame start */
@@ -414,14 +417,15 @@ static void mlink_hw_isr(void* context) {
     mlink_frame_done(hw);
 }
 
-/* Slot t of a Normal frame, on this tick. SI high: the slave isn't ready, and the slot waits for
- * the next tick, up to MLINK_NORMAL_STALL_TICKS ticks in all; on the last it is reported not
- * ready (word MLINK_NO_DATA, timeout_mask and notready_mask bit t), nothing clocked. SI low: one
- * 32-bit transfer, (hi << 16) | word out, the reply's upper half in. Every interrupt is masked
- * from the settle to the last bit's sample: 4 us, or 128 us when it clocks. SD is never touched;
- * SC and SO are push-pull outputs (mlink_pins_run_normal) and are high again when this returns.
- * Returns true when the slot is done, delivered or not ready. */
-static bool mlink_normal_slot(MlinkHw* hw, uint8_t t) {
+/* Slot t of a Normal frame, on this tick. Gated (gate, D3): SI high: the slave isn't ready, and
+ * the slot waits for the next tick, up to MLINK_NORMAL_STALL_TICKS ticks in all; on the last it is
+ * reported not ready (word MLINK_NO_DATA, timeout_mask and notready_mask bit t), nothing clocked.
+ * SI low: one 32-bit transfer, (hi << 16) | word out, the reply's upper half in. Ungated: the
+ * transfer runs at once, with no SI check and no settle. Every interrupt is masked from the
+ * settle to the last bit's sample: 4 us, or 128 us when it clocks (124 us ungated). SD is never
+ * touched; SC and SO are push-pull outputs (mlink_pins_run_normal) and are high again when this
+ * returns. Returns true when the slot is done, delivered or not ready. */
+static bool mlink_normal_slot(MlinkHw* hw, uint8_t t, bool gate) {
     const GpioPin* sc = hw->pins.sc;
     const GpioPin* so = hw->pins.so;
     const GpioPin* si = hw->pins.si;
@@ -429,17 +433,18 @@ static bool mlink_normal_slot(MlinkHw* hw, uint8_t t) {
     uint32_t reply = 0;
     bool ready = false;
 
-    if(!mlink_pin_read(si)) {
+    if(!gate || !mlink_pin_read(si)) {
         const uint32_t primask = __get_PRIMASK();
         __disable_irq();
 
-        /* Still low after the settle: the slave is ready and has had the time to start its side
-         * of the transfer. Every edge below is timed from t0. */
+        /* Gated: still low after the settle, so the slave is ready and has had the time to start
+         * its side of the transfer. Every edge below is timed from t0. */
         const uint32_t ts = DWT->CYCCNT;
-        mlink_wait_until(ts, MLINK_NORMAL_SETTLE_CYCLES);
-        ready = !mlink_pin_read(si);
+        const uint32_t settle = gate ? MLINK_NORMAL_SETTLE_CYCLES : 0u;
+        if(gate) mlink_wait_until(ts, settle);
+        ready = !gate || !mlink_pin_read(si);
         if(ready) {
-            const uint32_t t0 = ts + MLINK_NORMAL_SETTLE_CYCLES;
+            const uint32_t t0 = ts + settle;
             for(uint32_t n = 0; n < MLINK_NORMAL_BITS; n++) {
                 const uint32_t b = MLINK_NORMAL_BITS - 1u - n; /* bit 31 first */
                 const uint32_t edge = n * MLINK_NORMAL_BIT_CYCLES; /* (31 - b) * BIT */
@@ -472,10 +477,11 @@ static bool mlink_normal_slot(MlinkHw* hw, uint8_t t) {
 
 /* The Normal wire's TIM2 ISR (stream mode only; no cable guard, no idle-tick latch). A frame
  * starts on the tick after the previous frame's callback. Each tick serves the frame's current
- * slot (mlink_normal_slot); the next slot starts on the tick after the one that finished it. Every
- * tick of the frame counts into rx.ticks: 1 per delivered slot plus each tick it waited, so a slot
- * that never gets ready costs MLINK_NORMAL_STALL_TICKS; a count-0 frame is 1 tick, its callback
- * on its start tick. */
+ * slot (mlink_normal_slot, gated or not as normal_gate reads at that tick); the next slot starts
+ * on the tick after the one that finished it. Every tick of the frame counts into rx.ticks: 1 per
+ * delivered slot plus each tick it waited, so a slot that never gets ready costs
+ * MLINK_NORMAL_STALL_TICKS (ungated, every slot is 1); a count-0 frame is 1 tick, its callback on
+ * its start tick. */
 static void mlink_hw_isr_normal(void* context) {
     MlinkHw* hw = context;
 
@@ -499,7 +505,7 @@ static void mlink_hw_isr_normal(void* context) {
 
     hw->rx.ticks++;
     if(hw->transfer < hw->tx.count) {
-        if(!mlink_normal_slot(hw, hw->transfer)) return; /* waits for the next tick */
+        if(!mlink_normal_slot(hw, hw->transfer, hw->normal_gate)) return; /* waits a tick */
         hw->transfer++;
         hw->wait = 0;
         if(hw->transfer < hw->tx.count) return;
@@ -534,8 +540,9 @@ static void mlink_pins_run(const MlinkPins* pins) {
 }
 
 /* The Normal wire: SC and SO push-pull outputs, each driven high before it becomes an output;
- * SI input with pull-up (high = slave not ready, or no slave); SD isn't used and stays analog. */
+ * SI input with pull-up (high = slave not ready, or no slave); SD isn't used: analog. */
 static void mlink_pins_run_normal(const MlinkPins* pins) {
+    furi_hal_gpio_init_simple(pins->sd, GpioModeAnalog);
     furi_hal_gpio_write(pins->so, true);
     furi_hal_gpio_init(pins->so, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
     furi_hal_gpio_write(pins->sc, true);
@@ -561,6 +568,7 @@ MlinkHw* mlink_hw_alloc(const MlinkPins* pins) {
     hw->sd_moder = mlink_moder_of(pins->sd);
     hw->sc_moder = mlink_moder_of(pins->sc);
     hw->so_moder = mlink_moder_of(pins->so);
+    hw->normal_gate = true;
     return hw;
 }
 
@@ -664,6 +672,11 @@ bool mlink_hw_start_wire(
     LL_TIM_EnableIT_UPDATE(MLINK_TIM);
     LL_TIM_EnableCounter(MLINK_TIM);
     return true;
+}
+
+void mlink_hw_set_normal_gate(MlinkHw* hw, bool gate) {
+    furi_check(hw);
+    hw->normal_gate = gate;
 }
 
 bool mlink_hw_cable_ok(const MlinkHw* hw) {

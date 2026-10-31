@@ -13,7 +13,8 @@ typedef struct {
     uint8_t count; /* frame mode 1..9; stream mode 0..9, 0 = idle tick (no transfer) */
     uint16_t word[MLINK_BURST_LEN];
     /* Normal wire: the upper half of each 32-bit word, zeroed by the driver before every frame
-     * callback, so only a producer that wants one sets it. The MultiPlay wire ignores it. */
+     * callback on the Normal wire, so only a producer that wants one sets it. The MultiPlay wire
+     * neither zeroes nor reads it. */
     uint16_t hi[MLINK_BURST_LEN];
 } MlinkTx;
 

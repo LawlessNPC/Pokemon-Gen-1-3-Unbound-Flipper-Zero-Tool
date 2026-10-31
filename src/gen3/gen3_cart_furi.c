@@ -19,7 +19,12 @@
 
 #define GEN3_CART_LOG_PATH EXT_PATH("apps_data/pokemon/gen3_cart.log")
 #define GEN3_CART_LOG_HEADER "# gen3 cart log v1\n"
-#define GEN3_CART_LOG_LINE 128u
+/* The longest line is cart_log_mb's, at most 162 characters with its newline: 11 for the tick
+ * ("%08lu " of 4294967295), 10 "mb restart", 9 " nr 65535", 10 " last ffff", 19
+ * " want ffff got ffff", 13 " restarts 255", 10 " all 65535", 12 " last_fail 9", 6 " cc ff",
+ * 6 " rr ff", 19 " palette_busy 65535", 20 " final_us 4294967295", 16 " sent 4294967295" and 1 for
+ * the newline. With its NUL it fits, so no line is ever cut. */
+#define GEN3_CART_LOG_LINE 168u
 
 #define GEN3_CART_THREAD_NAME "Gen3Cart"
 #define GEN3_CART_THREAD_STACK 2048
@@ -28,6 +33,13 @@
 
 /* Connect: how often the worker reads the multiboot sender's progress */
 #define GEN3_CART_MB_POLL_MS 20u
+/* Connect: polls in a row that must find SI high, while the sender waits for the GBA, before the
+ * MultiPlay wire gives way to the Normal wire (plan 6 D6): a jiggled GBA cable doesn't switch */
+#define GEN3_CART_WIRE_POLLS 2u
+/* Connect: an `mb wait` log line this often while the sender waits for the GBA */
+#define GEN3_CART_MB_WAIT_LOG_MS 5000u
+
+/* ---- Tunables for the hardware test (docs/gen3/hardware-test-3.md "If it fails") ---- */
 
 /* Idle ticks sent after each frame that transferred, before the core gets that frame's result,
  * whose elapsed time then includes theirs. 0, the default, sends frame after frame. A knob for the
@@ -35,6 +47,15 @@
  * while a transfer masks them (multiboot-and-save.md M18). */
 #define GEN3_CART_GAP_TICKS 0u
 _Static_assert(GEN3_CART_GAP_TICKS <= UINT8_MAX, "gap_left counts the idle ticks");
+
+/* Normal wire, the BIOS phase (multiboot): 0, the default, clocks every slot ungated, with no wait
+ * for the GBA's ready (SI low), as the probe of 2026-10-30 did: GBATEK's "slave not in mode yet"
+ * reply suggests the BIOS takes Normal mode only once transfers come (multiboot-and-save.md §7.3,
+ * M27). 1 gates it too, as the helper's phase always is. */
+#define GEN3_CART_MB_GATED 0
+/* 1: every Connect starts on the Normal wire, whatever SI reads (a GBC cable whose SI reads low,
+ * so that Connect stays on `wire multi`). 0, the default: the cable decides (plan 6 D6). */
+#define GEN3_CART_FORCE_NORMAL 0
 
 typedef enum {
     Gen3CartCoreMb, /* the multiboot sender */
@@ -295,17 +316,29 @@ static Gen3HlinkFail
     Gen3CartSession* s = ctx;
     /* Without the pump (no helper sent, or the driver stopped), as a helper that never answers */
     Gen3HlinkFail fail = Gen3HlinkFailNoReady;
+    uint16_t notready = 0;
     *status = 0;
     *resp_words = 0;
     if(s->pump_on) {
         gen3_hlink_submit(&s->hlink, req);
         cart_pump_wait(s);
         gen3_hlink_result(&s->hlink, status, resp_words, &fail);
+        notready = gen3_hlink_notready(&s->hlink);
     }
     cart_set_link_up(s, fail == Gen3HlinkFailNone);
+    if(fail != Gen3HlinkFailNone) {
+        /* The request, why it failed (Gen3HlinkFail) and its not-ready words (Normal wire) */
+        CART_LOG(
+            s,
+            "cmd %02x fail %u nr %u",
+            (unsigned)req->code,
+            (unsigned)fail,
+            (unsigned)notready);
+    }
     /* A sound response has at least the 2 words resp_max_words always leaves room for. A status
      * other than OK carries the fail code and offset (multiboot-and-save.md §6.4); HELLO's answer
-     * starts with the protocol and the build (multiboot-and-save.md §6.3) */
+     * starts with the protocol and the build, and its 4th word with the BIOS's boot mode, 2 for
+     * Normal, 3 for MultiPlay (multiboot-and-save.md §6.3, §7.2) */
     if(fail != Gen3HlinkFailNone || *resp_words < 2u || !req->resp) return fail;
     if(*status != GEN3_HST_OK) {
         CART_LOG(
@@ -318,9 +351,10 @@ static Gen3HlinkFail
     } else if(req->code == GEN3_HCMD_HELLO) {
         CART_LOG(
             s,
-            "hello proto %u build %u",
+            "hello proto %u build %u boot %u",
             (unsigned)cart_le16(req->resp),
-            (unsigned)cart_le16(req->resp + 2));
+            (unsigned)cart_le16(req->resp + 2),
+            *resp_words >= 4u ? (unsigned)req->resp[6] : 0u);
     }
     return fail;
 }
@@ -387,10 +421,19 @@ static bool cart_helper_load(Gen3CartSession* s, uint32_t* len) {
     return check == Gen3MbImageOk;
 }
 
+/* The wire as the log names it: the Normal wire's BIOS phase is ungated unless
+ * GEN3_CART_MB_GATED */
+static const char* cart_wire_name(MlinkWire wire) {
+    if(wire != MlinkWireNormal) return "multi";
+    return GEN3_CART_MB_GATED ? "normal gated" : "normal ungated";
+}
+
 /* Inits the sender for wire and starts the driver in stream mode with its first frame. False if
- * the start fails: TIM2 is held, or, on the MultiPlay wire, SI reads high. */
+ * the start fails: TIM2 is held, or, on the MultiPlay wire, SI reads high. On the Normal wire the
+ * BIOS phase runs ungated unless GEN3_CART_MB_GATED (multiboot-and-save.md §7.3). */
 static bool cart_mb_start(Gen3CartSession* s, MlinkWire wire, uint32_t len) {
     MlinkTx first = {0};
+    if(wire == MlinkWireNormal) mlink_hw_set_normal_gate(s->hw, GEN3_CART_MB_GATED);
     gen3_mb_init(&s->mb, wire, s->buf, len, furi_hal_random_get());
     gen3_mb_frame(&s->mb, NULL, &first, 0);
     s->wire = wire;
@@ -401,13 +444,17 @@ static bool cart_mb_start(Gen3CartSession* s, MlinkWire wire, uint32_t len) {
 }
 
 /* Starts the driver on the wire the cable calls for (plan 6 D6): MultiPlay while SI reads low,
- * Normal otherwise, with the sender's first frame */
+ * Normal otherwise (always with GEN3_CART_FORCE_NORMAL), with the sender's first frame */
 static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
     cart_progress(s, Gen3CartStepMbWait, 0, 0);
     cart_set_cable(s, true); /* the Normal wire has no cable to check */
     if(s->cancel) return Gen3CartCancelled;
-    MlinkWire wire = gen3_mb_wire_next(
-        MlinkWireMulti, mlink_hw_check_cable(s->hw) == MlinkCableOk, Gen3MbPhaseDetect);
+    MlinkWire wire = GEN3_CART_FORCE_NORMAL ?
+                         MlinkWireNormal :
+                         gen3_mb_wire_next(
+                             MlinkWireMulti,
+                             mlink_hw_check_cable(s->hw) == MlinkCableOk,
+                             Gen3MbPhaseDetect);
     if(!cart_mb_start(s, wire, len)) {
         /* A MultiPlay start reads SI again: one now high goes Normal; else another link holds
          * TIM2 */
@@ -417,7 +464,7 @@ static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
         wire = MlinkWireNormal;
         if(!cart_mb_start(s, wire, len)) return Gen3CartLinkBusy;
     }
-    CART_LOG(s, "wire %s", wire == MlinkWireNormal ? "normal" : "multi");
+    CART_LOG(s, "wire %s", cart_wire_name(wire));
     cart_lock(s);
     s->driver_on = true;
     s->status.cable_ok = true;
@@ -425,9 +472,11 @@ static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
     return Gen3CartOk;
 }
 
-/* The sender's status, for the hardware check of its budgets: restarts counted and all, the
- * slave's bytes, the latest palette wait's busy replies (GEN3_MB_PALETTE_US), and the time from
- * the first 0x0065 to the 0x0075 (GEN3_MB_FINAL_US) */
+/* The sender's status, for the hardware check of its budgets and of the Normal wire: the
+ * not-ready slots and the latest reply (the GBA's last word; FFFF with nothing at the other end),
+ * the words of the latest word failure, restarts counted and all, the slave's bytes, the latest
+ * palette wait's busy replies (GEN3_MB_PALETTE_US), and the time from the first 0x0065 to the
+ * 0x0075 (GEN3_MB_FINAL_US). The short fields come first. */
 static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus* st) {
     /* The expected and received words belong to the latest failure of these kinds only */
     char want[24] = "";
@@ -445,9 +494,12 @@ static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus
     }
     CART_LOG(
         s,
-        "mb %s restarts %u all %u last_fail %u cc %02x rr %02x palette_busy %u final_us %lu "
-        "sent %lu%s",
+        "mb %s nr %u last %04x%s restarts %u all %u last_fail %u cc %02x rr %02x palette_busy %u "
+        "final_us %lu sent %lu",
         what,
+        (unsigned)st->notready,
+        (unsigned)st->last_reply,
+        want,
         (unsigned)st->restarts,
         (unsigned)st->all_restarts,
         (unsigned)st->last_fail,
@@ -455,15 +507,17 @@ static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus
         (unsigned)st->rr,
         (unsigned)st->palette_busy,
         (unsigned long)st->final_us,
-        (unsigned long)st->sent,
-        want);
+        (unsigned long)st->sent);
 }
 
 /* Runs the sender to Done or Failed, MbWait while it looks for the GBA and MbSend after. Each
- * restart is logged, counted or not; those between two polls in one line. */
+ * restart is logged, counted or not; those between two polls in one line. While it waits for the
+ * GBA, an `mb wait` line every GEN3_CART_MB_WAIT_LOG_MS; a cancel logs `mb cancel`. */
 static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
     Gen3MbStatus st;
     uint16_t all_restarts = 0;
+    uint8_t si_high = 0; /* polls in a row that called for the Normal wire */
+    uint32_t wait_log = furi_get_tick();
     for(;;) {
         gen3_mb_status(&s->mb, &st);
         const bool waiting = st.phase == Gen3MbPhaseWait || st.phase == Gen3MbPhaseDetect;
@@ -485,10 +539,19 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
             all_restarts = st.all_restarts;
             cart_log_mb(s, "restart", &st);
         }
-        if(s->cancel) return Gen3CartCancelled;
-        /* SI high while the GBA hasn't answered: not a GBA cable. Only on the MultiPlay wire does
-         * the cable check mean anything. */
-        if(gen3_mb_wire_next(s->wire, mlink_hw_cable_ok(s->hw), st.phase) != s->wire) {
+        if(s->cancel) {
+            cart_log_mb(s, "cancel", &st);
+            return Gen3CartCancelled;
+        }
+        if(waiting && furi_get_tick() - wait_log >= furi_ms_to_ticks(GEN3_CART_MB_WAIT_LOG_MS)) {
+            wait_log = furi_get_tick();
+            cart_log_mb(s, "wait", &st);
+        }
+        /* SI high while the GBA hasn't answered, GEN3_CART_WIRE_POLLS polls in a row: not a GBA
+         * cable. Only on the MultiPlay wire does the cable check mean anything. */
+        if(gen3_mb_wire_next(s->wire, mlink_hw_cable_ok(s->hw), st.phase) == s->wire) {
+            si_high = 0;
+        } else if(++si_high >= GEN3_CART_WIRE_POLLS) {
             cart_driver_stop(s);
             if(!cart_mb_start(s, MlinkWireNormal, len)) return Gen3CartLinkBusy;
             cart_lock(s);
@@ -496,7 +559,8 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
             s->status.cable_ok = true;
             cart_unlock(s);
             all_restarts = 0;
-            CART_LOG(s, "wire %s", "normal (SI high)");
+            si_high = 0;
+            CART_LOG(s, "wire %s (SI high)", cart_wire_name(MlinkWireNormal));
         }
         furi_delay_ms(GEN3_CART_MB_POLL_MS);
     }
@@ -514,7 +578,12 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
         return r;
     }
 
-    /* The pump takes the link over; the buffer is the jobs' sector buffer from here on */
+    /* The pump takes the link over; the buffer is the jobs' sector buffer from here on. On the
+     * Normal wire the ready gate applies from now (D3): the helper says when it is ready. */
+    if(s->wire == MlinkWireNormal) {
+        mlink_hw_set_normal_gate(s->hw, true);
+        if(!GEN3_CART_MB_GATED) CART_LOG(s, "wire %s", "normal gated (helper)");
+    }
     gen3_hlink_init(&s->hlink);
     __DMB();
     s->core = Gen3CartCoreHlink;
