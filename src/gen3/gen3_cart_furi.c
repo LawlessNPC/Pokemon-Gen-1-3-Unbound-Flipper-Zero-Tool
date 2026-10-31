@@ -363,7 +363,11 @@ static bool cart_sync(void* ctx, uint8_t need, uint32_t timeout_us) {
     Gen3CartSession* s = ctx;
     if(!s->pump_on) return false;
     gen3_hlink_sync(&s->hlink, need, timeout_us);
-    return cart_pump_wait(s) == Gen3HlinkDone;
+    const bool ok = cart_pump_wait(s) == Gen3HlinkDone;
+    /* No READYs: a connect fails before any exchange, so this is the helper's only trace in the
+     * log; nr high on the Normal wire means its SO never went low (M24, M25) */
+    if(!ok) CART_LOG(s, "sync fail nr %u", (unsigned)gen3_hlink_notready(&s->hlink));
+    return ok;
 }
 
 /* ---- Connect ---- */
