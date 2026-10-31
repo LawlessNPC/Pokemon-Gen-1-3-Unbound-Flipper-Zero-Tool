@@ -1,11 +1,14 @@
 #include <src/gen3/gen3_mb.h>
 #include <string.h>
 
-/* Constants of GBATEK "BIOS Multi Boot (Single Game Pak)", MultiPlay row
- * (multiboot-and-save.md §2.3) */
+/* Constants of GBATEK "BIOS Multi Boot (Single Game Pak)": MultiPlay (multiboot-and-save.md
+ * §2.3) and Normal mode (§7.2). The seed multiplier is both modes'. */
 #define MB_CRC_INIT 0xFFF8u
 #define MB_CRC_POLY 0xA517u
 #define MB_DATA_KEY 0x6465646Fu
+#define MB_NORMAL_CRC_INIT 0xC387u
+#define MB_NORMAL_CRC_POLY 0xC37Bu
+#define MB_NORMAL_DATA_KEY 0x43202F2Fu
 #define MB_SEED_MUL 0x6F646573u
 #define MB_LOGO_WORD 0x51AEFF24u /* the logo's first word, header offset 4 */
 
@@ -17,12 +20,12 @@
 
 _Static_assert(GEN3_MB_JUNK_LIMIT <= UINT8_MAX, "Gen3Mb.junk counts up to GEN3_MB_JUNK_LIMIT");
 
-uint32_t gen3_mb_crc_step(uint32_t crc, uint32_t data) {
+uint32_t gen3_mb_crc_step(uint32_t crc, uint32_t data, uint16_t poly) {
     for(uint8_t i = 0; i < 32; i++) {
         const uint32_t bit = (crc ^ data) & 1u;
         data >>= 1;
         crc >>= 1;
-        if(bit) crc ^= MB_CRC_POLY;
+        if(bit) crc ^= poly;
     }
     return crc;
 }
@@ -31,19 +34,27 @@ uint8_t gen3_mb_hh(uint8_t cc) {
     return (uint8_t)(0x11u + cc + 0xFFu + 0xFFu);
 }
 
-void gen3_mb_crypt_init(Gen3MbCrypt* k, uint8_t pp, uint8_t cc) {
+void gen3_mb_crypt_init(Gen3MbCrypt* k, MlinkWire wire, uint8_t pp, uint8_t cc) {
+    const bool normal = wire == MlinkWireNormal;
     k->seed = pp | (uint32_t)cc << 8 | 0xFFFF0000u;
-    k->crc = MB_CRC_INIT;
+    k->crc = normal ? MB_NORMAL_CRC_INIT : MB_CRC_INIT;
+    k->poly = normal ? MB_NORMAL_CRC_POLY : MB_CRC_POLY;
+    k->key = normal ? MB_NORMAL_DATA_KEY : MB_DATA_KEY;
 }
 
 uint32_t gen3_mb_crypt_word(Gen3MbCrypt* k, uint32_t ptr, uint32_t plain) {
-    k->crc = gen3_mb_crc_step(k->crc, plain);
+    k->crc = gen3_mb_crc_step(k->crc, plain, k->poly);
     k->seed = k->seed * MB_SEED_MUL + 1u;
-    return plain ^ (0xFE000000u - ptr) ^ k->seed ^ MB_DATA_KEY;
+    return plain ^ (0xFE000000u - ptr) ^ k->seed ^ k->key;
 }
 
 uint16_t gen3_mb_crypt_final(const Gen3MbCrypt* k, uint8_t hh, uint8_t rr) {
-    return (uint16_t)gen3_mb_crc_step(k->crc, hh | (uint32_t)rr << 8 | 0xFFFF0000u);
+    return (uint16_t)gen3_mb_crc_step(k->crc, hh | (uint32_t)rr << 8 | 0xFFFF0000u, k->poly);
+}
+
+MlinkWire gen3_mb_wire_next(MlinkWire wire, bool si_low, Gen3MbPhase phase) {
+    if(wire == MlinkWireNormal || si_low) return wire;
+    return phase == Gen3MbPhaseWait || phase == Gen3MbPhaseDetect ? MlinkWireNormal : wire;
 }
 
 static uint32_t mb_le32(const uint8_t* p) {
@@ -103,10 +114,18 @@ static void mb_fail(Gen3Mb* mb, Gen3MbFail why) {
     }
 }
 
-/* Word t of the frame in flight came back unmarked: the driver saw its start and stop bits. */
+/* Word t of the frame in flight came back unmarked: the driver saw its start and stop bits (on
+ * Normal, the slave was ready and the word was clocked; a not-ready slot has its timeout bit). */
 static bool mb_valid(const Gen3Mb* mb, const MlinkRx* rx, uint8_t t) {
     return t < mb->tx_count && t < rx->count &&
            !(((rx->timeout_mask | rx->framing_mask) >> t) & 1u);
+}
+
+/* A counted failure on reply t, which should have been want: the status keeps both words. */
+static void mb_fail_word(Gen3Mb* mb, Gen3MbFail why, const MlinkRx* rx, uint8_t t, uint16_t want) {
+    mb->fail_want = want;
+    mb->fail_got = mb_valid(mb, rx, t) ? rx->word[t] : MLINK_NO_DATA;
+    mb_fail(mb, why);
 }
 
 static uint16_t mb_header_word(const Gen3Mb* mb, uint16_t step) {
@@ -124,15 +143,21 @@ static uint16_t mb_header_reply(uint16_t step) {
     return MB_DETECT_REPLY;
 }
 
-static uint16_t mb_data_halfwords(const Gen3Mb* mb) {
-    return (uint16_t)((mb->len - GEN3_MB_HEADER_LEN) / 2u);
+/* Bytes per data transfer: a halfword on MultiPlay, a word on Normal. */
+static uint32_t mb_data_unit(const Gen3Mb* mb) {
+    return mb->wire == MlinkWireNormal ? 4u : 2u;
+}
+
+/* Data transfers in the payload */
+static uint16_t mb_data_units(const Gen3Mb* mb) {
+    return (uint16_t)((mb->len - GEN3_MB_HEADER_LEN) / mb_data_unit(mb));
 }
 
 static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
     const uint16_t r = rx->word[0];
     switch(mb->phase) {
     case Gen3MbPhaseDetect:
-        /* MultiPlay replies run one transfer behind (multiboot-and-save.md §2.2), so the first
+        /* Replies run one transfer behind on both wires (multiboot-and-save.md §2.2), so the first
          * reply here answers whatever was sent before Detect began, after gen3_mb_init or a wait:
          * a 0x7202 left over from a palette wait would start a Hello that fails. A marked word
          * may not be that reply (a timed-out transfer never reached the slave, whose stale word
@@ -159,8 +184,9 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
         break;
     case Gen3MbPhaseHeader:
         for(uint8_t t = 0; t < mb->tx_count; t++) {
-            if(!mb_valid(mb, rx, t) || rx->word[t] != mb_header_reply(mb->pos + t)) {
-                mb_fail(mb, Gen3MbFailHeader);
+            const uint16_t want = mb_header_reply(mb->pos + t);
+            if(!mb_valid(mb, rx, t) || rx->word[t] != want) {
+                mb_fail_word(mb, Gen3MbFailHeader, rx, t, want);
                 return;
             }
         }
@@ -190,30 +216,32 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
         if(mb_valid(mb, rx, 0) && (r & 0xFF00u) == 0x7300u) {
             mb_enter(mb, Gen3MbPhaseDelay);
         } else {
-            mb_fail(mb, Gen3MbFailHandshake);
+            mb_fail_word(mb, Gen3MbFailHandshake, rx, 0, 0x7300u);
         }
         break;
     case Gen3MbPhaseLength:
         if(mb_valid(mb, rx, 0) && (r & 0xFF00u) == 0x7300u) {
             mb->rr = (uint8_t)r;
-            gen3_mb_crypt_init(&mb->crypt, GEN3_MB_PALETTE, mb->cc);
+            gen3_mb_crypt_init(&mb->crypt, mb->wire, GEN3_MB_PALETTE, mb->cc);
             mb_enter(mb, Gen3MbPhaseData);
         } else {
-            mb_fail(mb, Gen3MbFailLength);
+            mb_fail_word(mb, Gen3MbFailLength, rx, 0, 0x7300u);
         }
         break;
     case Gen3MbPhaseData:
-        /* The slave answers each halfword with the byte offset of the next one it expects. */
+        /* The slave answers each unit (a halfword; Normal: a word) with the byte offset of the next
+         * one it expects (on Normal inferred: multiboot-and-save.md M23). */
         for(uint8_t t = 0; t < mb->tx_count; t++) {
-            const uint32_t ptr = GEN3_MB_HEADER_LEN + 2u * (mb->pos + t);
-            if(!mb_valid(mb, rx, t) || rx->word[t] != (uint16_t)ptr) {
-                mb_fail(mb, Gen3MbFailData);
+            const uint16_t want =
+                (uint16_t)(GEN3_MB_HEADER_LEN + mb_data_unit(mb) * (mb->pos + t));
+            if(!mb_valid(mb, rx, t) || rx->word[t] != want) {
+                mb_fail_word(mb, Gen3MbFailData, rx, t, want);
                 return;
             }
         }
         mb->pos += mb->tx_count;
-        mb->sent = 2u * mb->pos;
-        if(mb->pos >= mb_data_halfwords(mb)) mb_enter(mb, Gen3MbPhaseFinal);
+        mb->sent = mb_data_unit(mb) * mb->pos;
+        if(mb->pos >= mb_data_units(mb)) mb_enter(mb, Gen3MbPhaseFinal);
         break;
     case Gen3MbPhaseFinal:
         if(mb_valid(mb, rx, 0) && r == 0x0075u) {
@@ -225,10 +253,12 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
         }
         break;
     case Gen3MbPhaseCrc:
-        if(mb_valid(mb, rx, 0) && r == 0x0075u && mb_valid(mb, rx, 1) && rx->word[1] == mb->crc) {
-            mb_enter(mb, Gen3MbPhaseDone);
+        if(!mb_valid(mb, rx, 0) || r != 0x0075u) {
+            mb_fail_word(mb, Gen3MbFailCrc, rx, 0, 0x0075u);
+        } else if(!mb_valid(mb, rx, 1) || rx->word[1] != mb->crc) {
+            mb_fail_word(mb, Gen3MbFailCrc, rx, 1, mb->crc);
         } else {
-            mb_fail(mb, Gen3MbFailCrc);
+            mb_enter(mb, Gen3MbPhaseDone);
         }
         break;
     case Gen3MbPhaseWait:
@@ -281,10 +311,16 @@ static void mb_send(Gen3Mb* mb, MlinkTx* tx) {
         mb_one(tx, (uint16_t)((mb->len - 0x190u) / 4u));
         break;
     case Gen3MbPhaseData:
-        while(tx->count < MLINK_BURST_LEN && mb->pos + tx->count < mb_data_halfwords(mb)) {
-            const uint32_t half = mb->pos + tx->count;
-            const uint32_t ptr = GEN3_MB_HEADER_LEN + 2u * half;
-            if(!(half & 1u)) {
+        while(tx->count < MLINK_BURST_LEN && mb->pos + tx->count < mb_data_units(mb)) {
+            const uint32_t unit = mb->pos + tx->count;
+            const uint32_t ptr = GEN3_MB_HEADER_LEN + mb_data_unit(mb) * unit;
+            if(mb->wire == MlinkWireNormal) {
+                /* one transfer per word; every other word's upper half stays as the driver
+                 * zeroed it */
+                const uint32_t e = gen3_mb_crypt_word(&mb->crypt, ptr, mb_le32(mb->img + ptr));
+                tx->word[tx->count] = (uint16_t)e;
+                tx->hi[tx->count] = (uint16_t)(e >> 16);
+            } else if(!(unit & 1u)) {
                 mb->e = gen3_mb_crypt_word(&mb->crypt, ptr, mb_le32(mb->img + ptr));
                 tx->word[tx->count] = (uint16_t)mb->e;
             } else {
@@ -311,8 +347,9 @@ static void mb_send(Gen3Mb* mb, MlinkTx* tx) {
     mb->tx_count = tx->count;
 }
 
-void gen3_mb_init(Gen3Mb* mb, const uint8_t* img, uint32_t len, uint32_t seed) {
+void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, const uint8_t* img, uint32_t len, uint32_t seed) {
     memset(mb, 0, sizeof(*mb));
+    mb->wire = wire;
     mb->img = img;
     mb->len = len;
     gen3_rng_seed(&mb->rng, seed);
@@ -340,6 +377,8 @@ void gen3_mb_status(const Gen3Mb* mb, Gen3MbStatus* out) {
     out->phase = mb->phase;
     out->last_fail = mb->last_fail;
     out->restarts = mb->restarts;
+    out->fail_want = mb->fail_want;
+    out->fail_got = mb->fail_got;
     out->cc = mb->cc;
     out->rr = mb->rr;
     out->all_restarts = mb->all_restarts;

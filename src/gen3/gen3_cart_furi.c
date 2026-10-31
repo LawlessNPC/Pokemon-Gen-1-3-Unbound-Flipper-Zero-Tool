@@ -396,7 +396,7 @@ static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
         if(s->cancel) return Gen3CartCancelled;
         if(mlink_hw_check_cable(s->hw) == MlinkCableOk) {
             MlinkTx first;
-            gen3_mb_init(&s->mb, s->buf, len, furi_hal_random_get());
+            gen3_mb_init(&s->mb, MlinkWireMulti, s->buf, len, furi_hal_random_get());
             gen3_mb_frame(&s->mb, NULL, &first, 0);
             s->core = Gen3CartCoreMb;
             s->gap_left = 0;

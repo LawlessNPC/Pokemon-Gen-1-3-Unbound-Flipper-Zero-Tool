@@ -4,12 +4,22 @@
 #define FAKE_BIOS_NO_REPLY 0xFFFFu
 #define FAKE_BIOS_CHILD_BIT 0x02u /* child 1 */
 #define FAKE_BIOS_READY (0x7200u | FAKE_BIOS_CHILD_BIT)
-/* Longest transfer the parent runs: its word (about 165 us at 115200 bit/s), up to 100 us until
- * the child's start bit, the child's word (about 156 us) */
+/* Longest transfer the parent runs: on MultiPlay its word (about 165 us at 115200 bit/s), up to
+ * 100 us until the child's start bit, the child's word (about 156 us); on Normal 32 bits at
+ * 256 kHz after a 4 us settle (about 129 us) */
 #define FAKE_BIOS_XFER_US 430u
 #define FAKE_BIOS_GAP_US 36u /* GBATEK "Multiboot Communication": after each transfer */
 #define FAKE_BIOS_SILENT_US 62500u /* 1/16 s before the length word */
 #define FAKE_BIOS_HEADER_HALFWORDS 0x60u
+/* GBATEK "BIOS Multi Boot (Single Game Pak)": the CRC's initial value and polynomial and the data
+ * key are the mode's; the seed and its multiplier are both modes'. */
+#define FAKE_BIOS_MULTI_CRC_INIT 0xFFF8u
+#define FAKE_BIOS_MULTI_CRC_POLY 0xA517u
+#define FAKE_BIOS_MULTI_KEY 0x6465646Fu
+#define FAKE_BIOS_NORMAL_CRC_INIT 0xC387u
+#define FAKE_BIOS_NORMAL_CRC_POLY 0xC37Bu
+#define FAKE_BIOS_NORMAL_KEY 0x43202F2Fu
+#define FAKE_BIOS_SEED_MUL 0x6F646573u
 
 enum {
     StepDetect, /* 0x6200 (answers 0x7202), then 0x6102 */
@@ -18,20 +28,38 @@ enum {
     StepInfo, /* 0x6202 */
     StepPalette, /* 0x63pp until it answered 0x73cc, then 0x64hh */
     StepLength, /* after 1/16 s of silence: llll */
-    StepData, /* encrypted payload halfwords */
+    StepData, /* encrypted payload halfwords (Normal: words) */
     StepFinal, /* 0x0065 until it answered 0x0075, then 0x0066 */
     StepCrc, /* the parent's CRC */
 };
 
-/* GBATEK's form of the CRC step: c ^= data, then 32 times shift right and xor 0xA517 on carry. */
-static uint32_t fake_bios_crc(uint32_t c, uint32_t data) {
+static bool fake_bios_normal(const FakeBios* b) {
+    return b->wire == MlinkWireNormal;
+}
+
+static uint32_t fake_bios_poly(const FakeBios* b) {
+    return fake_bios_normal(b) ? FAKE_BIOS_NORMAL_CRC_POLY : FAKE_BIOS_MULTI_CRC_POLY;
+}
+
+/* GBATEK's form of the CRC step: c ^= data, then 32 times shift right and xor x on carry. */
+static uint32_t fake_bios_crc(uint32_t c, uint32_t data, uint32_t x) {
     c ^= data;
     for(int i = 0; i < 32; i++) {
         const uint32_t carry = c & 1u;
         c >>= 1;
-        if(carry) c ^= 0xA517u;
+        if(carry) c ^= x;
     }
     return c;
+}
+
+/* GBATEK's decryption of the encrypted word e for byte offset ptr: the seed steps, then
+ * e ^ (0xFE000000 - ptr) ^ seed ^ key; the plain word goes into the CRC and into memory. */
+static void fake_bios_take_word(FakeBios* b, uint32_t ptr, uint32_t e) {
+    const uint32_t key = fake_bios_normal(b) ? FAKE_BIOS_NORMAL_KEY : FAKE_BIOS_MULTI_KEY;
+    b->seed = b->seed * FAKE_BIOS_SEED_MUL + 1u;
+    const uint32_t w = e ^ (0xFE000000u - ptr) ^ b->seed ^ key;
+    b->crc = fake_bios_crc(b->crc, w, fake_bios_poly(b));
+    for(unsigned i = 0; i < 4; i++) b->mem[ptr + i] = (uint8_t)(w >> (8 * i));
 }
 
 /* GBATEK SWI 25h: 0x81 + color * 0x10 + direction * 8 + speed * 2 (color 0..6, direction 0..1,
@@ -68,8 +96,8 @@ static void fake_bios_boot(FakeBios* b) {
     b->boots++;
 }
 
-/* The parent's word, after this transfer's reply went out. */
-static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
+/* The parent's word (Normal: its upper half hi too), after this transfer's reply went out. */
+static void fake_bios_handle(FakeBios* b, uint16_t word, uint16_t hi, uint64_t end_us) {
     switch(b->step) {
     case StepDetect:
         if(word == 0x6200) {
@@ -136,23 +164,23 @@ static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
         b->len = len;
         b->pos = 0xC0;
         b->seed = b->pp | (uint32_t)b->cc << 8 | 0xFFFF0000u;
-        b->crc = 0xFFF8;
+        b->crc = fake_bios_normal(b) ? FAKE_BIOS_NORMAL_CRC_INIT : FAKE_BIOS_MULTI_CRC_INIT;
         b->send = (uint16_t)b->pos;
         b->step = StepData;
         break;
     }
     case StepData:
-        if(b->pos % 4u == 0) {
-            b->lo = word;
+        if(fake_bios_normal(b)) {
+            fake_bios_take_word(b, b->pos, word | (uint32_t)hi << 16);
+            b->pos += 4;
         } else {
-            const uint32_t ptr = b->pos - 2u;
-            const uint32_t e = b->lo | (uint32_t)word << 16;
-            b->seed = b->seed * 0x6F646573u + 1u;
-            const uint32_t w = e ^ (0xFE000000u - ptr) ^ b->seed ^ 0x6465646Fu;
-            b->crc = fake_bios_crc(b->crc, w);
-            for(unsigned i = 0; i < 4; i++) b->mem[ptr + i] = (uint8_t)(w >> (8 * i));
+            if(b->pos % 4u == 0) {
+                b->lo = word;
+            } else {
+                fake_bios_take_word(b, b->pos - 2u, b->lo | (uint32_t)word << 16);
+            }
+            b->pos += 2;
         }
-        b->pos += 2;
         b->send = (uint16_t)b->pos; /* the next offset it expects */
         if(b->pos == b->len) {
             b->final_started = false;
@@ -167,7 +195,8 @@ static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
             }
             b->send = end_us < b->busy_until_us ? 0x0074 : 0x0075;
         } else if(word == 0x0066 && b->prev_reply == 0x0075) {
-            uint32_t c = fake_bios_crc(b->crc, b->hh | (uint32_t)b->rr << 8 | 0xFFFF0000u);
+            uint32_t c = fake_bios_crc(
+                b->crc, b->hh | (uint32_t)b->rr << 8 | 0xFFFF0000u, fake_bios_poly(b));
             if(b->bad_crc) c++;
             b->crc_final = (uint16_t)c;
             b->send = b->crc_final;
@@ -189,13 +218,25 @@ static void fake_bios_handle(FakeBios* b, uint16_t word, uint64_t end_us) {
     }
 }
 
-static void fake_bios_xfer(FakeBios* b, uint16_t word, uint64_t start_us, MlinkRx* rx, uint8_t t) {
+/* Slot t of the frame, starting at start_us: the parent's word (Normal: and its upper half hi).
+ * Returns the ticks the slot took. */
+static uint32_t fake_bios_xfer(
+    FakeBios* b,
+    uint16_t word,
+    uint16_t hi,
+    uint64_t start_us,
+    MlinkRx* rx,
+    uint8_t t) {
+    const uint16_t bit = (uint16_t)(1u << t);
     b->transfers++;
     if(b->phase != FakeBiosWaiting || b->startup) {
         if(b->startup) b->startup--;
         rx->word[t] = MLINK_NO_DATA;
-        rx->timeout_mask |= (uint16_t)(1u << t);
-        return;
+        rx->timeout_mask |= bit;
+        if(!fake_bios_normal(b)) return 1u;
+        /* Normal: the slave never got ready; the driver waited its ticks and clocked nothing */
+        rx->notready_mask |= bit;
+        return MLINK_NORMAL_STALL_TICKS;
     }
     const uint16_t reply = b->send;
     rx->word[t] = b->transfers == b->corrupt_at ? (uint16_t)(reply ^ 0x0100u) : reply;
@@ -204,19 +245,27 @@ static void fake_bios_xfer(FakeBios* b, uint16_t word, uint64_t start_us, MlinkR
         fake_bios_violation(b, "less than 36 us after the previous transfer");
     } else if(b->step == StepLength && start_us < b->handshake_end_us + FAKE_BIOS_SILENT_US) {
         fake_bios_violation(b, "a transfer inside the 1/16 s wait");
+    } else if(fake_bios_normal(b) && hi && b->step != StepData) {
+        fake_bios_violation(b, "upper half not zero");
     } else {
-        fake_bios_handle(b, word, end_us);
+        fake_bios_handle(b, word, hi, end_us);
     }
     b->prev_reply = reply;
     b->has_last = true;
     b->last_end_us = end_us;
+    return 1u;
 }
 
 void fake_bios_init(FakeBios* b, uint8_t cc, uint8_t rr) {
     memset(b, 0, sizeof(*b));
+    b->wire = MlinkWireMulti;
     b->phase = FakeBiosOff;
     b->cc = cc;
     b->rr = rr;
+}
+
+void fake_bios_set_wire(FakeBios* b, MlinkWire wire) {
+    b->wire = wire;
 }
 
 void fake_bios_power_on(FakeBios* b) {
@@ -251,10 +300,15 @@ void fake_bios_frame(FakeBios* b, const MlinkTx* tx, MlinkRx* rx) {
         count = MLINK_BURST_LEN;
     }
     rx->count = count;
+    uint32_t ticks = 0; /* the frame's time so far: where slot t starts */
     for(uint8_t t = 0; t < count; t++) {
-        fake_bios_xfer(b, tx->word[t], b->now_us + (uint64_t)t * MLINK_TICK_US, rx, t);
+        const uint16_t hi = fake_bios_normal(b) ? tx->hi[t] : 0; /* MultiPlay ignores it */
+        ticks +=
+            fake_bios_xfer(b, tx->word[t], hi, b->now_us + (uint64_t)ticks * MLINK_TICK_US, rx, t);
     }
-    b->now_us += (uint64_t)(count ? count : 1u) * MLINK_TICK_US;
+    if(!ticks) ticks = 1; /* an idle tick */
+    rx->ticks = (uint16_t)ticks;
+    b->now_us += (uint64_t)ticks * MLINK_TICK_US;
 }
 
 FakeBiosPhase fake_bios_phase(const FakeBios* b) {

@@ -5,7 +5,8 @@
 #include <src/gen3/mlink_types.h>
 
 /* The BIOS slave (fake_bios, child 1) and the sender (gen3_mb) on one simulated stream-mode
- * link: each driver frame is fake_bios_frame then gen3_mb_frame, timed by mlink_frame_us. */
+ * link, on one wire: each driver frame is fake_bios_frame then gen3_mb_frame, timed by the
+ * frame's rx.ticks, as the driver reports it. */
 
 #define BENCH_LOG_MAX 100000u
 #define BENCH_SEED 0x2468ACE1u
@@ -15,6 +16,7 @@ typedef struct {
     uint32_t us; /* that frame's time */
     uint16_t reply; /* the first word's reply */
     bool replied; /* the first word came back unmarked */
+    uint16_t notready; /* the frame's notready_mask (Normal wire) */
     Gen3MbPhase phase; /* the sender's phase after the frame: the one that made the next tx */
 } BenchFrame;
 
@@ -46,12 +48,24 @@ static void make_image(uint8_t* buf, uint32_t len) {
     }
 }
 
-static void bench_init(uint32_t len, uint8_t cc, uint8_t rr) {
+static void bench_init_on(MlinkWire wire, uint32_t len, uint8_t cc, uint8_t rr) {
     make_image(image, len);
-    gen3_mb_init(&mb, image, len, BENCH_SEED);
+    gen3_mb_init(&mb, wire, image, len, BENCH_SEED);
     fake_bios_init(&bios, cc, rr);
+    fake_bios_set_wire(&bios, wire);
     bench_n = 0;
     bench_started = false;
+}
+
+static void bench_init(uint32_t len, uint8_t cc, uint8_t rr) {
+    bench_init_on(MlinkWireMulti, len, cc, rr);
+}
+
+/* The sender's frame callback, as the driver runs it: the next frame's upper halves zeroed
+ * first. */
+static void bench_frame(Gen3Mb* m, const MlinkRx* rx, uint32_t us) {
+    memset(bench_pending.hi, 0, sizeof(bench_pending.hi));
+    gen3_mb_frame(m, rx, &bench_pending, us);
 }
 
 static Gen3MbStatus status(void) {
@@ -64,7 +78,7 @@ static Gen3MbStatus status(void) {
  * continues where the last one stopped. */
 static void run(Gen3Mb* m, FakeBios* b, uint32_t max_frames) {
     if(!bench_started) {
-        gen3_mb_frame(m, NULL, &bench_pending, 0);
+        bench_frame(m, NULL, 0);
         bench_started = true;
     }
     for(uint32_t i = 0; i < max_frames; i++) {
@@ -74,8 +88,8 @@ static void run(Gen3Mb* m, FakeBios* b, uint32_t max_frames) {
         MlinkRx rx;
         const MlinkTx sent = bench_pending;
         fake_bios_frame(b, &sent, &rx);
-        const uint32_t us = mlink_frame_us(MlinkModeStream, sent.count);
-        gen3_mb_frame(m, &rx, &bench_pending, us);
+        const uint32_t us = (uint32_t)rx.ticks * MLINK_TICK_US;
+        bench_frame(m, &rx, us);
         gen3_mb_status(m, &st);
         if(bench_n < BENCH_LOG_MAX) {
             bench_log[bench_n++] = (BenchFrame){
@@ -83,6 +97,7 @@ static void run(Gen3Mb* m, FakeBios* b, uint32_t max_frames) {
                 .us = us,
                 .reply = rx.word[0],
                 .replied = rx.count && !((rx.timeout_mask | rx.framing_mask) & 1u),
+                .notready = rx.notready_mask,
                 .phase = st.phase};
         }
     }
@@ -160,8 +175,8 @@ TEST(test_mlink_frame_us) {
 }
 
 TEST(test_mb_crc_step) {
-    ASSERT_EQ(gen3_mb_crc_step(0xFFF8, 0), 0x0749);
-    ASSERT_EQ(gen3_mb_crc_step(0xFFF8, 0xFFFFFFFFu), 0x8723);
+    ASSERT_EQ(gen3_mb_crc_step(0xFFF8, 0, 0xA517), 0x0749);
+    ASSERT_EQ(gen3_mb_crc_step(0xFFF8, 0xFFFFFFFFu, 0xA517), 0x8723);
 }
 
 /* multiboot-and-save.md §2.3's test vector. */
@@ -173,7 +188,7 @@ static void doc_vector_halfwords(uint16_t out[128], uint16_t* crc) {
     uint8_t payload[0x100];
     for(int i = 0; i < 0x100; i++) payload[i] = (uint8_t)i;
     Gen3MbCrypt k;
-    gen3_mb_crypt_init(&k, GEN3_MB_PALETTE, 0x5A);
+    gen3_mb_crypt_init(&k, MlinkWireMulti, GEN3_MB_PALETTE, 0x5A);
     for(uint32_t i = 0; i < 64; i++) {
         const uint8_t* p = payload + 4 * i;
         const uint32_t w = p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 |
@@ -189,7 +204,7 @@ TEST(test_mb_doc_vector) {
     ASSERT_EQ(gen3_mb_hh(0x5A), 0x69);
     ASSERT_EQ((0x1C0 - 0x190) / 4, 0x000C);
     Gen3MbCrypt k;
-    gen3_mb_crypt_init(&k, 0x93, 0x5A);
+    gen3_mb_crypt_init(&k, MlinkWireMulti, 0x93, 0x5A);
     ASSERT_EQ(k.seed, 0xFFFF5A93u);
     ASSERT_EQ(k.crc, 0xFFF8);
     uint16_t hw[128];
@@ -672,7 +687,7 @@ TEST(test_mb_bad_crc_gives_up) {
  * phase. */
 TEST(test_mb_masked_word) {
     make_image(image, 0x1C0);
-    gen3_mb_init(&mb, image, 0x1C0, BENCH_SEED);
+    gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
     MlinkTx tx;
     gen3_mb_frame(&mb, NULL, &tx, 0);
     ASSERT_EQ(tx.count, 1);
@@ -724,7 +739,7 @@ static void reply_with(MlinkTx* tx, uint16_t word) {
  * ignored even when it reads 0x7202; the next one is the slave's answer to 0x6200. */
 TEST(test_mb_stale_detect_reply) {
     make_image(image, 0x1C0);
-    gen3_mb_init(&mb, image, 0x1C0, BENCH_SEED);
+    gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
     MlinkTx tx;
     gen3_mb_frame(&mb, NULL, &tx, 0);
     for(int round = 0; round < 2; round++) {
@@ -748,7 +763,7 @@ TEST(test_mb_stale_detect_reply) {
 TEST(test_mb_stale_after_marked_reply) {
     for(int framing = 0; framing < 2; framing++) {
         make_image(image, 0x1C0);
-        gen3_mb_init(&mb, image, 0x1C0, BENCH_SEED);
+        gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
         MlinkTx tx;
         gen3_mb_frame(&mb, NULL, &tx, 0);
         ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
@@ -776,7 +791,7 @@ TEST(test_mb_stale_after_marked_reply) {
 TEST(test_mb_bad_len) {
     static const uint32_t lens[] = {0, 0x100, 0x1B0, 0x1C8, 0x3010};
     for(size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
-        gen3_mb_init(&mb, NULL, lens[i], BENCH_SEED);
+        gen3_mb_init(&mb, MlinkWireMulti, NULL, lens[i], BENCH_SEED);
         Gen3MbStatus st = status();
         ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
         ASSERT_EQ(st.restarts, 0);
@@ -837,7 +852,7 @@ TEST(test_mb_wrong_length_reply) {
 TEST(test_mb_junk_wait) {
     static const uint16_t replies[3] = {0x0000, 0xFFFF, 0x1234};
     make_image(image, 0x1C0);
-    gen3_mb_init(&mb, image, 0x1C0, BENCH_SEED);
+    gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
     MlinkTx tx;
     MlinkRx rx;
     gen3_mb_frame(&mb, NULL, &tx, 0);
@@ -876,6 +891,192 @@ TEST(test_mb_junk_wait) {
     ASSERT_EQ(st.waiting_us, total_us);
     ASSERT_TRUE(min_us >= 70000u && min_us < 80000u);
     ASSERT_TRUE(max_us > 230000u && max_us < 240000u + MLINK_TICK_US);
+}
+
+/* The Normal-mode vector of multiboot-and-save.md §7.2 (plan 6), computed in Python from
+ * GBATEK's formulas, apart from this code: Normal's CRC init, polynomial and data key, with the
+ * seed, hh and the final CRC's form as on MultiPlay. */
+TEST(test_mb_normal_vector) {
+    Gen3MbCrypt k;
+    gen3_mb_crypt_init(&k, MlinkWireNormal, 0x93, 0x5A);
+    ASSERT_EQ(k.seed, 0xFFFF5A93u);
+    ASSERT_EQ(k.crc, 0xC387);
+    ASSERT_EQ(gen3_mb_crypt_word(&k, 0xC0, 0x12345678u), 0x7036291Du);
+    ASSERT_EQ(k.crc, 0x4DD0);
+    ASSERT_EQ(gen3_mb_crypt_word(&k, 0xC4, 0x9ABCDEF0u), 0x47EF9D9Cu);
+    ASSERT_EQ(k.crc, 0x1271);
+    ASSERT_EQ(gen3_mb_hh(0x5A), 0x69);
+    ASSERT_EQ(gen3_mb_crypt_final(&k, 0x69, 0x3C), 0xF80B);
+    /* each wire's constants */
+    ASSERT_EQ(k.poly, 0xC37B);
+    ASSERT_EQ(k.key, 0x43202F2Fu);
+    gen3_mb_crypt_init(&k, MlinkWireMulti, 0x93, 0x5A);
+    ASSERT_EQ(k.seed, 0xFFFF5A93u);
+    ASSERT_EQ(k.crc, 0xFFF8);
+    ASSERT_EQ(k.poly, 0xA517);
+    ASSERT_EQ(k.key, 0x6465646Fu);
+}
+
+/* The whole boot on the Normal wire: one 32-bit word per data transfer, an upper half on data
+ * words only (the fake refuses one anywhere else), and the image arrives as sent. */
+TEST(test_mb_normal_boot) {
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 20000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+    ASSERT_EQ(st.fail_want, 0);
+    ASSERT_EQ(st.fail_got, 0);
+    ASSERT_EQ(st.cc, 0x5A);
+    ASSERT_EQ(st.rr, 0xC3);
+    ASSERT_EQ(st.total, 0x1000 - GEN3_MB_HEADER_LEN);
+    ASSERT_EQ(st.sent, st.total);
+    ASSERT_EQ(fake_bios_phase(&bios), FakeBiosBooted);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(image_received(0x1000));
+    uint32_t data = 0;
+    bool data_hi = false;
+    for(uint32_t i = 0; i < bench_n; i++) {
+        const BenchFrame* f = &bench_log[i];
+        ASSERT_TRUE(f->tx.count <= MLINK_BURST_LEN);
+        if(i && bench_log[i - 1].phase == Gen3MbPhaseData) {
+            data += f->tx.count;
+            for(uint8_t t = 0; t < f->tx.count; t++) data_hi |= f->tx.hi[t] != 0;
+        } else {
+            for(uint8_t t = 0; t < MLINK_BURST_LEN; t++) ASSERT_EQ(f->tx.hi[t], 0);
+        }
+    }
+    ASSERT_EQ(data, (0x1000 - GEN3_MB_HEADER_LEN) / 4);
+    ASSERT_TRUE(data_hi);
+    ASSERT_TRUE(idles_forever());
+}
+
+/* The GBA is off: every slot is not ready, each MLINK_NORMAL_STALL_TICKS long, and the sender
+ * keeps polling. Once it is on, the boot goes through without a counted restart. */
+TEST(test_mb_normal_waits_for_gba) {
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    run(&mb, &bios, 200);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDetect);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(bench_n, 200);
+    for(uint32_t i = 0; i < bench_n; i++) {
+        ASSERT_TRUE(is_frame(&bench_log[i], 0x6200));
+        ASSERT_EQ(bench_log[i].notready, 1);
+        ASSERT_TRUE(!bench_log[i].replied);
+        ASSERT_EQ(bench_log[i].us, MLINK_NORMAL_STALL_TICKS * MLINK_TICK_US);
+    }
+    ASSERT_EQ(st.waiting_us, 200u * MLINK_NORMAL_STALL_TICKS * MLINK_TICK_US);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.waiting_us, 0);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(image_received(0x1000));
+}
+
+/* A data reply that isn't the word's offset is a counted Data failure, and the status keeps what
+ * was expected and what came. The third data word's reply should be 0x00C8. */
+TEST(test_mb_normal_data_reply_mismatch) {
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    /* 2 not ready, 0x0000, 0x7202, Hello, 96 + 2, palette, handshake, length, data words 0..2 */
+    fake_bios_corrupt_reply(&bios, 109);
+    fake_bios_power_on(&bios);
+    for(uint32_t i = 0; i < 100000 && status().restarts == 0; i++) run(&mb, &bios, 1);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseWait);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailData);
+    ASSERT_EQ(st.fail_want, 0x00C8);
+    ASSERT_EQ(st.fail_got, 0x00C8 ^ 0x0100);
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailData);
+    ASSERT_EQ(st.fail_want, 0x00C8);
+    ASSERT_EQ(st.fail_got, 0x00C8 ^ 0x0100);
+    ASSERT_EQ(st.sent, st.total);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(image_received(0x1000));
+}
+
+/* What each counted failure that compares a word records: the word expected (for 0x73xx replies,
+ * the 0x7300 they need) and the word that came, MLINK_NO_DATA for a marked one. A failure that
+ * compares no word keeps them. */
+TEST(test_mb_fail_words) {
+    /* Header: the slave counts 0x60 down, so the reply to halfword 44 is 0x3402 */
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_corrupt_reply(&bios, 50); /* 2 timeouts, 0x0000, 0x7202, Hello, header 0..44 */
+    fake_bios_power_on(&bios);
+    for(uint32_t i = 0; i < 100000 && status().restarts == 0; i++) run(&mb, &bios, 1);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.last_fail, Gen3MbFailHeader);
+    ASSERT_EQ(st.fail_want, 0x3402);
+    ASSERT_EQ(st.fail_got, 0x3502);
+    /* Handshake: a right word, but marked (a framing error) */
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhaseHandshake, 1000));
+    MlinkRx rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.count = bench_pending.count;
+    rx.word[0] = 0x735A;
+    rx.framing_mask = 1;
+    gen3_mb_frame(&mb, &rx, &bench_pending, MLINK_TICK_US);
+    st = status();
+    ASSERT_EQ(st.last_fail, Gen3MbFailHandshake);
+    ASSERT_EQ(st.fail_want, 0x7300);
+    ASSERT_EQ(st.fail_got, MLINK_NO_DATA);
+    /* Hello compares no word here: they stay */
+    for(int i = 0; i < 1000 && status().phase != Gen3MbPhaseDetect; i++) {
+        memset(&rx, 0, sizeof(rx));
+        gen3_mb_frame(&mb, &rx, &bench_pending, MLINK_TICK_US);
+    }
+    reply_with(&bench_pending, 0x7202); /* stale */
+    reply_with(&bench_pending, 0x7202);
+    ASSERT_EQ(status().phase, Gen3MbPhaseHello);
+    reply_with(&bench_pending, 0x0000);
+    st = status();
+    ASSERT_EQ(st.last_fail, Gen3MbFailHello);
+    ASSERT_EQ(st.fail_want, 0x7300);
+    ASSERT_EQ(st.fail_got, MLINK_NO_DATA);
+    /* Length: a 0x7202 */
+    bench_init(0x1000, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhaseLength, 1000));
+    inject(0x7202);
+    st = status();
+    ASSERT_EQ(st.last_fail, Gen3MbFailLength);
+    ASSERT_EQ(st.fail_want, 0x7300);
+    ASSERT_EQ(st.fail_got, 0x7202);
+    /* Crc: the slave's CRC is ours plus one */
+    bench_init(0x1C0, 0x5A, 0xC3);
+    fake_bios_force_bad_crc(&bios, true);
+    fake_bios_power_on(&bios);
+    for(uint32_t i = 0; i < 100000 && status().restarts == 0; i++) run(&mb, &bios, 1);
+    st = status();
+    ASSERT_EQ(st.last_fail, Gen3MbFailCrc);
+    ASSERT_EQ(st.fail_got, (uint16_t)(st.fail_want + 1u));
+}
+
+/* D6 (plan 6): MultiPlay stays while SI reads low, or once the GBA answered; SI high in Wait or
+ * Detect moves to Normal, which stays. */
+TEST(test_mb_wire_next) {
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireMulti, true, Gen3MbPhaseDetect), MlinkWireMulti);
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireMulti, false, Gen3MbPhaseDetect), MlinkWireNormal);
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireMulti, false, Gen3MbPhaseWait), MlinkWireNormal);
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireMulti, false, Gen3MbPhaseHeader), MlinkWireMulti);
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireMulti, false, Gen3MbPhaseDone), MlinkWireMulti);
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireNormal, true, Gen3MbPhaseDetect), MlinkWireNormal);
+    ASSERT_EQ(gen3_mb_wire_next(MlinkWireNormal, false, Gen3MbPhaseData), MlinkWireNormal);
 }
 
 /* The fake on its own, driven word by word with multiboot-and-save.md §2.2's replies and the
@@ -1019,6 +1220,114 @@ TEST(test_fake_bios_checks) {
     ASSERT_EQ(fake_bios_boots(&bios), 0);
 }
 
+/* One Normal-wire transfer of the 32-bit word w (its low half in word, its upper half in hi): the
+ * reply, the slave's upper half. */
+static uint16_t xfer32(FakeBios* b, uint32_t w) {
+    MlinkTx tx = {.count = 1, .word = {(uint16_t)w}, .hi = {(uint16_t)(w >> 16)}};
+    MlinkRx rx;
+    fake_bios_frame(b, &tx, &rx);
+    return rx.word[0];
+}
+
+static uint32_t le32_at(const uint8_t* p) {
+    return p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* A 0x100-byte payload led by the Normal-mode vector's two plain words, then bytes i; its 64
+ * encrypted words and the final CRC, with rr 0x3C. */
+static void normal_vector_words(uint32_t out[64], uint16_t* crc) {
+    make_image(image, 0x1C0);
+    for(int i = 0; i < 0x100; i++) image[0xC0 + i] = (uint8_t)i;
+    static const uint8_t lead[8] = {0x78, 0x56, 0x34, 0x12, 0xF0, 0xDE, 0xBC, 0x9A};
+    memcpy(image + 0xC0, lead, sizeof(lead));
+    Gen3MbCrypt k;
+    gen3_mb_crypt_init(&k, MlinkWireNormal, GEN3_MB_PALETTE, 0x5A);
+    for(uint32_t i = 0; i < 64; i++) {
+        out[i] = gen3_mb_crypt_word(&k, 0xC0 + 4 * i, le32_at(image + 0xC0 + 4 * i));
+    }
+    *crc = gen3_mb_crypt_final(&k, gen3_mb_hh(0x5A), 0x3C);
+}
+
+/* The fake on the Normal wire, word by word: its own decryption takes the vector's encrypted words
+ * (multiboot-and-save.md §7.2) back to the plain ones, each data reply is the word's offset, and
+ * the CRC matches. */
+TEST(test_fake_bios_normal_vector) {
+    uint32_t words[64];
+    uint16_t crc;
+    normal_vector_words(words, &crc);
+    ASSERT_EQ(words[0], 0x7036291Du);
+    ASSERT_EQ(words[1], 0x47EF9D9Cu);
+    fake_bios_init(&bios, 0x5A, 0x3C);
+    fake_bios_set_wire(&bios, MlinkWireNormal);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(fake_handshake(&bios, image, 0x69));
+    idle(&bios, 94);
+    ASSERT_EQ(xfer(&bios, 0x000C, NULL), 0x733C);
+    ASSERT_EQ(xfer32(&bios, 0x7036291Du), 0x00C0);
+    ASSERT_EQ(le32_at(fake_bios_image(&bios, NULL) + 0xC0), 0x12345678u);
+    ASSERT_EQ(xfer32(&bios, 0x47EF9D9Cu), 0x00C4);
+    ASSERT_EQ(le32_at(fake_bios_image(&bios, NULL) + 0xC4), 0x9ABCDEF0u);
+    for(uint32_t k = 2; k < 64; k++) ASSERT_EQ(xfer32(&bios, words[k]), 0xC0 + 4 * k);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(xfer(&bios, 0x0065, NULL) != 0x0075);
+    ASSERT_EQ(xfer(&bios, 0x0065, NULL), 0x0075);
+    ASSERT_EQ(xfer(&bios, 0x0066, NULL), 0x0075);
+    ASSERT_EQ(xfer(&bios, crc, NULL), crc);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_EQ(fake_bios_phase(&bios), FakeBiosBooted);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(image_received(0x1C0));
+    /* booted: not ready from now on */
+    MlinkTx tx = {.count = 1, .word = {0x6200}};
+    MlinkRx rx;
+    fake_bios_frame(&bios, &tx, &rx);
+    ASSERT_EQ(rx.notready_mask, 1);
+    ASSERT_EQ(rx.timeout_mask, 1);
+    ASSERT_EQ(rx.ticks, MLINK_NORMAL_STALL_TICKS);
+}
+
+/* The Normal wire as the driver reports it: not-ready slots (off, starting up, booted) take
+ * MLINK_NORMAL_STALL_TICKS each and clock nothing; a delivered one takes a tick. An upper half on
+ * any word but a data word is refused. MultiPlay frames take max(count, 1) ticks. */
+TEST(test_fake_bios_normal_wire) {
+    MlinkTx tx = {.count = 2, .word = {0x6200, 0x6200}};
+    MlinkRx rx;
+    fake_bios_init(&bios, 0x5A, 0xC3);
+    fake_bios_frame(&bios, &tx, &rx);
+    ASSERT_EQ(rx.ticks, 2);
+    ASSERT_EQ(rx.notready_mask, 0);
+    ASSERT_EQ(rx.timeout_mask, 3);
+    tx.count = 0;
+    fake_bios_frame(&bios, &tx, &rx);
+    ASSERT_EQ(rx.ticks, 1);
+
+    fake_bios_init(&bios, 0x5A, 0xC3);
+    fake_bios_set_wire(&bios, MlinkWireNormal);
+    tx.count = 2;
+    fake_bios_frame(&bios, &tx, &rx); /* off */
+    ASSERT_EQ(rx.ticks, 2 * MLINK_NORMAL_STALL_TICKS);
+    ASSERT_EQ(rx.notready_mask, 3);
+    ASSERT_EQ(rx.timeout_mask, 3);
+    ASSERT_EQ(rx.word[0], MLINK_NO_DATA);
+    ASSERT_EQ(rx.word[1], MLINK_NO_DATA);
+    tx.count = 0;
+    fake_bios_frame(&bios, &tx, &rx);
+    ASSERT_EQ(rx.ticks, 1);
+    fake_bios_power_on(&bios);
+    tx.count = 3;
+    tx.word[2] = 0x6200;
+    fake_bios_frame(&bios, &tx, &rx); /* 2 starting up, then 0x0000 */
+    ASSERT_EQ(rx.ticks, 2 * MLINK_NORMAL_STALL_TICKS + 1);
+    ASSERT_EQ(rx.notready_mask, 3);
+    ASSERT_EQ(rx.timeout_mask, 3);
+    ASSERT_EQ(rx.word[2], 0x0000);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_EQ(xfer32(&bios, 0x00016200u), 0x7202);
+    ASSERT_TRUE(fake_bios_error(&bios) != NULL);
+    ASSERT_STR_EQ(fake_bios_error(&bios), "upper half not zero");
+    ASSERT_EQ(xfer32(&bios, 0x6200), 0x0000); /* back in detection */
+}
+
 int main(void) {
     RUN(test_mlink_frame_us);
     RUN(test_mb_crc_step);
@@ -1048,7 +1357,15 @@ int main(void) {
     RUN(test_mb_wrong_handshake_reply);
     RUN(test_mb_wrong_length_reply);
     RUN(test_mb_junk_wait);
+    RUN(test_mb_normal_vector);
+    RUN(test_mb_normal_boot);
+    RUN(test_mb_normal_waits_for_gba);
+    RUN(test_mb_normal_data_reply_mismatch);
+    RUN(test_mb_fail_words);
+    RUN(test_mb_wire_next);
     RUN(test_fake_bios_doc_vector);
     RUN(test_fake_bios_checks);
+    RUN(test_fake_bios_normal_vector);
+    RUN(test_fake_bios_normal_wire);
     TEST_EXIT();
 }

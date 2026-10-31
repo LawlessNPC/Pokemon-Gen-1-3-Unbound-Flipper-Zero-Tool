@@ -5,9 +5,17 @@
 #include <src/gen3/mlink_types.h>
 #include <src/gen3/gen3_rules.h>
 
-/* BIOS multiboot sender, the Flipper as the multiplayer parent and the GBA's BIOS (held at
- * Start+Select) as child 1: GBATEK "BIOS Multi Boot (Single Game Pak)", as specialised in
- * multiboot-and-save.md §2.2-§2.6. Pure C, no heap, no file-scope state.
+/* BIOS multiboot sender, the Flipper as the parent and the GBA's BIOS (held at Start+Select) as
+ * child 1: GBATEK "BIOS Multi Boot (Single Game Pak)", as specialised in multiboot-and-save.md
+ * §2.2-§2.6, on one of two wires, fixed at gen3_mb_init:
+ * - MultiPlay (MlinkWireMulti): 16-bit words, the multiplayer parent.
+ * - Normal (MlinkWireNormal, multiboot-and-save.md §7.2): the Normal-mode master. Every word is
+ *   32 bits; the parent's value goes in the low half with the upper half zero (MlinkTx.hi left as
+ *   the driver zeroed it), and the reply is the slave's upper half. The words and replies are
+ *   MultiPlay's but for the data block (one encrypted 32-bit word per transfer, MlinkTx.word its
+ *   low half and MlinkTx.hi its upper half, answered with its byte offset) and Normal's CRC and
+ *   key constants.
+ * Pure C, no heap, no file-scope state.
  *
  * ISR-safe: gen3_mb_frame runs in the driver's frame callback (stream mode). It and everything it
  * calls (gen3_mb_crypt_init, gen3_mb_crypt_word, gen3_mb_crypt_final, gen3_mb_crc_step,
@@ -57,22 +65,28 @@
 /* Waiting for 0x0075 (multiboot-and-save.md §2.2 step 12) */
 #define GEN3_MB_FINAL_US 5000000u
 
-/* One CRC step: 32 rounds over data, polynomial 0xA517 (multiboot-and-save.md §2.3). */
-uint32_t gen3_mb_crc_step(uint32_t crc, uint32_t data);
+/* One CRC step: 32 rounds over data with poly, 0xA517 on MultiPlay (multiboot-and-save.md §2.3),
+ * 0xC37B on Normal (§7.2). */
+uint32_t gen3_mb_crc_step(uint32_t crc, uint32_t data, uint16_t poly);
 /* The handshake byte for one child: (0x11 + cc + 0xFF + 0xFF) & 0xFF, absent children as 0xFF. */
 uint8_t gen3_mb_hh(uint8_t cc);
 
 typedef struct {
     uint32_t seed;
     uint32_t crc;
+    uint32_t key; /* the data key */
+    uint16_t poly; /* the CRC polynomial */
 } Gen3MbCrypt;
 
-/* seed = pp | cc << 8 | 0xFFFF0000, crc = 0xFFF8 */
-void gen3_mb_crypt_init(Gen3MbCrypt* k, uint8_t pp, uint8_t cc);
+/* seed = pp | cc << 8 | 0xFFFF0000 on both wires. The CRC init, polynomial and data key are the
+ * wire's: MultiPlay 0xFFF8, 0xA517, 0x6465646F (multiboot-and-save.md §2.3); Normal 0xC387,
+ * 0xC37B, 0x43202F2F (§7.2). */
+void gen3_mb_crypt_init(Gen3MbCrypt* k, MlinkWire wire, uint8_t pp, uint8_t cc);
 /* Plaintext word at byte offset ptr (0xC0, 0xC4, ...): CRC step, seed step, and the encrypted
- * word e, sent as e & 0xFFFF then e >> 16 (multiboot-and-save.md §2.3). */
+ * word e (multiboot-and-save.md §2.3), sent on MultiPlay as e & 0xFFFF then e >> 16, on Normal in
+ * one transfer. */
 uint32_t gen3_mb_crypt_word(Gen3MbCrypt* k, uint32_t ptr, uint32_t plain);
-/* The final CRC: gen3_mb_crc_step(crc, hh | rr << 8 | 0xFFFF0000), 16 bits. */
+/* The final CRC: gen3_mb_crc_step(crc, hh | rr << 8 | 0xFFFF0000, k->poly), 16 bits. */
 uint16_t gen3_mb_crypt_final(const Gen3MbCrypt* k, uint8_t hh, uint8_t rr);
 
 typedef enum {
@@ -104,6 +118,12 @@ typedef enum {
     Gen3MbPhaseFailed,
 } Gen3MbPhase;
 
+/* The wire for the next attempt, plan 6 D6: si_low is SI as the cable check reads it now, phase
+ * the sender's. MultiPlay stays while SI reads low, or once the GBA has answered (any phase but
+ * Wait and Detect); SI high in Wait or Detect moves to Normal (a GBC cable, a reversed GBA cable,
+ * or none); Normal stays. Pure. */
+MlinkWire gen3_mb_wire_next(MlinkWire wire, bool si_low, Gen3MbPhase phase);
+
 typedef enum {
     Gen3MbFailNone,
     Gen3MbFailHello,
@@ -123,6 +143,11 @@ typedef struct {
     /* The latest failure, counted or not: a palette wait that saw only 0x7202 sets Palette */
     Gen3MbFail last_fail;
     uint8_t restarts; /* counted failures (all after detection succeeded) */
+    /* The latest Header, Data, Handshake, Length or Crc failure: the word expected (Handshake and
+     * Length: 0x7300, the high byte the reply needs) and the word that came (MLINK_NO_DATA for a
+     * marked one); 0, 0 until one happens. Other failures keep them. */
+    uint16_t fail_want;
+    uint16_t fail_got;
     uint8_t cc; /* the slave's byte from its latest 0x73cc; 0 until one came */
     uint8_t rr; /* the slave's byte from its latest 0x73rr; 0 until one came */
     /* Every restart wait, counted or not (a detection drain, a palette wait that saw only
@@ -134,13 +159,14 @@ typedef struct {
     /* The latest Final that got its 0x0075: the time from its first 0x0065 to the end of the frame
      * that 0x0075 came in, in link ticks (real time), against GEN3_MB_FINAL_US; 0 until one came */
     uint32_t final_us;
-    uint32_t sent; /* payload bytes acknowledged */
+    uint32_t sent; /* payload bytes acknowledged (Normal: 4 per word) */
     uint32_t total; /* payload bytes to send: len - GEN3_MB_HEADER_LEN */
     uint32_t waiting_us; /* time in Wait and Detect since the last 0x7202 (UI hint after 3 s) */
 } Gen3MbStatus;
 
 /* Holds a pointer to the caller's image; no heap. Fields are private to gen3_mb.c. */
 typedef struct Gen3Mb {
+    MlinkWire wire;
     const uint8_t* img;
     uint32_t len;
     Gen3Rng rng; /* restart waits */
@@ -148,6 +174,8 @@ typedef struct Gen3Mb {
     Gen3MbPhase phase;
     Gen3MbFail last_fail;
     uint8_t restarts;
+    uint16_t fail_want;
+    uint16_t fail_got;
     uint8_t cc; /* the slave's byte from 0x73cc */
     uint8_t rr; /* the slave's byte from 0x73rr */
     uint16_t all_restarts; /* every mb_wait */
@@ -158,9 +186,9 @@ typedef struct Gen3Mb {
     bool stale; /* Detect: the next unmarked reply answers a word sent before Detect began */
     bool palette_other; /* Palette: a reply other than a valid 0x7202 came back */
     bool attempting; /* a header word has gone out: the attempt budget runs */
-    uint16_t pos; /* Header: next word of 98; Data: next payload halfword */
+    uint16_t pos; /* Header: next word of 98; Data: next payload unit (a halfword; Normal: a word) */
     uint16_t crc; /* Crc: the CRC sent */
-    uint32_t e; /* Data: the encrypted word whose high half goes next */
+    uint32_t e; /* Data (MultiPlay): the encrypted word whose high half goes next */
     uint32_t phase_us; /* time in this phase */
     uint32_t poll_us; /* Final: time since the last 0x0065 */
     uint32_t wait_us; /* Wait: this wait's length */
@@ -169,15 +197,17 @@ typedef struct Gen3Mb {
     uint32_t waiting_us;
 } Gen3Mb;
 
-/* Starts in Detect; the first gen3_mb_frame call (rx NULL) polls at once. img must pass
- * gen3_mb_image_check and stay valid until Done or Failed. A len outside GEN3_MB_MIN_LEN..
- * GEN3_MB_MAX_LEN or not a multiple of 16 starts Failed, and nothing past len is ever read. */
-void gen3_mb_init(Gen3Mb* mb, const uint8_t* img, uint32_t len, uint32_t seed);
+/* Starts in Detect on wire, which the driver must clock; the first gen3_mb_frame call (rx NULL)
+ * polls at once. img must pass gen3_mb_image_check and stay valid until Done or Failed. A len
+ * outside GEN3_MB_MIN_LEN..GEN3_MB_MAX_LEN or not a multiple of 16 starts Failed, and nothing past
+ * len is ever read. */
+void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, const uint8_t* img, uint32_t len, uint32_t seed);
 
 /* One call per driver frame (ISR context). rx is the result of the previous tx (NULL on the first
- * call); elapsed_us is that frame's time (mlink_frame_us(MlinkModeStream, rx->count); 0 on the
- * first call). Fills tx: count 0 (an idle tick), 1 (a poll or a handshake word) or up to
- * MLINK_BURST_LEN (header and data, checked reply by reply). */
+ * call); elapsed_us is that frame's time (rx->ticks * MLINK_TICK_US; 0 on the first call). Fills
+ * tx: count 0 (an idle tick), 1 (a poll or a handshake word) or up to MLINK_BURST_LEN (header and
+ * data, checked reply by reply). On Normal it sets tx->hi only for data words and relies on the
+ * driver having zeroed the rest. A not-ready slot is a marked word, as a timed-out one is. */
 void gen3_mb_frame(Gen3Mb* mb, const MlinkRx* rx, MlinkTx* tx, uint32_t elapsed_us);
 
 /* Safe to call from a thread while the ISR runs: phase is one aligned field, written once per
