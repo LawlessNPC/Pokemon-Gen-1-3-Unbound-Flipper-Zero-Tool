@@ -192,6 +192,10 @@ static Gen3CartResult cart_hello(Gen3Cart* c) {
     return cart_read(c, r);
 }
 
+void gen3_cart_expect_boot(Gen3Cart* c) {
+    if(c->relink_us < GEN3_CART_BOOT_US) c->relink_us = GEN3_CART_BOOT_US;
+}
+
 Gen3CartResult gen3_cart_connect(Gen3Cart* c) {
     cart_step(c, Gen3CartStepIdentify, 0, 3);
     /* Unlinked until the end: after a cancel or an error midway, info and id may describe

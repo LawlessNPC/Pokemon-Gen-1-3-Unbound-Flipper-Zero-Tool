@@ -377,6 +377,28 @@ TEST(test_job_connect_waits_out_busy) {
     ASSERT_EQ(calls(GEN3_HCMD_CART_INFO), 2);
 }
 
+/* After multiboot the GBA takes a few seconds to start the helper (3.5 s measured on 2026-10-31):
+ * one sync is too short for it... */
+TEST(test_job_connect_late_helper) {
+    ASSERT_TRUE(setup());
+    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), 3300); /* about 3.5 s */
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartLinkLost);
+}
+
+/* ...so the first connect after a send keeps trying HELLO for GEN3_CART_BOOT_US, and only that
+ * one: a connect that came through uses the wait up */
+TEST(test_job_connect_after_boot) {
+    ASSERT_TRUE(setup());
+    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), 3300);
+    gen3_cart_expect_boot(&cart);
+    tap.syncs = 0;
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartOk);
+    ASSERT_TRUE(tap.syncs >= 2);
+    ASSERT_EQ(calls(GEN3_HCMD_HELLO), 1);
+    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), 3300);
+    ASSERT_EQ(gen3_cart_connect(&cart), Gen3CartLinkLost);
+}
+
 /* After a lost command, no job sends anything until a connect */
 TEST(test_job_link_needs_connect) {
     ASSERT_TRUE(backed_up());
@@ -1995,6 +2017,8 @@ int main(void) {
     if(!bulk_file_open()) return 1;
     RUN(test_job_connect);
     RUN(test_job_connect_waits_out_busy);
+    RUN(test_job_connect_late_helper);
+    RUN(test_job_connect_after_boot);
     RUN(test_job_link_needs_connect);
     RUN(test_job_busy_timeout);
     RUN(test_job_connect_wrong_helper);

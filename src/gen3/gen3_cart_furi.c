@@ -593,6 +593,8 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     s->core = Gen3CartCoreHlink;
     s->pump_on = true;
 
+    /* The GBA starts the helper a few seconds after the last multiboot word */
+    gen3_cart_expect_boot(&s->cart);
     r = gen3_cart_connect(&s->cart);
     if(r != Gen3CartOk) return r;
     cart_log_cart(s);

@@ -35,6 +35,9 @@
 
 #define GEN3_CART_BUF_SIZE 4096u /* the buffer gen3_cart_init takes: one sector */
 #define GEN3_CART_NAME_MAX 48u /* a store name with its terminator */
+/* How long the first connect after a send keeps trying HELLO (gen3_cart_expect_boot): three
+ * syncs, over twice the 3.5 s a GBA took to start the helper */
+#define GEN3_CART_BOOT_US 9000000u
 #define GEN3_CART_WORK_NAME "cart_work.bin"
 #define GEN3_CART_BACKUP_DIR "backups"
 #define GEN3_CART_ROM_DIR "roms"
@@ -210,6 +213,10 @@ void gen3_cart_init(
  * or an error midway, no job runs until the next one. Progress Identify; cancel between
  * commands. */
 Gen3CartResult gen3_cart_connect(Gen3Cart* c);
+/* The helper was just sent: the next gen3_cart_connect keeps trying HELLO for at least
+ * GEN3_CART_BOOT_US. After the last multiboot word a GBA takes a few seconds before it starts the
+ * helper (3.5 s on the first one measured, 2026-10-31), longer than one sync. */
+void gen3_cart_expect_boot(Gen3Cart* c);
 /* After gen3_cart_connect: keeps the current backup and working copy, edits included, if this
  * cart's header and flash id (the connect checked them) and its footers (READ_FOOTERS) still match
  * them, except that the slot of a write or restore not yet backed up may also hold sectors with no
