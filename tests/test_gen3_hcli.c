@@ -284,7 +284,8 @@ static void idle(uint32_t us) {
 static const uint16_t hello_req[] = {HP_SOF, 0x0101, 0x0000, 0xD24E, 0x983A};
 
 /* The 9 words of a HELLO response (from its SOF) and the READY after it; false if any is wrong.
- * The Flipper's words meanwhile are junk: the helper doesn't read them. */
+ * The Flipper's words meanwhile are junk: the helper doesn't read them. Slave id 1, and the boot
+ * mode of the fake helper's wire: 2 on Normal, 3 on MultiPlay. */
 static bool hello_response(uint8_t seq) {
     uint16_t r[9];
     for(uint32_t i = 0; i < 9; i++) r[i] = xfer(0x1234);
@@ -295,7 +296,7 @@ static bool hello_response(uint8_t seq) {
         HP_PROTO_VERSION,
         HP_BUILD_ID,
         HP_MAX_PAYLOAD,
-        0x0103,
+        fh.wire == MlinkWireNormal ? 0x0102 : 0x0103,
     };
     const uint32_t crc = words_crc(r + 1, 6);
     return memcmp(r, want, sizeof(want)) == 0 && r[7] == (uint16_t)crc &&
@@ -670,7 +671,8 @@ static void connect_on(MlinkWire wire) {
     ASSERT_EQ(hello.proto, 1);
     ASSERT_EQ(hello.build, HP_BUILD_ID);
     ASSERT_EQ(hello.max_payload, 2064);
-    ASSERT_EQ(hello.boot_mode, 3);
+    /* The boot mode the BIOS left at header 0xC4: 2 for a Normal-mode boot, 3 for MultiPlay */
+    ASSERT_EQ(hello.boot_mode, wire == MlinkWireNormal ? 2 : 3);
     ASSERT_EQ(hello.slave_id, 1);
     ASSERT_EQ(tap.syncs, 1);
     ASSERT_EQ(tap.exchanges, 1);
@@ -1147,9 +1149,9 @@ TEST(test_hcli_too_long_then_hello) {
 /* ---- The Normal wire ---- */
 
 /* test_hcli_connect, test_hcli_cart_info and test_hcli_read_sector on the Normal wire, with the
- * same assertions. The helper's time (CART_INFO's 7 s scan, a sector read) comes as not-ready
- * slots, which the pump takes as BUSY; with the cable out every slot is not ready. The fake GBA's
- * own header says boot mode 3 whatever the wire. */
+ * same assertions but HELLO's boot mode, 2 there. The helper's time (CART_INFO's 7 s scan, a
+ * sector read) comes as not-ready slots, which the pump takes as BUSY; with the cable out every
+ * slot is not ready. */
 TEST(test_hcli_normal_roundtrip) {
     connect_on(MlinkWireNormal);
     cart_info_on(MlinkWireNormal);

@@ -19,6 +19,8 @@ void fake_helper_init(FakeHelper* f, FakeGba* gba) {
 
 void fake_helper_set_wire(FakeHelper* f, MlinkWire wire) {
     f->wire = wire;
+    /* The boot mode the BIOS left at header 0xC4 (GBATEK "Multiboot Header"), as HELLO reports it */
+    f->gba->own[0xC4] = wire == MlinkWireNormal ? 2u : 3u;
 }
 
 /* Transfer n never gets to the helper: the cable is out, or the GBA is off. */

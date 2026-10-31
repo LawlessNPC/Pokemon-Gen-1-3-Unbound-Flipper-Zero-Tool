@@ -85,7 +85,9 @@ struct FakeHelper {
 /* The helper just started on gba, which must be fake_gba_current(): hp_init, HP_READY loaded, time
  * 0, the MultiPlay wire, no unplug, no corruption, no hook and no transport. */
 void fake_helper_init(FakeHelper* f, FakeGba* gba);
-/* The wire the Flipper's driver clocks, from the next frame on. */
+/* The wire the Flipper's driver clocks, from the next frame on, and the boot mode the BIOS left
+ * at the helper's header 0xC4, which HELLO reports: 2 on the Normal wire, 3 on MultiPlay (as
+ * fake_gba_init sets it). */
 void fake_helper_set_wire(FakeHelper* f, MlinkWire wire);
 /* One driver frame: tx is the Flipper's (count 0..MLINK_BURST_LEN; 0 is an idle tick), rx gets the
  * replies as the driver reports them, and rx->ticks the frame's time in ticks: max(count, 1) on
