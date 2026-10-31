@@ -91,6 +91,11 @@ static uint16_t hp_xfer(uint16_t out, uint8_t* flags) {
  * with HP_STEP_TIMEOUT in *flags after 200 ms without a transfer; there is no error bit. */
 static uint16_t hp_xfer_normal(uint16_t out, uint8_t* flags) {
     HP_SIODATA32 = (uint32_t)out << 16;
+    /* A transfer-end flag latched after the last arming's timeout (its transfer came just too
+     * late) isn't this one's: drop it before arming, so the wait below can't end before this
+     * transfer does. Before SO goes low, so that the window where SO is low but nothing is armed
+     * stays as short as it was. */
+    HP_IF = HP_IRQ_SERIAL;
     HP_SIOCNT = HP_SIOCNT_NORMAL;
     /* Armed with SO low: GBATEK is unclear whether bit 3 drives SO while the slave waits or only
      * after the transfer, and low (ready) is right under either reading. */
