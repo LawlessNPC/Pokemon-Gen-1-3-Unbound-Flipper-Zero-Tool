@@ -119,11 +119,16 @@ static uint16_t hlink_req_word(Gen3Hlink* h, uint16_t k) {
 }
 
 /* A word, while waiting for READY before a request or for the SOF after it, that isn't the one
- * awaited: a valid BUSY starts the count of other words again; `limit` of them in a row fail with
- * `why`. */
-static bool
-    hlink_wait_other(Gen3Hlink* h, uint16_t w, bool valid, uint16_t limit, Gen3HlinkFail why) {
-    if(valid && w == GEN3_HLINK_BUSY) {
+ * awaited: a valid BUSY, or a not-ready word (the Normal wire's busy helper), starts the count of
+ * other words again; `limit` of them in a row fail with `why`. */
+static bool hlink_wait_other(
+    Gen3Hlink* h,
+    uint16_t w,
+    bool valid,
+    bool notready,
+    uint16_t limit,
+    Gen3HlinkFail why) {
+    if(notready || (valid && w == GEN3_HLINK_BUSY)) {
         h->busy = true;
         h->other = 0;
         return true;
@@ -190,8 +195,9 @@ static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid) {
     return true;
 }
 
-/* One reply word, in order; false when the rest of the frame doesn't matter. */
-static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid) {
+/* One reply word, in order; false when the rest of the frame doesn't matter. A not-ready word is
+ * never valid: BUSY while waiting, a broken run in Sync, a wire error in a response. */
+static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid, bool notready) {
     switch(h->state) {
     case Gen3HlinkSync:
         if(!valid || w != GEN3_HLINK_READY) {
@@ -207,7 +213,8 @@ static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid) {
             h->ready = true; /* the request goes out from the next frame */
             return false;
         }
-        return hlink_wait_other(h, w, valid, GEN3_HLINK_NOT_READY_XFERS, Gen3HlinkFailNoReady);
+        return hlink_wait_other(
+            h, w, valid, notready, GEN3_HLINK_NOT_READY_XFERS, Gen3HlinkFailNoReady);
     case Gen3HlinkWaiting:
         if(valid && w == GEN3_HLINK_SOF) {
             h->state = Gen3HlinkReceiving;
@@ -218,7 +225,7 @@ static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid) {
             return true;
         }
         return hlink_wait_other(
-            h, w, valid, GEN3_HLINK_NO_RESPONSE_XFERS, Gen3HlinkFailNoResponse);
+            h, w, valid, notready, GEN3_HLINK_NO_RESPONSE_XFERS, Gen3HlinkFailNoResponse);
     case Gen3HlinkReceiving:
         return hlink_recv(h, w, valid);
     case Gen3HlinkIdle:
@@ -284,9 +291,10 @@ void gen3_hlink_frame(Gen3Hlink* h, const MlinkRx* rx, MlinkTx* tx, uint32_t ela
         return;
     }
     const uint8_t count = !rx ? 0 : rx->count < MLINK_BURST_LEN ? rx->count : MLINK_BURST_LEN;
-    const uint16_t bad = rx ? (uint16_t)(rx->timeout_mask | rx->framing_mask) : 0;
+    const uint16_t notready = rx ? rx->notready_mask : 0;
+    const uint16_t bad = rx ? (uint16_t)(rx->timeout_mask | rx->framing_mask | notready) : 0;
     for(uint8_t t = h->skip; t < count; t++) {
-        if(!hlink_word(h, rx->word[t], !((bad >> t) & 1u))) break;
+        if(!hlink_word(h, rx->word[t], !((bad >> t) & 1u), (notready >> t) & 1u)) break;
     }
     h->skip = 0;
     hlink_time(h, elapsed_us);

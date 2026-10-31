@@ -12,6 +12,9 @@
 typedef struct {
     uint8_t count; /* frame mode 1..9; stream mode 0..9, 0 = idle tick (no transfer) */
     uint16_t word[MLINK_BURST_LEN];
+    /* Normal wire: the upper half of each 32-bit word, zeroed by the driver before every frame
+     * callback, so only a producer that wants one sets it. The MultiPlay wire ignores it. */
+    uint16_t hi[MLINK_BURST_LEN];
 } MlinkTx;
 
 typedef struct {
@@ -19,7 +22,20 @@ typedef struct {
     uint16_t word[MLINK_BURST_LEN]; /* GBA's word per transfer, MLINK_NO_DATA if no answer */
     uint16_t timeout_mask; /* bit t: no start bit seen in transfer t */
     uint16_t framing_mask; /* bit t: stop bit low in transfer t */
+    /* Normal wire: bit t set when the slave never got ready and nothing was clocked (word t is
+     * MLINK_NO_DATA and timeout_mask has the bit too). Always 0 on the MultiPlay wire. */
+    uint16_t notready_mask;
+    /* Stream mode: the frame's time in ticks (MLINK_TICK_US each). On the MultiPlay wire
+     * max(count, 1), a frame the cable guard skips included. */
+    uint16_t ticks;
 } MlinkRx;
+
+/* Which wire the driver clocks: the 16-bit MultiPlay words, or 32-bit Normal-mode words (stream
+ * mode only; a word's reply is its upper half). */
+typedef enum { MlinkWireMulti, MlinkWireNormal } MlinkWire;
+
+/* Normal wire: ticks a slot waits for the slave to get ready before it is reported not ready. */
+#define MLINK_NORMAL_STALL_TICKS 16u
 
 /* Frame: frames start at the GBA frame rate (the Cable Club link). Stream: a frame starts on the
  * tick after the previous frame's callback, and count 0 is an idle tick (multiboot and the helper

@@ -777,6 +777,104 @@ TEST(test_hlink_request_too_long) {
     ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkSending);
 }
 
+/* ---- Not ready: the Normal wire's slave that never got ready (D3, D4) ---- */
+
+/* A not-ready frame: 9 words, none clocked, as the Normal wire reports a slave that stalled
+ * MLINK_NORMAL_STALL_TICKS ticks in every slot. */
+#define NR_FRAME_US (MLINK_BURST_LEN * MLINK_NORMAL_STALL_TICKS * MLINK_TICK_US)
+
+/* A frame of `words`, with the slots in `nr` (a bit mask) not ready. */
+static MlinkTx nr_frame(const uint16_t* words, uint8_t n, uint16_t nr, uint32_t elapsed) {
+    MlinkRx rx;
+    memset(&rx, 0, sizeof(rx));
+    rx.count = n;
+    for(uint8_t t = 0; t < n; t++) {
+        rx.word[t] = ((nr >> t) & 1u) ? MLINK_NO_DATA : words[t];
+    }
+    rx.notready_mask = nr;
+    rx.timeout_mask = nr;
+    MlinkTx tx;
+    memset(&tx, 0xA5, sizeof(tx));
+    gen3_hlink_frame(&h, &rx, &tx, elapsed);
+    return tx;
+}
+
+static MlinkTx nr_all(uint32_t frames) {
+    uint16_t w[MLINK_BURST_LEN];
+    fill(w, 0, MLINK_BURST_LEN);
+    MlinkTx tx;
+    memset(&tx, 0, sizeof(tx));
+    for(uint32_t f = 0; f < frames; f++) tx = nr_frame(w, MLINK_BURST_LEN, 0x1FFu, NR_FRAME_US);
+    return tx;
+}
+
+/* HELLO's request has gone out and its replies are skipped */
+static void hello_sent(uint32_t busy_us) {
+    Gen3HlinkReq r = hello;
+    r.busy_us = busy_us;
+    send(&r);
+}
+
+TEST(test_hlink_notready_waiting_is_busy) {
+    ASSERT_EQ(NR_FRAME_US, 154512u);
+    hello_sent(0);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkWaiting);
+    /* 37 frames, 333 words: far over NO_RESPONSE_XFERS, and the helper is still busy */
+    nr_all(37);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkWaiting);
+    reply(0, hello_ok, 9, -1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkDone);
+}
+
+TEST(test_hlink_notready_busy_budget) {
+    hello_sent(0);
+    nr_all(38);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkWaiting);
+    nr_all(1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailBusyTimeout);
+}
+
+TEST(test_hlink_notready_before_ready) {
+    gen3_hlink_init(&h);
+    gen3_hlink_submit(&h, &hello);
+    frame(&h, NULL, 0, 0, 0);
+    MlinkTx tx = nr_all(20); /* 180 words */
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkSending);
+    ASSERT_TRUE(idle_tx(&tx));
+    uint16_t ready[MLINK_BURST_LEN];
+    fill(ready, READY, MLINK_BURST_LEN);
+    tx = frame(&h, ready, MLINK_BURST_LEN, 0, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkWaiting); /* the whole request fits one frame */
+    ASSERT_EQ(tx.count, MLINK_BURST_LEN);
+    ASSERT_EQ(tx.word[0], SOF);
+}
+
+TEST(test_hlink_notready_in_response_is_wire) {
+    hello_sent(0); /* HELLO is 5 words: the first frame skips their replies */
+    /* SOF, w1, n = 2, a word never delivered, then the rest */
+    const uint16_t w[MLINK_BURST_LEN] = {
+        RECV, RECV, RECV, RECV, RECV, SOF, 0x0104, 0x0002, 0};
+    nr_frame(w, MLINK_BURST_LEN, 1u << 8, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkReceiving);
+    const uint16_t rest[3] = {0, 0x7B2C, 0x0AD7};
+    nr_frame(rest, 3, 0, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailWire);
+}
+
+TEST(test_hlink_notready_sync_resets_run) {
+    gen3_hlink_init(&h);
+    gen3_hlink_sync(&h, 4, 3000000u);
+    frame(&h, NULL, 0, 0, 0);
+    const uint16_t a[MLINK_BURST_LEN] = {READY, READY, 0, READY, READY, READY};
+    nr_frame(a, 6, 1u << 2, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkSync);
+    const uint16_t b[1] = {READY};
+    nr_frame(b, 1, 0, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkDone);
+}
+
 int main(void) {
     RUN(test_crc32_check);
     RUN(test_hlink_idle);
@@ -800,5 +898,10 @@ int main(void) {
     RUN(test_hlink_sync_timeout);
     RUN(test_hlink_handoff);
     RUN(test_hlink_request_too_long);
+    RUN(test_hlink_notready_waiting_is_busy);
+    RUN(test_hlink_notready_busy_budget);
+    RUN(test_hlink_notready_before_ready);
+    RUN(test_hlink_notready_in_response_is_wire);
+    RUN(test_hlink_notready_sync_resets_run);
     TEST_EXIT();
 }

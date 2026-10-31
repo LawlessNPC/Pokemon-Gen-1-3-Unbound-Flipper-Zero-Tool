@@ -40,6 +40,12 @@
  * a write-class command gets the stored response instead of a second run
  * (multiboot-and-save.md §6.5, §6.8). */
 
+/* Normal wire (D4): a slave that is running a command can't answer, so no HP_BUSY word comes; the
+ * driver reports the slot not ready (MlinkRx.notready_mask, also a timed-out word). The pump
+ * treats that word like a valid BUSY wherever it waits (Sending before READY, Waiting): it starts
+ * the budget and the count of other words again. In Sync it breaks the run of READY. Inside a
+ * response it is a wire error, like a timed-out word. */
+
 /* After a request's last word: words in a row that are neither BUSY nor a SOF (timed-out words
  * count) before the response counts as lost, multiboot-and-save.md §6.5. A BUSY starts the count
  * again. About 34 ms of ticks; about 4 ms with the cable out. */
