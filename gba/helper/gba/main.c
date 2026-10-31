@@ -23,6 +23,7 @@
 #define HP_SIOMULTI0 HP_REG16(0x04000120u) /* the Flipper's word of the last transfer */
 #define HP_SIOCNT HP_REG16(0x04000128u)
 #define HP_SIOMLT_SEND HP_REG16(0x0400012Au) /* our word for the next transfer */
+#define HP_SIODATA32 (*(volatile uint32_t*)0x04000120u) /* Normal mode: the whole 32-bit word */
 #define HP_RCNT HP_REG16(0x04000134u)
 #define HP_IE HP_REG16(0x04000200u)
 #define HP_IF HP_REG16(0x04000202u)
@@ -34,6 +35,15 @@
 #define HP_SIOCNT_ERROR 0x0040u
 #define HP_SIOCNT_BUSY 0x0080u
 #define HP_IRQ_SERIAL 0x0080u
+
+/* The BIOS writes the boot mode at header 0xC4: 2 = Normal (GBC cable), 3 = MultiPlay */
+#define HP_BOOT_MODE_OFFSET 0xC4u
+#define HP_BOOT_NORMAL 2u
+/* Normal mode, 32-bit, IRQ request on, external clock (we are the slave). SO (bit 3) low means
+ * "ready" to the Flipper, which clocks a transfer only while it reads its SI low. */
+#define HP_SIOCNT_NORMAL 0x5000u
+#define HP_SIOCNT_START 0x0080u
+#define HP_SIOCNT_SO_HIGH 0x0008u
 
 /* 200 ms without a transfer (multiboot-and-save.md §6.5), in 1.0224 ms timer units */
 #define HP_RX_TIMEOUT_UNITS 196u
@@ -75,9 +85,55 @@ static uint16_t hp_xfer(uint16_t out, uint8_t* flags) {
     return HP_SIOMULTI0;
 }
 
+/* Normal wire: arms one 32-bit transfer, waits for it, and leaves SO high ("not ready") again.
+ * The Flipper's word is the low half, ours goes in the high half. Returns the Flipper's word,
+ * with HP_STEP_TIMEOUT in *flags after 200 ms without a transfer; there is no error bit. */
+static uint16_t hp_xfer_normal(uint16_t out, uint8_t* flags) {
+    HP_SIODATA32 = (uint32_t)out << 16;
+    HP_SIOCNT = HP_SIOCNT_NORMAL;
+    /* Armed with SO low: GBATEK is unclear whether bit 3 drives SO while the slave waits or only
+     * after the transfer, and low (ready) is right under either reading. */
+    HP_SIOCNT = HP_SIOCNT_NORMAL | HP_SIOCNT_START;
+    const bool ended = hp_transfer_end(true);
+    /* Not ready (start clear, SO high) at once, also after a timeout: the Flipper samples SI only
+     * about 0.9 ms later, and must not see a ready slave that is no longer armed. */
+    HP_SIOCNT = HP_SIOCNT_NORMAL | HP_SIOCNT_SO_HIGH;
+    if(!ended) {
+        *flags = HP_STEP_TIMEOUT;
+        return 0;
+    }
+    *flags = 0;
+    return (uint16_t)HP_SIODATA32;
+}
+
+/* The Normal-wire loop. The Flipper sees SO high while no transfer is armed and takes that as
+ * busy, so a pending command runs at once, with no HP_BUSY transfer; the next armed transfer
+ * carries the response's first word. */
+static void hp_run_normal(void) {
+    HP_RCNT = 0;
+    HP_SIOCNT = HP_SIOCNT_NORMAL | HP_SIOCNT_SO_HIGH;
+    HP_IE = HP_IRQ_SERIAL;
+    HP_DISPCNT = 0;
+    hp_hal_status(HpStatusReady);
+    hp_init(&hp);
+    HP_IF = HP_IRQ_SERIAL;
+    uint16_t out = HP_READY;
+    for(;;) {
+        uint8_t flags;
+        const uint16_t in = hp_xfer_normal(out, &flags);
+        out = hp_step(&hp, in, flags);
+        if(hp_exec_pending(&hp)) {
+            hp_hal_status(HpStatusBusy);
+            out = hp_execute(&hp);
+            hp_hal_status(HpStatusReady);
+        }
+    }
+}
+
 int main(void) {
     HP_IME = 0;
     HP_WAITCNT_REG = HP_WAITCNT;
+    if(hp_hal_own_header()[HP_BOOT_MODE_OFFSET] == HP_BOOT_NORMAL) hp_run_normal();
     HP_RCNT = 0;
     HP_SIOCNT = HP_SIOCNT_MULTI;
     HP_IE = HP_IRQ_SERIAL;
