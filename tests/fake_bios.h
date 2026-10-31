@@ -20,9 +20,12 @@
  *   with the upper half (hi) zero, the reply the slave's upper half. The words and replies are
  *   MultiPlay's but for the data block: each data transfer takes one encrypted 32-bit word,
  *   decrypted with Normal mode's CRC init, polynomial and key, and loads the low 16 bits of the
- *   next word's offset as its reply. Off, during the 2 startup transfers and once booted, every
- *   slot is not ready: nothing clocked, MLINK_NO_DATA, its timeout and not-ready bits, and
- *   MLINK_NORMAL_STALL_TICKS ticks; a delivered slot takes one tick.
+ *   next word's offset as its reply. The driver's ready gate (fake_bios_set_gate) decides what a
+ *   slot does while the BIOS isn't in its loop (off, during the 2 startup transfers, once
+ *   booted). Gated, the default: the slot is not ready: nothing clocked, MLINK_NO_DATA, its
+ *   timeout and not-ready bits, and MLINK_NORMAL_STALL_TICKS ticks. Ungated (the runner's BIOS
+ *   phase, multiboot-and-save.md §7.3): the slot is clocked all the same and reads 0xFFFF, SI
+ *   pulled high, with no mask bit, in one tick. A delivered slot takes one tick.
  * Time: each slot starts when the one before it in the frame ends, and a count-0 frame is one idle
  * tick. rx->ticks is the frame's time in ticks.
  *
@@ -47,15 +50,16 @@
 #define FAKE_BIOS_MEM_LEN 0x40000u /* 0x02000000..0x0203FFFF: header, then payload */
 
 typedef enum {
-    FakeBiosOff, /* every transfer times out (Normal: not ready) */
+    FakeBiosOff, /* every transfer times out (Normal: not ready, or 0xFFFF ungated) */
     FakeBiosWaiting, /* the BIOS waits for multiboot */
-    FakeBiosBooted, /* it took an image; transfers time out (Normal: not ready) */
+    FakeBiosBooted, /* it took an image; transfers time out (Normal: as off) */
 } FakeBiosPhase;
 
 typedef struct FakeBios FakeBios;
 
 struct FakeBios {
     MlinkWire wire;
+    bool gate; /* Normal: the driver's ready gate (fake_bios_set_gate) */
     FakeBiosPhase phase;
     uint8_t cc; /* its byte in 0x73cc */
     uint8_t rr; /* its byte in 0x73rr */
@@ -64,7 +68,7 @@ struct FakeBios {
     uint32_t corrupt_at; /* transfer number from power-on (1 = the first), 0 = none */
     bool bad_crc;
     uint8_t step; /* where it is in multiboot-and-save.md §2.2's sequence */
-    uint8_t startup; /* transfers that still time out (Normal: not ready) after power-on */
+    uint8_t startup; /* transfers that still time out (Normal: as off) after power-on */
     uint16_t send; /* SIOMULTI_SEND (Normal: the upper half of SIODATA32) */
     uint16_t prev_reply; /* the previous transfer's reply (FAKE_BIOS_NO_REPLY: none) */
     uint64_t busy_until_us; /* palette or final step: busy before this time */
@@ -88,11 +92,14 @@ struct FakeBios {
     uint8_t mem[FAKE_BIOS_MEM_LEN];
 };
 
-/* Starts Off, on the MultiPlay wire. cc and rr are the slave's two random bytes. */
+/* Starts Off, on the MultiPlay wire, gated. cc and rr are the slave's two random bytes. */
 void fake_bios_init(FakeBios* b, uint8_t cc, uint8_t rr);
 /* The wire the parent's driver clocks, from the next frame on. */
 void fake_bios_set_wire(FakeBios* b, MlinkWire wire);
-/* Power on holding Start+Select (or power-cycle): 2 transfers time out (Normal: not ready), then
+/* Normal wire: whether the driver waits for SI low before it clocks a slot (true, the default, as
+ * mlink_hw_set_normal_gate), from the next frame on. MultiPlay ignores it. */
+void fake_bios_set_gate(FakeBios* b, bool gate);
+/* Power on holding Start+Select (or power-cycle): 2 transfers time out (Normal: as off), then
  * SEND 0x0000. */
 void fake_bios_power_on(FakeBios* b);
 /* How long the slave stays busy, in its own time, on every attempt: palette_us from the end of the

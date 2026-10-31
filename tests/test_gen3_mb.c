@@ -1067,6 +1067,106 @@ TEST(test_mb_fail_words) {
     ASSERT_EQ(st.fail_got, (uint16_t)(st.fail_want + 1u));
 }
 
+/* The default on the Normal wire: the BIOS phase clocks every slot, ungated (multiboot-and-save.md
+ * §7.3). With the GBA off, and while it starts up, each slot is clocked and reads 0xFFFF (SI
+ * pulled high), one tick, never not ready; the sender keeps polling. Once the GBA is on, the boot
+ * goes through as gated, and the image arrives as sent. */
+TEST(test_mb_normal_boot_ungated) {
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    fake_bios_set_gate(&bios, false);
+    run(&mb, &bios, 200);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDetect);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_EQ(bench_n, 200);
+    for(uint32_t i = 0; i < bench_n; i++) {
+        ASSERT_TRUE(is_frame(&bench_log[i], 0x6200));
+        ASSERT_EQ(bench_log[i].notready, 0);
+        ASSERT_TRUE(bench_log[i].replied);
+        ASSERT_EQ(bench_log[i].reply, 0xFFFF);
+        ASSERT_EQ(bench_log[i].us, MLINK_TICK_US);
+    }
+    ASSERT_EQ(st.notready, 0);
+    ASSERT_EQ(st.last_reply, 0xFFFF);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 20000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+    ASSERT_EQ(st.notready, 0);
+    ASSERT_EQ(st.sent, st.total);
+    ASSERT_EQ(fake_bios_phase(&bios), FakeBiosBooted);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(image_received(0x1000));
+    ASSERT_TRUE(idles_forever());
+}
+
+/* For the log: the not-ready slots since init (up to UINT16_MAX) and the latest reply delivered
+ * (MLINK_NO_DATA until one). Gated, with the GBA off, every poll is a not-ready slot and nothing
+ * is delivered; once it is on, last_reply follows the replies. MultiPlay's timed-out words are
+ * neither. */
+TEST(test_mb_status_notready_last_reply) {
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.notready, 0);
+    ASSERT_EQ(st.last_reply, MLINK_NO_DATA);
+    run(&mb, &bios, 50);
+    st = status();
+    ASSERT_EQ(st.notready, 50);
+    ASSERT_EQ(st.last_reply, MLINK_NO_DATA);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 3); /* 2 starting up, then 0x0000 */
+    st = status();
+    ASSERT_EQ(st.notready, 52);
+    ASSERT_EQ(st.last_reply, 0x0000);
+    run(&mb, &bios, 1);
+    ASSERT_EQ(status().last_reply, 0x7202);
+    run(&mb, &bios, 2); /* Hello, then the first header frame */
+    ASSERT_EQ(status().last_reply, 0x5802); /* its 9th halfword's: (0x60 - 8) << 8 | 0x02 */
+    run(&mb, &bios, 20000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.notready, 52);
+    /* A long wait saturates */
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    run(&mb, &bios, UINT16_MAX + 10u);
+    ASSERT_EQ(status().notready, UINT16_MAX);
+    /* MultiPlay */
+    bench_init(0x1000, 0x5A, 0xC3);
+    run(&mb, &bios, 10);
+    st = status();
+    ASSERT_EQ(st.notready, 0);
+    ASSERT_EQ(st.last_reply, MLINK_NO_DATA);
+}
+
+/* Normal wire, gated: a not-ready reply to the palette word is a busy slave, as a valid 0x7202
+ * is. A palette wait that saw only those times out uncounted. */
+TEST(test_mb_normal_palette_notready_is_busy) {
+    bench_init_on(MlinkWireNormal, 0x1000, 0x5A, 0xC3);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhasePalette, 1000));
+    const uint32_t nr_us = MLINK_NORMAL_STALL_TICKS * MLINK_TICK_US;
+    for(uint32_t i = 0; i < 1000 && status().phase == Gen3MbPhasePalette; i++) {
+        MlinkRx rx;
+        memset(&rx, 0, sizeof(rx));
+        rx.count = bench_pending.count;
+        rx.word[0] = MLINK_NO_DATA;
+        rx.timeout_mask = 1;
+        rx.notready_mask = 1;
+        bench_frame(&mb, &rx, nr_us);
+    }
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseWait);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 1);
+    ASSERT_EQ(st.last_fail, Gen3MbFailPalette);
+    ASSERT_EQ(st.palette_busy, (GEN3_MB_PALETTE_US + nr_us - 1u) / nr_us);
+}
+
 /* D6 (plan 6): MultiPlay stays while SI reads low, or once the GBA answered; SI high in Wait or
  * Detect moves to Normal, which stays. */
 TEST(test_mb_wire_next) {
@@ -1286,6 +1386,42 @@ TEST(test_fake_bios_normal_vector) {
     ASSERT_EQ(rx.ticks, MLINK_NORMAL_STALL_TICKS);
 }
 
+/* The Normal wire ungated (the BIOS phase's default): a slot while off or starting up is clocked
+ * all the same and reads 0xFFFF, SI pulled high, in one tick, with no mask bit; then 0x0000 as
+ * gated. */
+TEST(test_fake_bios_normal_ungated) {
+    MlinkTx tx = {.count = 2, .word = {0x6200, 0x6200}};
+    MlinkRx rx;
+    fake_bios_init(&bios, 0x5A, 0xC3);
+    fake_bios_set_wire(&bios, MlinkWireNormal);
+    fake_bios_set_gate(&bios, false);
+    fake_bios_frame(&bios, &tx, &rx); /* off */
+    ASSERT_EQ(rx.ticks, 2);
+    ASSERT_EQ(rx.notready_mask, 0);
+    ASSERT_EQ(rx.timeout_mask, 0);
+    ASSERT_EQ(rx.word[0], 0xFFFF);
+    ASSERT_EQ(rx.word[1], 0xFFFF);
+    fake_bios_power_on(&bios);
+    tx.count = 3;
+    tx.word[2] = 0x6200;
+    fake_bios_frame(&bios, &tx, &rx); /* 2 starting up, then 0x0000 */
+    ASSERT_EQ(rx.ticks, 3);
+    ASSERT_EQ(rx.notready_mask, 0);
+    ASSERT_EQ(rx.timeout_mask, 0);
+    ASSERT_EQ(rx.word[0], 0xFFFF);
+    ASSERT_EQ(rx.word[1], 0xFFFF);
+    ASSERT_EQ(rx.word[2], 0x0000);
+    ASSERT_EQ(xfer32(&bios, 0x6200), 0x7202);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    /* gated again: starting up is not ready */
+    fake_bios_set_gate(&bios, true);
+    fake_bios_power_on(&bios);
+    tx.count = 1;
+    fake_bios_frame(&bios, &tx, &rx);
+    ASSERT_EQ(rx.notready_mask, 1);
+    ASSERT_EQ(rx.ticks, MLINK_NORMAL_STALL_TICKS);
+}
+
 /* The Normal wire as the driver reports it: not-ready slots (off, starting up, booted) take
  * MLINK_NORMAL_STALL_TICKS each and clock nothing; a delivered one takes a tick. An upper half on
  * any word but a data word is refused. MultiPlay frames take max(count, 1) ticks. */
@@ -1362,10 +1498,14 @@ int main(void) {
     RUN(test_mb_normal_waits_for_gba);
     RUN(test_mb_normal_data_reply_mismatch);
     RUN(test_mb_fail_words);
+    RUN(test_mb_normal_boot_ungated);
+    RUN(test_mb_status_notready_last_reply);
+    RUN(test_mb_normal_palette_notready_is_busy);
     RUN(test_mb_wire_next);
     RUN(test_fake_bios_doc_vector);
     RUN(test_fake_bios_checks);
     RUN(test_fake_bios_normal_vector);
     RUN(test_fake_bios_normal_wire);
+    RUN(test_fake_bios_normal_ungated);
     TEST_EXIT();
 }

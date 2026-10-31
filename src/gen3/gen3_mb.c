@@ -121,6 +121,22 @@ static bool mb_valid(const Gen3Mb* mb, const MlinkRx* rx, uint8_t t) {
            !(((rx->timeout_mask | rx->framing_mask) >> t) & 1u);
 }
 
+/* Slot t of the frame in flight was not ready (Normal wire, gated): nothing was clocked. */
+static bool mb_notready(const Gen3Mb* mb, const MlinkRx* rx, uint8_t t) {
+    return t < mb->tx_count && t < rx->count && ((rx->notready_mask >> t) & 1u);
+}
+
+/* For the log: the frame's not-ready slots, and its last delivered reply. */
+static void mb_note(Gen3Mb* mb, const MlinkRx* rx) {
+    for(uint8_t t = 0; t < rx->count && t < MLINK_BURST_LEN; t++) {
+        if(mb_notready(mb, rx, t)) {
+            mb_count(&mb->notready);
+        } else if(mb_valid(mb, rx, t)) {
+            mb->last_reply = rx->word[t];
+        }
+    }
+}
+
 /* A counted failure on reply t, which should have been want: the status keeps both words. */
 static void mb_fail_word(Gen3Mb* mb, Gen3MbFail why, const MlinkRx* rx, uint8_t t, uint16_t want) {
     mb->fail_want = want;
@@ -199,10 +215,11 @@ static void mb_receive(Gen3Mb* mb, const MlinkRx* rx) {
             mb_enter(mb, Gen3MbPhaseHandshake);
             break;
         }
-        if(!mb_valid(mb, rx, 0) || r != MB_DETECT_REPLY) {
-            mb->palette_other = true;
-        } else {
+        /* A not-ready slot (Normal wire, gated) is a busy slave too, as a valid 0x7202 is */
+        if(mb_notready(mb, rx, 0) || (mb_valid(mb, rx, 0) && r == MB_DETECT_REPLY)) {
             mb_count(&mb->palette_busy);
+        } else {
+            mb->palette_other = true;
         }
         if(mb->phase_us < GEN3_MB_PALETTE_US) break;
         if(mb->palette_other) {
@@ -352,6 +369,7 @@ void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, const uint8_t* img, uint32_t len, 
     mb->wire = wire;
     mb->img = img;
     mb->len = len;
+    mb->last_reply = MLINK_NO_DATA;
     gen3_rng_seed(&mb->rng, seed);
     mb_enter(mb, mb_len_ok(len) ? Gen3MbPhaseDetect : Gen3MbPhaseFailed);
 }
@@ -363,7 +381,10 @@ void gen3_mb_frame(Gen3Mb* mb, const MlinkRx* rx, MlinkTx* tx, uint32_t elapsed_
         mb->waiting_us = mb_add(mb->waiting_us, elapsed_us);
     }
     if(mb->attempting) mb->attempt_us = mb_add(mb->attempt_us, elapsed_us);
-    if(rx) mb_receive(mb, rx);
+    if(rx) {
+        mb_note(mb, rx);
+        mb_receive(mb, rx);
+    }
     /* After the reply, so a CRC that matches on the last frame still ends Done. */
     if(mb->attempting && mb->attempt_us >= GEN3_MB_ATTEMPT_US && mb->phase != Gen3MbPhaseDone &&
        mb->phase != Gen3MbPhaseFailed) {
@@ -387,4 +408,6 @@ void gen3_mb_status(const Gen3Mb* mb, Gen3MbStatus* out) {
     out->sent = mb->sent;
     out->total = mb->len > GEN3_MB_HEADER_LEN ? mb->len - GEN3_MB_HEADER_LEN : 0;
     out->waiting_us = mb->waiting_us;
+    out->notready = mb->notready;
+    out->last_reply = mb->last_reply;
 }

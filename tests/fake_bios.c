@@ -231,6 +231,12 @@ static uint32_t fake_bios_xfer(
     b->transfers++;
     if(b->phase != FakeBiosWaiting || b->startup) {
         if(b->startup) b->startup--;
+        if(fake_bios_normal(b) && !b->gate) {
+            /* Normal, ungated: the driver clocks the slot anyway, and SI, pulled high, reads all
+             * ones */
+            rx->word[t] = 0xFFFFu;
+            return 1u;
+        }
         rx->word[t] = MLINK_NO_DATA;
         rx->timeout_mask |= bit;
         if(!fake_bios_normal(b)) return 1u;
@@ -259,6 +265,7 @@ static uint32_t fake_bios_xfer(
 void fake_bios_init(FakeBios* b, uint8_t cc, uint8_t rr) {
     memset(b, 0, sizeof(*b));
     b->wire = MlinkWireMulti;
+    b->gate = true;
     b->phase = FakeBiosOff;
     b->cc = cc;
     b->rr = rr;
@@ -266,6 +273,10 @@ void fake_bios_init(FakeBios* b, uint8_t cc, uint8_t rr) {
 
 void fake_bios_set_wire(FakeBios* b, MlinkWire wire) {
     b->wire = wire;
+}
+
+void fake_bios_set_gate(FakeBios* b, bool gate) {
+    b->gate = gate;
 }
 
 void fake_bios_power_on(FakeBios* b) {

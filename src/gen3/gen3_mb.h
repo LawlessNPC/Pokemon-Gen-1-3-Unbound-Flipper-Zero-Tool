@@ -56,8 +56,8 @@
 #define GEN3_MB_POLL_US MLINK_FRAME_US
 /* Palette: how long the slave may answer 0x7202 (busy) before 0x73cc
  * (multiboot-and-save.md §2.2 step 7). GBATEK sets no limit; afska gives up after 16
- * back-to-back tries. A wait that saw only valid 0x7202 replies is a slow slave, not a broken
- * link: it restarts without counting. */
+ * back-to-back tries. A wait that saw only valid 0x7202 replies (or, on the Normal wire gated,
+ * not-ready slots) is a slow slave, not a broken link: it restarts without counting. */
 #define GEN3_MB_PALETTE_US 4000000u
 /* Silent wait before the length word: at least GBATEK's 1/16 s (multiboot-and-save.md §2.2
  * step 9); why 100 ms: multiboot-and-save.md M20 */
@@ -140,7 +140,8 @@ typedef enum {
 
 typedef struct {
     Gen3MbPhase phase;
-    /* The latest failure, counted or not: a palette wait that saw only 0x7202 sets Palette */
+    /* The latest failure, counted or not: a palette wait that saw only busy replies (0x7202, or
+     * not ready) sets Palette */
     Gen3MbFail last_fail;
     uint8_t restarts; /* counted failures (all after detection succeeded) */
     /* The latest Header, Data, Handshake, Length or Crc failure: the word expected (Handshake and
@@ -150,11 +151,12 @@ typedef struct {
     uint16_t fail_got;
     uint8_t cc; /* the slave's byte from its latest 0x73cc; 0 until one came */
     uint8_t rr; /* the slave's byte from its latest 0x73rr; 0 until one came */
-    /* Every restart wait, counted or not (a detection drain, a palette wait that saw only
-     * 0x7202), up to UINT16_MAX */
+    /* Every restart wait, counted or not (a detection drain, a palette wait that saw only busy
+     * replies), up to UINT16_MAX */
     uint16_t all_restarts;
-    /* Valid 0x7202 replies in the latest palette wait, up to UINT16_MAX: how long a slave took
-     * against GEN3_MB_PALETTE_US, at one reply a tick */
+    /* Valid 0x7202 replies in the latest palette wait, and not-ready slots (Normal wire, gated),
+     * up to UINT16_MAX: how long a slave took against GEN3_MB_PALETTE_US, at one reply a tick
+     * (a not-ready slot takes MLINK_NORMAL_STALL_TICKS) */
     uint16_t palette_busy;
     /* The latest Final that got its 0x0075: the time from its first 0x0065 to the end of the frame
      * that 0x0075 came in, in link ticks (real time), against GEN3_MB_FINAL_US; 0 until one came */
@@ -162,6 +164,11 @@ typedef struct {
     uint32_t sent; /* payload bytes acknowledged (Normal: 4 per word) */
     uint32_t total; /* payload bytes to send: len - GEN3_MB_HEADER_LEN */
     uint32_t waiting_us; /* time in Wait and Detect since the last 0x7202 (UI hint after 3 s) */
+    /* For the log, the first hardware test on a GBC cable: not-ready slots (Normal wire, gated)
+     * since gen3_mb_init, up to UINT16_MAX, and the latest reply delivered (a slot neither timed
+     * out, framing-errored nor not ready), MLINK_NO_DATA until one */
+    uint16_t notready;
+    uint16_t last_reply;
 } Gen3MbStatus;
 
 /* Holds a pointer to the caller's image; no heap. Fields are private to gen3_mb.c. */
@@ -179,12 +186,12 @@ typedef struct Gen3Mb {
     uint8_t cc; /* the slave's byte from 0x73cc */
     uint8_t rr; /* the slave's byte from 0x73rr */
     uint16_t all_restarts; /* every mb_wait */
-    uint16_t palette_busy; /* valid 0x7202 replies since Palette was last entered */
+    uint16_t palette_busy; /* busy replies since Palette was last entered */
     uint32_t final_us; /* Final: phase_us when the 0x0075 came */
     uint8_t junk; /* Detect: other replies since entering it */
     uint8_t tx_count; /* words in the frame in flight */
     bool stale; /* Detect: the next unmarked reply answers a word sent before Detect began */
-    bool palette_other; /* Palette: a reply other than a valid 0x7202 came back */
+    bool palette_other; /* Palette: a reply other than a busy one came back */
     bool attempting; /* a header word has gone out: the attempt budget runs */
     uint16_t pos; /* Header: next word of 98; Data: next payload unit (a halfword; Normal: a word) */
     uint16_t crc; /* Crc: the CRC sent */
@@ -195,6 +202,8 @@ typedef struct Gen3Mb {
     uint32_t attempt_us; /* time since the first header frame started */
     uint32_t sent;
     uint32_t waiting_us;
+    uint16_t notready; /* not-ready slots since init */
+    uint16_t last_reply; /* the latest delivered reply */
 } Gen3Mb;
 
 /* Starts in Detect on wire, which the driver must clock; the first gen3_mb_frame call (rx NULL)
@@ -207,7 +216,8 @@ void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, const uint8_t* img, uint32_t len, 
  * call); elapsed_us is that frame's time (rx->ticks * MLINK_TICK_US; 0 on the first call). Fills
  * tx: count 0 (an idle tick), 1 (a poll or a handshake word) or up to MLINK_BURST_LEN (header and
  * data, checked reply by reply). On Normal it sets tx->hi only for data words and relies on the
- * driver having zeroed the rest. A not-ready slot is a marked word, as a timed-out one is. */
+ * driver having zeroed the rest. A not-ready slot is a marked word, as a timed-out one is, but
+ * for the palette wait, where it is a busy slave like a valid 0x7202. */
 void gen3_mb_frame(Gen3Mb* mb, const MlinkRx* rx, MlinkTx* tx, uint32_t elapsed_us);
 
 /* Safe to call from a thread while the ISR runs: phase is one aligned field, written once per
