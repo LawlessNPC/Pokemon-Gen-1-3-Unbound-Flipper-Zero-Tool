@@ -29,19 +29,35 @@
  * MLINK_NO_DATA and every timeout_mask bit set, as if the GBA never answered. The next frame that
  * runs transfers first makes SC and SO push-pull outputs again, driven high.
  *
+ * The wire (MlinkWire, mlink_hw_start_wire) sets what a transfer is. Everything above is the
+ * MultiPlay wire, the default. The Normal wire (GBA Normal mode, over a GBC cable; stream mode
+ * only) clocks one 32-bit word per transfer on SC at 256 kHz, MSB first: (tx.hi[t] << 16) |
+ * tx.word[t] out, and the reply's upper half in as rx.word[t]. SD isn't used. A slot runs only
+ * once the slave is ready (SI low): while SI reads high it waits, one tick at a time, for up to
+ * MLINK_NORMAL_STALL_TICKS ticks, then it is reported not ready (rx.notready_mask and
+ * rx.timeout_mask bit t, word MLINK_NO_DATA, nothing clocked) and the frame goes on with the next
+ * slot. rx.ticks counts the frame's ticks: 1 per delivered slot plus each tick it waited, 1 for a
+ * count-0 frame. The driver zeroes next.hi before every Normal-wire frame callback. The Normal
+ * wire has no cable guard.
+ *
  * alloc/free/check_cable/start/stop are app-context calls; use them from one thread, never from
  * the frame callback. mlink_hw_cable_ok may be called from any thread. */
 
 typedef struct {
     /* SC: frame clock, driven by the parent: push-pull output, idle high. SC and SO keep their
-     * pull-up on and are released to input with pull-up while the cable guard trips. */
+     * pull-up on and are released to input with pull-up while the cable guard trips. Normal
+     * wire: the bit clock, push-pull, idle high, never released. */
     const GpioPin* sc;
     /* SD: shared data line, pulled up. Pushed and pulled only for the Flipper's own word, then
      * released to input with pull-up (MLINK_SD_PUSH_PULL 1, the default); or open drain the whole
-     * time (MLINK_SD_PUSH_PULL 0). */
+     * time (MLINK_SD_PUSH_PULL 0). Normal wire: not used, left analog. */
     const GpioPin* sd;
-    const GpioPin* so; /* SO: goes to the GBA's SI; push-pull output, idle high, released as SC */
-    const GpioPin* si; /* SI: grounded by the cable's parent plug */
+    /* SO: goes to the GBA's SI; push-pull output, idle high, released as SC. Normal wire: the
+     * Flipper's data bits, push-pull, idle high. */
+    const GpioPin* so;
+    /* SI: grounded by the cable's parent plug. Normal wire: the GBA's SO, input with pull-up: low
+     * = slave ready, then its data bits. */
+    const GpioPin* si;
 } MlinkPins;
 
 typedef enum {
@@ -75,7 +91,9 @@ bool mlink_hw_start(MlinkHw* hw, MlinkFrameCallback cb, void* ctx, const MlinkTx
  * gate); transfer t on tick t; count 0 makes an idle tick whose callback gets rx.count 0, masks 0.
  * The cable guard still reads SI at every frame start (there are no idle ticks between frames to
  * latch on). A frame it skips lasts one tick, but its callback gets rx.count = count, every word
- * timed out (mlink_frame_us then over-counts its time). Same failure rules as mlink_hw_start. */
+ * timed out (mlink_frame_us then over-counts its time). rx.ticks is max(count, 1), a skipped
+ * frame included. Same failure rules as mlink_hw_start. Exactly
+ * mlink_hw_start_wire(hw, mode, MlinkWireMulti, cb, ctx, first). */
 bool mlink_hw_start_mode(
     MlinkHw* hw,
     MlinkMode mode,
@@ -83,11 +101,25 @@ bool mlink_hw_start_mode(
     void* ctx,
     const MlinkTx* first);
 
+/* mlink_hw_start_mode with a wire. MlinkWireMulti is exactly mlink_hw_start_mode.
+ * MlinkWireNormal (see the top of this file): false with MlinkModeFrame; no cable check, so it
+ * fails only if TIM2 is already on or the driver is already running. SC and SO become push-pull
+ * outputs, idle high, SI an input with pull-up; SD stays analog. Its first frame starts on the
+ * first tick after start. first.hi is sent as given; zero it unless the first frame needs it. */
+bool mlink_hw_start_wire(
+    MlinkHw* hw,
+    MlinkMode mode,
+    MlinkWire wire,
+    MlinkFrameCallback cb,
+    void* ctx,
+    const MlinkTx* first);
+
 /* The cable guard's latest decision: true from mlink_hw_start or mlink_hw_start_mode (its own
  * check passed) until a frame start finds SI high (read then, or, in frame mode only, latched on
  * an idle tick since the previous frame start; in stream mode nothing latches), and true again
- * once a frame start finds it low with nothing latched. Keeps its value when stopped; false
- * before the first start. */
+ * once a frame start finds it low with nothing latched. The Normal wire has no guard: true from
+ * a Normal start until the next MultiPlay start. Keeps its value when stopped; false before the
+ * first start. */
 bool mlink_hw_cable_ok(const MlinkHw* hw);
 
 /* Pins back to GpioModeAnalog, TIM2 off, ISR cleared. Does nothing if not running. */

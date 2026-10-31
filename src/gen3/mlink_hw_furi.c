@@ -67,6 +67,19 @@
 /* mlink_hw_check_cable: settle time for SI's pull-up before reading it. */
 #define MLINK_CABLE_SETTLE_US 1000u
 
+/* The Normal wire (GBATEK "SIO Normal Mode"; the GBC cable crosses SO and SI and carries SC; SD
+ * isn't used). One 32-bit word per transfer, MSB first, clocked on SC at 256 kHz: SC low, then
+ * each side puts its next bit on SO; SC high, then each side samples SI. SC idles high. The slave
+ * says it is ready by holding its SO, our SI, low. Each bit cell starts with SC low and lasts
+ * MLINK_NORMAL_BIT_CYCLES; SC rises half way through, and SI is read MLINK_NORMAL_SAMPLE_CYCLES
+ * into the cell (62 cycles = 0.97 us after SC rises). Before the first bit, SI must still read
+ * low after MLINK_NORMAL_SETTLE_CYCLES (4 us), so a slave that is still setting up its transfer
+ * gets the time. 32 bits = 8000 cycles = 125 us. */
+#define MLINK_NORMAL_BITS 32u
+#define MLINK_NORMAL_BIT_CYCLES 250u
+#define MLINK_NORMAL_SETTLE_CYCLES 256u
+#define MLINK_NORMAL_SAMPLE_CYCLES 187u
+
 #define MLINK_GPIO_SPEED GpioSpeedVeryHigh
 
 #define MLINK_TIM TIM2
@@ -94,6 +107,26 @@ _Static_assert(
 _Static_assert(
     MLINK_FRAME_DECI_US == MLINK_FRAME_US * 10u,
     "MLINK_FRAME_US (mlink_types.h) must match MLINK_FRAME_DECI_US");
+_Static_assert(
+    MLINK_NORMAL_BIT_CYCLES * 256000u == MLINK_CPU_HZ,
+    "the Normal wire clocks at 256 kHz");
+_Static_assert(
+    MLINK_NORMAL_SETTLE_CYCLES == 4u * (MLINK_CPU_HZ / 1000000u),
+    "the Normal wire's ready check settles for 4 us");
+_Static_assert(
+    MLINK_NORMAL_SAMPLE_CYCLES > MLINK_NORMAL_BIT_CYCLES / 2u &&
+        MLINK_NORMAL_SAMPLE_CYCLES < MLINK_NORMAL_BIT_CYCLES,
+    "the Normal wire samples SI after SC rises and before the next bit's SC fall");
+/* The interrupts-masked part of a Normal transfer (settle + 32 bits, 8256 cycles = 129 us) must
+ * end well before the next tick. */
+_Static_assert(
+    MLINK_NORMAL_SETTLE_CYCLES + MLINK_NORMAL_BITS * MLINK_NORMAL_BIT_CYCLES <
+        (MLINK_TIM_PRESCALER + 1u) * (MLINK_TIM_ARR + 1u),
+    "one Normal transfer must fit in one tick");
+_Static_assert(
+    MLINK_NORMAL_STALL_TICKS >= 1u && MLINK_NORMAL_STALL_TICKS <= 255u &&
+        MLINK_BURST_LEN * MLINK_NORMAL_STALL_TICKS <= 0xFFFFu,
+    "MlinkHw.wait is 8 bits and MlinkRx.ticks 16 bits");
 
 /* One pin's 2-bit MODER field, for mlink_moder_write. */
 typedef struct {
@@ -109,13 +142,16 @@ struct MlinkHw {
     MlinkFrameCallback cb;
     void* ctx;
     bool running;
-    MlinkMode mode; /* set by mlink_hw_start_mode, read by the ISR */
-    volatile bool cable_ok; /* written by the ISR at each frame start, read by any thread */
+    MlinkMode mode; /* set by mlink_hw_start_wire, read by the ISR */
+    /* MultiPlay: written by the ISR at each frame start; Normal: true from the start. Read by any
+     * thread. */
+    volatile bool cable_ok;
 
     /* Owned by the TIM2 ISR while running. */
     volatile uint8_t si_seen_high; /* 1: an idle tick read SI high since the last frame start */
     bool in_frame;
     uint8_t transfer; /* next transfer of the current frame */
+    uint8_t wait; /* Normal: ticks the current slot has waited for the slave to get ready */
     uint32_t frame_acc; /* 0.1 us, see MLINK_FRAME_DECI_US */
     MlinkTx tx; /* frame being sent */
     MlinkTx next; /* callback output, copied into tx */
@@ -344,6 +380,10 @@ static void mlink_hw_isr(void* context) {
         }
         hw->rx.timeout_mask = 0;
         hw->rx.framing_mask = 0;
+        hw->rx.notready_mask = 0;
+        /* The frame's time in ticks, read in stream mode: max(count, 1), a frame the cable guard
+         * skips (one tick) included, so the protocol's timeouts run as they always have. */
+        hw->rx.ticks = (uint16_t)(hw->tx.count ? hw->tx.count : 1u);
 
         /* Cable guard, before any line moves (interrupts on). The parent plug grounds SI; high
          * through the pull-up, now or on an idle tick since the last frame start, means no
@@ -374,6 +414,102 @@ static void mlink_hw_isr(void* context) {
     mlink_frame_done(hw);
 }
 
+/* Slot t of a Normal frame, on this tick. SI high: the slave isn't ready, and the slot waits for
+ * the next tick, up to MLINK_NORMAL_STALL_TICKS ticks in all; on the last it is reported not
+ * ready (word MLINK_NO_DATA, timeout_mask and notready_mask bit t), nothing clocked. SI low: one
+ * 32-bit transfer, (hi << 16) | word out, the reply's upper half in. Every interrupt is masked
+ * from the settle to the last bit's sample: 4 us, or 128 us when it clocks. SD is never touched;
+ * SC and SO are push-pull outputs (mlink_pins_run_normal) and are high again when this returns.
+ * Returns true when the slot is done, delivered or not ready. */
+static bool mlink_normal_slot(MlinkHw* hw, uint8_t t) {
+    const GpioPin* sc = hw->pins.sc;
+    const GpioPin* so = hw->pins.so;
+    const GpioPin* si = hw->pins.si;
+    const uint32_t out = (uint32_t)hw->tx.hi[t] << 16 | hw->tx.word[t];
+    uint32_t reply = 0;
+    bool ready = false;
+
+    if(!mlink_pin_read(si)) {
+        const uint32_t primask = __get_PRIMASK();
+        __disable_irq();
+
+        /* Still low after the settle: the slave is ready and has had the time to start its side
+         * of the transfer. Every edge below is timed from t0. */
+        const uint32_t ts = DWT->CYCCNT;
+        mlink_wait_until(ts, MLINK_NORMAL_SETTLE_CYCLES);
+        ready = !mlink_pin_read(si);
+        if(ready) {
+            const uint32_t t0 = ts + MLINK_NORMAL_SETTLE_CYCLES;
+            for(uint32_t n = 0; n < MLINK_NORMAL_BITS; n++) {
+                const uint32_t b = MLINK_NORMAL_BITS - 1u - n; /* bit 31 first */
+                const uint32_t edge = n * MLINK_NORMAL_BIT_CYCLES; /* (31 - b) * BIT */
+                const bool level = (out >> b) & 1u;
+                mlink_wait_until(t0, edge);
+                mlink_pin_write(sc, false);
+                mlink_pin_write(so, level);
+                mlink_wait_until(t0, edge + MLINK_NORMAL_BIT_CYCLES / 2u);
+                mlink_pin_write(sc, true);
+                mlink_wait_until(t0, edge + MLINK_NORMAL_SAMPLE_CYCLES);
+                reply = (reply << 1) | (mlink_pin_read(si) ? 1u : 0u);
+            }
+            mlink_pin_write(sc, true);
+            mlink_pin_write(so, true);
+        }
+
+        __set_PRIMASK(primask);
+    }
+
+    if(ready) {
+        hw->rx.word[t] = (uint16_t)(reply >> 16);
+        return true;
+    }
+    if(++hw->wait < MLINK_NORMAL_STALL_TICKS) return false;
+    hw->rx.word[t] = MLINK_NO_DATA;
+    hw->rx.timeout_mask |= (uint16_t)(1u << t);
+    hw->rx.notready_mask |= (uint16_t)(1u << t);
+    return true;
+}
+
+/* The Normal wire's TIM2 ISR (stream mode only; no cable guard, no idle-tick latch). A frame
+ * starts on the tick after the previous frame's callback. Each tick serves the frame's current
+ * slot (mlink_normal_slot); the next slot starts on the tick after the one that finished it. Every
+ * tick of the frame counts into rx.ticks: 1 per delivered slot plus each tick it waited, so a slot
+ * that never gets ready costs MLINK_NORMAL_STALL_TICKS; a count-0 frame is 1 tick, its callback
+ * on its start tick. */
+static void mlink_hw_isr_normal(void* context) {
+    MlinkHw* hw = context;
+
+    if(!LL_TIM_IsActiveFlag_UPDATE(MLINK_TIM)) return;
+    /* Clear first, so a tick that comes due while this one runs long stays pending. */
+    LL_TIM_ClearFlag_UPDATE(MLINK_TIM);
+
+    if(!hw->in_frame) {
+        hw->in_frame = true;
+        hw->transfer = 0;
+        hw->wait = 0;
+        hw->rx.count = hw->tx.count;
+        for(uint8_t i = 0; i < MLINK_BURST_LEN; i++) {
+            hw->rx.word[i] = MLINK_NO_DATA;
+        }
+        hw->rx.timeout_mask = 0;
+        hw->rx.framing_mask = 0;
+        hw->rx.notready_mask = 0;
+        hw->rx.ticks = 0;
+    }
+
+    hw->rx.ticks++;
+    if(hw->transfer < hw->tx.count) {
+        if(!mlink_normal_slot(hw, hw->transfer)) return; /* waits for the next tick */
+        hw->transfer++;
+        hw->wait = 0;
+        if(hw->transfer < hw->tx.count) return;
+    }
+    /* The frame is sent, so its hi[] is no longer needed: zero it, and next.hi arrives zeroed in
+     * the callback (only a producer that wants an upper half sets one). */
+    memset(hw->tx.hi, 0, sizeof(hw->tx.hi));
+    mlink_frame_done(hw);
+}
+
 /* Each output gets its idle level before it becomes an output, so nothing glitches low.
  * SC and SO get their pull-up now, though it does nothing while they drive: the cable guard
  * releases them by MODER alone (mlink_lines_release), and that makes them inputs with pull-up. */
@@ -394,6 +530,16 @@ static void mlink_pins_run(const MlinkPins* pins) {
 #else
     furi_hal_gpio_init(pins->sd, GpioModeOutputOpenDrain, GpioPullUp, MLINK_GPIO_SPEED);
 #endif
+    furi_hal_gpio_init(pins->si, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
+}
+
+/* The Normal wire: SC and SO push-pull outputs, each driven high before it becomes an output;
+ * SI input with pull-up (high = slave not ready, or no slave); SD isn't used and stays analog. */
+static void mlink_pins_run_normal(const MlinkPins* pins) {
+    furi_hal_gpio_write(pins->so, true);
+    furi_hal_gpio_init(pins->so, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
+    furi_hal_gpio_write(pins->sc, true);
+    furi_hal_gpio_init(pins->sc, GpioModeOutputPushPull, GpioPullNo, MLINK_GPIO_SPEED);
     furi_hal_gpio_init(pins->si, GpioModeInput, GpioPullUp, MLINK_GPIO_SPEED);
 }
 
@@ -450,14 +596,27 @@ bool mlink_hw_start_mode(
     MlinkFrameCallback cb,
     void* ctx,
     const MlinkTx* first) {
+    return mlink_hw_start_wire(hw, mode, MlinkWireMulti, cb, ctx, first);
+}
+
+bool mlink_hw_start_wire(
+    MlinkHw* hw,
+    MlinkMode mode,
+    MlinkWire wire,
+    MlinkFrameCallback cb,
+    void* ctx,
+    const MlinkTx* first) {
     furi_check(hw);
     furi_check(cb);
     furi_check(first);
     mlink_cyccnt_ensure();
 
+    const bool normal = wire == MlinkWireNormal;
+    if(normal && mode != MlinkModeStream) return false; /* the Normal wire is stream mode only */
     /* TIM2 first: if gblink holds it, it may be using SI too, so don't touch any pin. */
     if(hw->running || furi_hal_bus_is_enabled(MLINK_TIM_BUS)) return false;
-    if(mlink_hw_check_cable(hw) != MlinkCableOk) return false;
+    /* The Normal wire has no cable guard: SI high there just means the slave isn't ready. */
+    if(!normal && mlink_hw_check_cable(hw) != MlinkCableOk) return false;
 
     /* Claim TIM2 atomically: furi_hal_bus_enable crashes if the bus is already on. */
     FURI_CRITICAL_ENTER();
@@ -474,13 +633,20 @@ bool mlink_hw_start_mode(
     memset(&hw->rx, 0, sizeof(hw->rx));
     hw->in_frame = false;
     hw->transfer = 0;
+    hw->wait = 0;
     /* Frame mode: first frame after 16 ticks (17.2 ms) of idle lines. Stream mode doesn't use it
      * and starts its first frame on the first tick. */
     hw->frame_acc = 0;
     hw->si_seen_high = 0;
-    hw->cable_ok = true; /* checked above; the ISR re-checks SI at every frame start */
+    /* MultiPlay: checked above, and the ISR re-checks SI at every frame start. Normal: no cable
+     * guard, so it stays true until the next MultiPlay start. */
+    hw->cable_ok = true;
 
-    mlink_pins_run(&hw->pins);
+    if(normal) {
+        mlink_pins_run_normal(&hw->pins);
+    } else {
+        mlink_pins_run(&hw->pins);
+    }
     /* Stop mode would halt TIM2; plain WFI sleep keeps it running. */
     furi_hal_power_insomnia_enter();
 
@@ -494,7 +660,7 @@ bool mlink_hw_start_mode(
     LL_TIM_ClearFlag_UPDATE(MLINK_TIM);
 
     hw->running = true;
-    furi_hal_interrupt_set_isr(MLINK_TIM_IRQ, mlink_hw_isr, hw);
+    furi_hal_interrupt_set_isr(MLINK_TIM_IRQ, normal ? mlink_hw_isr_normal : mlink_hw_isr, hw);
     LL_TIM_EnableIT_UPDATE(MLINK_TIM);
     LL_TIM_EnableCounter(MLINK_TIM);
     return true;
