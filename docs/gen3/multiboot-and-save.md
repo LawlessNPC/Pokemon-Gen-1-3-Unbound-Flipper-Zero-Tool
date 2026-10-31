@@ -97,9 +97,10 @@ What this means for the roles:
   Flipper cannot clock faster.
 - A Game Boy Color link cable has SI and SO crossed, so it can carry Normal
   mode. Cartridge uses it when the module has no SD line: see §7.
-- Normal mode would need a cable with SI/SO crossed between the two plugs.
-  Examples: a modified AGB-005 or an 8-bit-style cable (GBATEK "AUX Link Port",
-  "Using a GBA 8bit cable for 32bit communication"). That is not our hardware.
+- (Superseded by §7.) Normal mode would need a cable with SI/SO crossed between
+  the two plugs. Examples: a modified AGB-005 or an 8-bit-style cable (GBATEK
+  "AUX Link Port", "Using a GBA 8bit cable for 32bit communication"). That is
+  not our hardware.
 - A possible later speed-up: once the helper runs, it can switch the port to
   General-Purpose mode (`RCNT` bit 15 = 1, bit 14 = 0; GBATEK "SIO
   General-Purpose Mode") and bit-bang SC/SD, which are bussed straight through,
@@ -1402,12 +1403,26 @@ SD is left alone, in analog mode.
   MSB first and reports the reply's **high** half as `rx.word[t]`. The driver
   zeroes `next.hi[]` before every frame callback, so only multiboot's data words
   set a high half. The helper protocol uses the same convention.
-- **Ready, stall, not ready (D3).** At each tick the driver reads SI. SI high:
-  the slave isn't ready; the slot waits for the next tick, up to
+- **Ready, stall, not ready (D3), when gated.** At each tick the driver reads
+  SI. SI high: the slave isn't ready; the slot waits for the next tick, up to
   `MLINK_NORMAL_STALL_TICKS` (16). After that the slot is *not ready*:
   `notready_mask` and `timeout_mask` bit set, word `MLINK_NO_DATA`, nothing
   clocked. SI low: the driver masks interrupts, waits 4 µs, checks that SI is
   still low, and clocks 32 bits.
+- **The ready gate** (`mlink_hw_set_normal_gate`). Gated is the driver's
+  default (`mlink_hw_alloc`). Ungated, every slot clocks on its tick: no SI
+  check, no settle, one tick per slot, never not ready. A slave that isn't
+  there, or isn't in Normal mode yet, reads `FFFF`. The ISR reads the flag once
+  per slot; it may be set while the driver runs and is kept across starts.
+- **The BIOS phase is ungated; the helper's is gated.** The Cartridge runner
+  clears the gate before it starts multiboot on the Normal wire, and sets it
+  right before the pump takes over from the sender. The 2026-10-30 probe
+  clocked ungated at about one word per ms, and the BIOS's first reply was
+  `FFFFFFFF`: GBATEK's "slave not in mode yet", then `0000`. So the BIOS takes
+  Normal mode only once transfers come, and probably doesn't hold SO low before
+  the first clocks (M27): a gated start might never clock at all. The helper
+  arms each transfer with SO low (§7.4), so the gate is right for it.
+  `GEN3_CART_MB_GATED 1` gates the BIOS phase too (§7.5).
 - `rx.ticks` is the frame's time in ticks; callers multiply by `MLINK_TICK_US`.
   On the MultiPlay wire it is `max(count, 1)`, so the cores' timing there is
   unchanged.
@@ -1416,6 +1431,18 @@ SD is left alone, in analog mode.
   not-ready word like a valid BUSY wherever it waits (Sending before READY,
   Waiting); in Sync it breaks the run of READYs; inside a response it is a wire
   error, like a timed-out word, and the client's resend recovers.
+- **A cable pulled inside a packet.** 16 not-ready words in a row
+  (`GEN3_HLINK_NOTREADY_RUN`) inside a packet, a request after its READY or a
+  response after its SOF, fail it as `Wire` at once: the rest of a request isn't
+  sent, the rest of a response isn't read. 16 slots of 16 ticks are about
+  275 ms, past the helper's 200 ms receive timeout, so the helper has dropped
+  the packet and hunts again. A delivered word starts the run again. The
+  client's resend then waits for READY, and a helper that stays not ready is
+  waited for like a BUSY one, within the request's BUSY budget (§6.5). So a pull
+  ends a write with `BusyTimeout` within about 12 s, and a read within about
+  6 s, instead of after one stall per word left (35–45 s). A resend of a
+  write-class command is answered from the helper's stored response, so the
+  save is as safe as before (§6.8).
 
 ## 7.4 The helper's Normal transport
 
@@ -1423,13 +1450,16 @@ SD is left alone, in analog mode.
 slave loop, anything else today's MultiPlay loop. One Normal transfer:
 
 1. `SIODATA32 = out << 16`.
-2. `SIOCNT = 0x5000`: 32-bit, IRQ, external clock, start 0, SO low ("ready").
-3. `SIOCNT = 0x5080`: start, SO still low. (GBATEK is ambiguous about whether
+2. `IF = 0x0080`: drops a transfer-end flag latched after the last transfer's
+   timeout (a transfer that ended just too late), so it can't end this one
+   early.
+3. `SIOCNT = 0x5000`: 32-bit, IRQ, external clock, start 0, SO low ("ready").
+4. `SIOCNT = 0x5080`: start, SO still low. (GBATEK is ambiguous about whether
    bit 3 drives SO while a transfer is armed; 0x5080 is ready under either
    reading. M24.)
-4. Wait for the end of the transfer (IF bit 7, as in MultiPlay) for up to 200 ms.
-5. `SIOCNT = 0x5008`: SO high, "not ready", whatever the hardware left.
-6. The Flipper's word is `(uint16_t)SIODATA32`.
+5. Wait for the end of the transfer (IF bit 7, as in MultiPlay) for up to 200 ms.
+6. `SIOCNT = 0x5008`: SO high, "not ready", whatever the hardware left.
+7. The Flipper's word is `(uint16_t)SIODATA32`.
 
 After a packet's last word, `hp_execute` runs at once. No BUSY transfer happens,
 and the next transfer carries the response's SOF. The Flipper sees the helper's
@@ -1442,7 +1472,9 @@ The Cartridge runner picks the wire (`gen3_mb_wire_next(wire, si_low, phase)`):
 - MultiPlay stays only while SI reads low, or once the GBA has answered (any
   phase past Detect). A grounded SI is a GBA cable on a module with SD.
 - SI high while the sender is in Wait or Detect switches to Normal, and Normal
-  never switches back within one Connect.
+  never switches back within one Connect. During multiboot the runner polls
+  every 20 ms and switches only after SI read high on 2 polls in a row, so a
+  GBA cable jiggled in its socket doesn't move to Normal for good.
 - Connect starts from `gen3_mb_wire_next(MlinkWireMulti, si_low_now, Detect)`.
   A GBC cable (SI floats high or follows the GBA's SO), a reversed GBA cable or no
   cable ends up on the Normal wire, with `Waiting for GBA` and then the power-on
@@ -1450,8 +1482,32 @@ The Cartridge runner picks the wire (`gen3_mb_wire_next(wire, si_low, phase)`):
 - With the GBA off at Start and a GBC cable, SI may read low through the
   unpowered GBA: Connect then starts on MultiPlay and switches once the GBA is
   powered on. Expected.
-- Log lines: `wire multi` or `wire normal` at Connect, `wire normal (SI high)`
-  when it switches during multiboot.
+- Tunables, at the top of `src/gen3/gen3_cart_furi.c` ("Tunables for the
+  hardware test"), for whoever reads a failed run's log and rebuilds:
+  - `GEN3_CART_MB_GATED` (0): 1 gates the BIOS phase too (§7.3), in case the
+    BIOS does hold SO low until it is ready.
+  - `GEN3_CART_FORCE_NORMAL` (0): 1 starts every Connect on the Normal wire,
+    whatever SI reads, for a GBC cable on which SI reads low so that Connect
+    stays on `wire multi`.
+- Log lines (`apps_data/pokemon/gen3_cart.log`):
+  - `wire multi`, or `wire normal ungated` (`wire normal gated` with
+    `GEN3_CART_MB_GATED`), when Connect starts; `wire normal ungated (SI high)`
+    when it switches during multiboot; `wire normal gated (helper)` when the
+    pump takes over and the gate goes on.
+  - Every `mb` line: `nr` (not-ready slots since the sender started; 0 when
+    ungated) and `last` (the latest reply word delivered; `ffff` with nothing at
+    the other end, or a BIOS not in Normal mode yet), then `want`/`got` after a
+    Header, Data, Handshake, Length or Crc failure, then the counters. The short
+    fields come first, and no line is cut.
+  - `mb wait` every 5 s while the sender waits for the GBA, and `mb cancel` when
+    Back stops Connect during multiboot, besides `mb restart`, `mb done` and
+    `mb failed`.
+  - `cmd <code> fail <n> nr <k>` for each exchange that failed on the link: the
+    command (§6.3), the pump's `Gen3HlinkFail` (1 no READY, 2 no response,
+    3 BUSY timeout, 4 bad CRC, 5 wire, 6 seq, 7 too long) and the not-ready
+    words it saw. `sync fail nr <k>` when a connect saw no READYs.
+  - `hello proto <p> build <b> boot <m>`: `boot` is the boot mode the BIOS
+    left at header `0xC4`, 2 for a Normal-mode boot, 3 for MultiPlay (M25).
 - Caution: on a reversed GBA cable the Normal wire drives SC, and a GBA acting as
   MultiPlay parent at the other end (a game in the Cable Club) would fight it.
   Use Cartridge only with the GBA held at START+SELECT at power-on.
@@ -1485,10 +1541,10 @@ The Cartridge runner picks the wire (`gen3_mb_wire_next(wire, si_low, phase)`):
 | M21 | The helper's bank state after power-on is bank 0 | always select the bank explicitly before each access (the code above does) |
 | M22 | Throughput rows assume the CRC/turnaround overhead above and no retries | estimates |
 | M23 | In Normal-mode multiboot the data reply is the low 16 bits of the next word's offset, `0xC0 + 4k` | GBATEK describes the MultiPlay halfword form only; inferred. A mismatch logs `mb failed … want … got …` (Data) |
-| M24 | SO goes high at the end of a Normal transfer (forced anyway by the helper's `0x5008`); and the helper's `0x5080` keeps SO low while armed | GBATEK is ambiguous about SIOCNT bit 3 while armed. If every slot stays not ready, the GBA may show the shift register's MSB on SO while armed; record the log |
-| M25 | The BIOS writes boot mode 2 at header `0xC4` for Normal-mode multiboot | GBATEK "Multiboot Header"; unverified on hardware, and the helper runs the MultiPlay loop for any other value |
+| M24 | SO goes high at the end of a Normal transfer (forced anyway by the helper's `0x5008`); and the helper's `0x5080` keeps SO low while armed | GBATEK is ambiguous about SIOCNT bit 3 while armed. If every slot stays not ready (`sync fail nr …` or `cmd … fail … nr …` lines with a high `nr`), the GBA may show the shift register's MSB on SO while armed; record the log |
+| M25 | The BIOS writes boot mode 2 at header `0xC4` for Normal-mode multiboot | GBATEK "Multiboot Header"; unverified on hardware, and the helper runs the MultiPlay loop for any other value. The log's `hello … boot` line shows the value once HELLO gets through; a helper in the wrong loop never answers, which leaves only `sync fail nr …` lines |
 | M26 | The BIOS and the helper sample our 256 kHz bit-banged SC reliably | the probe of 2026-10-30 reached the BIOS at that rate; the helper side is untested |
-| M27 | The BIOS signals ready with SO low (our SI low) during multiboot | inferred from GBATEK's Normal-mode slave procedure; the probe's steady `72026203` replies agree |
+| M27 | The BIOS does not hold SO low (our SI low) before transfers come, so the BIOS phase must clock ungated (§7.3) | The probe of 2026-10-30 clocked ungated; its first reply, `FFFFFFFF`, matches GBATEK's "slave not in mode yet", then `0000`: the BIOS takes Normal mode only once clocks come. So the BIOS phase runs ungated (as built) and the gate applies to the helper only. If a GBC-cable Connect never leaves `Waiting for GBA`, the `mb wait … nr … last` lines show what came back; rebuild with `GEN3_CART_MB_GATED 1` to try the gated BIOS phase |
 
 # References
 
