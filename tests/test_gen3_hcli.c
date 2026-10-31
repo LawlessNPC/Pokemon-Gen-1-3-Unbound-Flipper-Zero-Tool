@@ -1177,8 +1177,9 @@ TEST(test_hcli_normal_busy_flash) {
 }
 
 /* The cable pulled for good as a READ_SECTOR's response starts: from then every slot is not ready,
- * which the pump takes as BUSY, so the request ends at its BUSY budget, not in a hang. Once the
- * cable is back, connect links again. */
+ * which the pump takes as BUSY, so the request ends at its BUSY budget (the default 6 s), not in a
+ * hang: within 2 s of it in the fake's modelled time. Once the cable is back, connect links
+ * again. */
 TEST(test_hcli_normal_unplug) {
     ASSERT_TRUE(setup_identified_on(MlinkWireNormal));
     /* The read's time made 10 ms: one not-ready slot after the request's last word, then the
@@ -1186,14 +1187,54 @@ TEST(test_hcli_normal_unplug) {
     hook_arm(GEN3_HCMD_READ_SECTOR, FOREVER, 0);
     hook.unplug_after = 1;
     hook.busy_us = 10000u;
+    const uint64_t t0 = fh.now_us;
     const Gen3HcliResult r = gen3_hcli_read_sector(&cli, 9, buf);
     ASSERT_TRUE(r == Gen3HcliLinkLost || r == Gen3HcliBusyTimeout);
-    ASSERT_TRUE(fake_helper_transfers(&fh) < FAKE_HELPER_MAX_TRANSFERS);
+    ASSERT_TRUE(fh.now_us - t0 <= GEN3_HLINK_BUSY_US + 2000000u);
     ASSERT_EQ(hook.calls[HP_CMD_READ_SECTOR], 1);
     fake_helper_replug(&fh);
     ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
     ASSERT_EQ(gen3_hcli_read_sector(&cli, 9, buf), Gen3HcliOk);
     ASSERT_MEM_EQ(buf, sector(9), SECTOR_LEN);
+}
+
+/* The cable pulled for good in the middle of a WRITE_SECTOR's request, at about its 100th word:
+ * the pump fails the packet as Wire after GEN3_HLINK_NOTREADY_RUN not-ready words instead of
+ * sending its other 1955 words into a cable that isn't there, and the resend waits for READY within
+ * the write's BUSY budget. So the call ends BusyTimeout or LinkLost within 2 s of that budget in
+ * the fake's modelled time, and the helper never ran the write. */
+TEST(test_hcli_normal_unplug_mid_request) {
+    ASSERT_TRUE(setup_identified_on(MlinkWireNormal));
+    ASSERT_EQ(gen3_hcli_arm_write(&cli, MX, 1, 0, 4), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_erase_sector(&cli, 14), Gen3HcliOk);
+    make_img(0, 5);
+    /* The exchange's first frame is 9 idle words, the first answered READY; the request's words
+     * follow, word k at transfer n0 + 9 + k */
+    const uint32_t n0 = fake_helper_transfers(&fh);
+    fake_helper_unplug_at(&fh, n0 + 9u + 99u, FOREVER);
+    const uint64_t t0 = fh.now_us;
+    const Gen3HcliResult r = gen3_hcli_write_sector(&cli, 14, true, img);
+    ASSERT_TRUE(r == Gen3HcliLinkLost || r == Gen3HcliBusyTimeout);
+    ASSERT_TRUE(fh.now_us - t0 <= GEN3_HCLI_BUSY_FLASH_US + 2000000u);
+    ASSERT_EQ(hook.calls[HP_CMD_WRITE_SECTOR], 0);
+    ASSERT_TRUE(all_ff(sector(14), SECTOR_LEN));
+}
+
+/* The cable pulled for good at the 5th word of a READ_SECTOR's response: the pump fails it as Wire
+ * after GEN3_HLINK_NOTREADY_RUN not-ready words instead of reading its other 2050 words, and the
+ * resend waits for READY within the read's BUSY budget (the default 6 s). So the call ends
+ * BusyTimeout or LinkLost within 2 s of that budget in the fake's modelled time. */
+TEST(test_hcli_normal_unplug_mid_response) {
+    ASSERT_TRUE(setup_identified_on(MlinkWireNormal));
+    /* As in test_hcli_normal_resend_after_stall, but the cable stays out */
+    hook_arm(GEN3_HCMD_READ_SECTOR, FOREVER, 0);
+    hook.unplug_after = 1 + 4;
+    hook.busy_us = 10000u;
+    const uint64_t t0 = fh.now_us;
+    const Gen3HcliResult r = gen3_hcli_read_sector(&cli, 9, buf);
+    ASSERT_TRUE(r == Gen3HcliLinkLost || r == Gen3HcliBusyTimeout);
+    ASSERT_TRUE(fh.now_us - t0 <= GEN3_HLINK_BUSY_US + 2000000u);
+    ASSERT_EQ(hook.calls[HP_CMD_READ_SECTOR], 1);
 }
 
 /* A word never delivered inside a response (the cable out for one slot at its 5th word): the
@@ -1507,6 +1548,8 @@ int main(void) {
     RUN(test_hcli_normal_roundtrip);
     RUN(test_hcli_normal_busy_flash);
     RUN(test_hcli_normal_unplug);
+    RUN(test_hcli_normal_unplug_mid_request);
+    RUN(test_hcli_normal_unplug_mid_response);
     RUN(test_hcli_normal_resend_after_stall);
     RUN(test_hcli_resend_rules);
     RUN(test_hcli_response_checks);

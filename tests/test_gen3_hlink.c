@@ -875,6 +875,105 @@ TEST(test_hlink_notready_sync_resets_run) {
     ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkDone);
 }
 
+/* Before READY, a helper that is never ready is waited for like a BUSY one: the request fails
+ * BusyTimeout once its BUSY budget (the default 6 s) is over, as after the request
+ * (test_hlink_notready_busy_budget). */
+TEST(test_hlink_notready_before_ready_budget) {
+    gen3_hlink_init(&h);
+    gen3_hlink_submit(&h, &hello);
+    frame(&h, NULL, 0, 0, 0);
+    nr_all(38);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkSending);
+    nr_all(1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailBusyTimeout);
+}
+
+/* The cable pulled while a request goes out (after its READY): GEN3_HLINK_NOTREADY_RUN not-ready
+ * words in a row fail the packet as Wire at once, and the rest of it isn't sent. A delivered word
+ * starts the run again. */
+TEST(test_hlink_notready_mid_request_is_wire) {
+    ASSERT_EQ(GEN3_HLINK_NOTREADY_RUN, 16);
+    /* WRITE_SECTOR's shape (test_hlink_long_request): 2055 words */
+    for(uint32_t i = 0; i < sizeof(big); i++) big[i] = (uint8_t)(i * 7u + 3u);
+    const Gen3HlinkReq req = {
+        .code = 0x19,
+        .seq = 0x7F,
+        .args = {14, 1},
+        .nargs = 2,
+        .data = big,
+        .data_words = 2048,
+        .resp = resp,
+        .resp_max_words = 2,
+    };
+    gen3_hlink_init(&h);
+    gen3_hlink_submit(&h, &req);
+    frame(&h, NULL, 0, 0, 0);
+    uint16_t w[MLINK_BURST_LEN];
+    fill(w, READY, MLINK_BURST_LEN);
+    MlinkTx tx = frame(&h, w, MLINK_BURST_LEN, 0, FRAME_US);
+    ASSERT_EQ(tx.word[0], SOF);
+    fill(w, RECV, MLINK_BURST_LEN);
+    /* 9 not ready, then 6 more (15 in a row), a delivered word, 2 not ready; then 9 */
+    nr_frame(w, MLINK_BURST_LEN, 0x1FFu, FRAME_US);
+    nr_frame(w, MLINK_BURST_LEN, 0x1BFu, FRAME_US);
+    tx = nr_frame(w, MLINK_BURST_LEN, 0x1FFu, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkSending);
+    ASSERT_EQ(tx.count, MLINK_BURST_LEN);
+    ASSERT_EQ(tx.word[0], big[2 * (3 * 9 - 5)] | big[2 * (3 * 9 - 5) + 1] << 8);
+    /* 11 in a row so far: slot 4 is the 16th */
+    tx = nr_frame(w, MLINK_BURST_LEN, 0x01Fu, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailWire);
+    ASSERT_EQ(tx.count, 0);
+}
+
+/* The cable pulled in a response, after its SOF: as in a request, GEN3_HLINK_NOTREADY_RUN
+ * not-ready words in a row fail it as Wire at once, not after its n words. */
+TEST(test_hlink_notready_mid_response_is_wire) {
+    hello_sent(0); /* HELLO is 5 words: the first frame skips their replies */
+    /* SOF, w1, n = 2000 (read out, too long for resp), a payload word */
+    const uint16_t a[MLINK_BURST_LEN] = {RECV, RECV, RECV, RECV, RECV, SOF, 0x0100, 2000, 0};
+    nr_frame(a, MLINK_BURST_LEN, 0, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkReceiving);
+    uint16_t w[MLINK_BURST_LEN];
+    fill(w, 0, MLINK_BURST_LEN);
+    /* 15 not ready in a row, a delivered word, then 11: still reading */
+    nr_frame(w, MLINK_BURST_LEN, 0x1FFu, FRAME_US);
+    nr_frame(w, MLINK_BURST_LEN, 0x1BFu, FRAME_US);
+    nr_frame(w, MLINK_BURST_LEN, 0x1FFu, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkReceiving);
+    /* slot 4 is the 16th in a row */
+    MlinkTx tx = nr_frame(w, MLINK_BURST_LEN, 0x01Fu, FRAME_US);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkFailed);
+    ASSERT_EQ(fail_of(), Gen3HlinkFailWire);
+    ASSERT_EQ(tx.count, 0);
+}
+
+/* For the log: the not-ready words of the frames the pump took from the submit (or sync) to Done
+ * or Failed, up to UINT16_MAX; the next submit or sync starts at 0 again. */
+TEST(test_hlink_notready_count) {
+    hello_sent(0);
+    ASSERT_EQ(gen3_hlink_notready(&h), 0);
+    nr_all(3);
+    const uint16_t w[MLINK_BURST_LEN] = {0, 0, 0, 0, 0, SOF, 0x0100, 0x0004, 0x0001};
+    nr_frame(w, MLINK_BURST_LEN, 0x01Fu, FRAME_US);
+    reply(0, hello_ok + 4, 5, -1);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkDone);
+    ASSERT_EQ(gen3_hlink_notready(&h), 3 * 9 + 5);
+    nr_all(1); /* settled: not taken */
+    ASSERT_EQ(gen3_hlink_notready(&h), 3 * 9 + 5);
+    gen3_hlink_sync(&h, 1, 1000000u);
+    ASSERT_EQ(gen3_hlink_notready(&h), 0);
+    nr_all(2);
+    ASSERT_EQ(gen3_hlink_notready(&h), 18);
+    /* A long wait saturates */
+    hello_sent(UINT32_MAX);
+    nr_all(UINT16_MAX / 9u + 1u);
+    ASSERT_EQ(gen3_hlink_state(&h), Gen3HlinkWaiting);
+    ASSERT_EQ(gen3_hlink_notready(&h), UINT16_MAX);
+}
+
 int main(void) {
     RUN(test_crc32_check);
     RUN(test_hlink_idle);
@@ -903,5 +1002,9 @@ int main(void) {
     RUN(test_hlink_notready_before_ready);
     RUN(test_hlink_notready_in_response_is_wire);
     RUN(test_hlink_notready_sync_resets_run);
+    RUN(test_hlink_notready_before_ready_budget);
+    RUN(test_hlink_notready_mid_request_is_wire);
+    RUN(test_hlink_notready_mid_response_is_wire);
+    RUN(test_hlink_notready_count);
     TEST_EXIT();
 }

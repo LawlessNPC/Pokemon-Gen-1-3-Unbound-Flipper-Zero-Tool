@@ -44,7 +44,17 @@
  * driver reports the slot not ready (MlinkRx.notready_mask, also a timed-out word). The pump
  * treats that word like a valid BUSY wherever it waits (Sending before READY, Waiting): it starts
  * the budget and the count of other words again. In Sync it breaks the run of READY. Inside a
- * response it is a wire error, like a timed-out word. */
+ * packet (the request's words after its READY, the replies to the request's last frame included,
+ * and a response after its SOF) it is a wire error, like a timed-out word, and
+ * GEN3_HLINK_NOTREADY_RUN of them in a row end the packet at once (a pulled cable). */
+
+/* Not-ready words in a row inside a packet that fail it as Wire at once, the rest of a request
+ * unsent and the rest of a response unread; a delivered word starts the run again. 16 slots of
+ * MLINK_NORMAL_STALL_TICKS ticks each are about 275 ms, past the helper's 200 ms receive timeout,
+ * so the helper has dropped the packet and hunts for the next one by then. Safety is unchanged: a
+ * resend of a write-class command is answered from the helper's stored response (seq and CRC,
+ * multiboot-and-save.md §6.5). Never reached on the MultiPlay wire, whose notready_mask is 0. */
+#define GEN3_HLINK_NOTREADY_RUN 16u
 
 /* After a request's last word: words in a row that are neither BUSY nor a SOF (timed-out words
  * count) before the response counts as lost, multiboot-and-save.md §6.5. A BUSY starts the count
@@ -90,7 +100,9 @@ typedef enum {
     /* A response word came back timed out or with a framing error, or the response's n is over
      * GEN3_HLINK_MAX_PAYLOAD, which no sound packet has (multiboot-and-save.md §6.2). The pump
      * reads the rest of the packet first, so that the helper is hunting again for the resend;
-     * only a bad n (w2) ends it at once, as the length is then unknown. */
+     * only a bad n (w2) ends it at once, as the length is then unknown. Or (Normal wire)
+     * GEN3_HLINK_NOTREADY_RUN not-ready words in a row inside a request after its READY or a
+     * response after its SOF: that ends the packet at once too. */
     Gen3HlinkFailWire,
     Gen3HlinkFailSeq, /* a valid response for another seq */
     /* The response's n (at most GEN3_HLINK_MAX_PAYLOAD) is over resp_max_words: the packet is read
@@ -138,10 +150,12 @@ typedef struct Gen3Hlink {
     uint16_t rn; /* the response's n */
     uint16_t crc_lo; /* the response's CRC, low half */
     uint16_t resp_words; /* result: the response's n */
+    uint16_t notready; /* result: not-ready words since the submit or sync, up to UINT16_MAX */
     uint8_t status; /* result: the response's status, w1 & 0xFF */
     uint8_t skip; /* rx slots of the frame in flight that answer request words */
     uint8_t need; /* Sync: READYs in a row to see */
     uint8_t run; /* Sync: READYs in a row so far */
+    uint8_t nr_run; /* inside a packet: not-ready words in a row (GEN3_HLINK_NOTREADY_RUN) */
     bool ready; /* Sending: a READY came back, so the request goes out */
     bool busy; /* this wait saw a BUSY */
     bool wire; /* Receiving: a word of this packet came back invalid */
@@ -175,3 +189,7 @@ void gen3_hlink_result(
     uint8_t* status,
     uint16_t* resp_words,
     Gen3HlinkFail* fail);
+/* App side, as gen3_hlink_result: the not-ready words (MlinkRx.notready_mask) of every frame the
+ * pump took since the submit or sync, up to UINT16_MAX. Always 0 on the MultiPlay wire. For the
+ * log. */
+uint16_t gen3_hlink_notready(const Gen3Hlink* h);

@@ -44,9 +44,11 @@ static void hlink_reset(Gen3Hlink* h) {
     h->pos = 0;
     h->other = 0;
     h->resp_words = 0;
+    h->notready = 0;
     h->status = 0;
     h->skip = 0;
     h->run = 0;
+    h->nr_run = 0;
     h->ready = false;
     h->busy = false;
     h->wire = false;
@@ -140,9 +142,23 @@ static bool hlink_wait_other(
     return true;
 }
 
+/* A word inside a packet: a reply to a request word after READY, or a response word after its
+ * SOF. A delivered word ends the run of not-ready ones; the GEN3_HLINK_NOTREADY_RUN-th in a row
+ * fails the packet as Wire at once. False when it did. */
+static bool hlink_packet_slot(Gen3Hlink* h, bool notready) {
+    if(!notready) {
+        h->nr_run = 0;
+        return true;
+    }
+    if(++h->nr_run < GEN3_HLINK_NOTREADY_RUN) return true;
+    hlink_finish(h, Gen3HlinkFailed, Gen3HlinkFailWire);
+    return false;
+}
+
 /* Response word h->pos (1 = w1): one CRC update per word, the payload straight into resp, unless
  * it is longer than resp_max_words: then it is read out to its end without being stored. */
-static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid) {
+static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid, bool notready) {
+    if(!hlink_packet_slot(h, notready)) return false;
     const uint16_t k = h->pos++;
     if(!valid) {
         h->wire = true;
@@ -196,7 +212,7 @@ static bool hlink_recv(Gen3Hlink* h, uint16_t w, bool valid) {
 }
 
 /* One reply word, in order; false when the rest of the frame doesn't matter. A not-ready word is
- * never valid: BUSY while waiting, a broken run in Sync, a wire error in a response. */
+ * never valid: BUSY while waiting, a broken run in Sync, a wire error in a packet. */
 static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid, bool notready) {
     switch(h->state) {
     case Gen3HlinkSync:
@@ -208,7 +224,8 @@ static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid, bool notready) {
         }
         return true;
     case Gen3HlinkSending:
-        if(h->ready) return false; /* replies to request words */
+        /* Replies to request words: only a run of not-ready ones matters */
+        if(h->ready) return hlink_packet_slot(h, notready);
         if(valid && w == GEN3_HLINK_READY) {
             h->ready = true; /* the request goes out from the next frame */
             return false;
@@ -221,13 +238,14 @@ static bool hlink_word(Gen3Hlink* h, uint16_t w, bool valid, bool notready) {
             h->pos = 1;
             h->rn = 0;
             h->too_long = false;
+            h->nr_run = 0;
             h->crc = HLINK_CRC_INIT;
             return true;
         }
         return hlink_wait_other(
             h, w, valid, notready, GEN3_HLINK_NO_RESPONSE_XFERS, Gen3HlinkFailNoResponse);
     case Gen3HlinkReceiving:
-        return hlink_recv(h, w, valid);
+        return hlink_recv(h, w, valid, notready);
     case Gen3HlinkIdle:
     case Gen3HlinkDone:
     case Gen3HlinkFailed:
@@ -291,10 +309,19 @@ void gen3_hlink_frame(Gen3Hlink* h, const MlinkRx* rx, MlinkTx* tx, uint32_t ela
         return;
     }
     const uint8_t count = !rx ? 0 : rx->count < MLINK_BURST_LEN ? rx->count : MLINK_BURST_LEN;
-    const uint16_t notready = rx ? rx->notready_mask : 0;
+    const uint16_t notready = rx ? (uint16_t)(rx->notready_mask & ((1u << count) - 1u)) : 0;
     const uint16_t bad = rx ? (uint16_t)(rx->timeout_mask | rx->framing_mask | notready) : 0;
-    for(uint8_t t = h->skip; t < count; t++) {
-        if(!hlink_word(h, rx->word[t], !((bad >> t) & 1u), (notready >> t) & 1u)) break;
+    for(uint16_t m = notready; m && h->notready < UINT16_MAX; m &= (uint16_t)(m - 1u)) {
+        h->notready++;
+    }
+    for(uint8_t t = 0; t < count; t++) {
+        const bool nr = (notready >> t) & 1u;
+        if(t < h->skip) {
+            /* a reply to one of the request's last words: still inside the packet */
+            if(!hlink_packet_slot(h, nr)) break;
+            continue;
+        }
+        if(!hlink_word(h, rx->word[t], !((bad >> t) & 1u), nr)) break;
     }
     h->skip = 0;
     hlink_time(h, elapsed_us);
@@ -315,4 +342,8 @@ void gen3_hlink_result(
     *status = h->status;
     *resp_words = h->resp_words;
     *fail = h->fail;
+}
+
+uint16_t gen3_hlink_notready(const Gen3Hlink* h) {
+    return h->notready;
 }
