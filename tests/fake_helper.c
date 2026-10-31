@@ -13,7 +13,12 @@ void fake_helper_init(FakeHelper* f, FakeGba* gba) {
     memset(f, 0, sizeof(*f));
     f->gba = gba;
     hp_init(&f->hp);
+    f->wire = MlinkWireMulti;
     f->send = HP_READY;
+}
+
+void fake_helper_set_wire(FakeHelper* f, MlinkWire wire) {
+    f->wire = wire;
 }
 
 /* Transfer n never gets to the helper: the cable is out, or the GBA is off. */
@@ -21,8 +26,22 @@ static bool fake_helper_lost(const FakeHelper* f, uint32_t n) {
     return f->dead || (n >= f->unplug_from && n - f->unplug_from < f->unplug_len);
 }
 
-/* The helper's side of one transfer that reaches it, at time `at`: its reply. */
+/* Normal wire: the slave isn't ready for slot n at time `at`: the cable is out, the GBA is off, or
+ * a command still runs. */
+static bool fake_helper_notready(const FakeHelper* f, uint32_t n, uint64_t at) {
+    return fake_helper_lost(f, n) || (f->busy && at < f->busy_end_us);
+}
+
+/* The helper's side of one transfer that reaches it, at time `at`: its reply. On the Normal wire
+ * none reaches it while a command runs. */
 static uint16_t fake_helper_xfer(FakeHelper* f, uint16_t in, uint64_t at) {
+    if(f->busy && f->wire == MlinkWireNormal) {
+        /* The command is done. The response's first word went in when it ended, and the helper
+         * has waited for a transfer since, as for any word: this one, unless it timed out. */
+        f->busy = false;
+        f->send = f->first;
+        f->heard_us = f->busy_end_us;
+    }
     if(f->busy) {
         /* The Flipper's words aren't read. The first transfer once the command's time is over is
          * the fresh one the helper waits for: it still answers BUSY, then the response is loaded. */
@@ -59,22 +78,38 @@ void fake_helper_frame(FakeHelper* f, const MlinkTx* tx, MlinkRx* rx, uint32_t e
     }
     memset(rx, 0, sizeof(*rx));
     rx->count = tx->count;
+    const bool normal = f->wire == MlinkWireNormal;
+    uint32_t ticks = 0; /* the frame's time so far: where slot t starts */
     for(uint8_t t = 0; t < tx->count; t++) {
         const uint32_t n = f->transfers++;
+        const uint16_t bit = (uint16_t)(1u << t);
+        const uint64_t at = f->now_us + (uint64_t)ticks * MLINK_TICK_US;
         if(f->gba->frozen) f->dead = true;
-        if(fake_helper_lost(f, n)) {
+        if(normal && fake_helper_notready(f, n, at)) {
+            /* The driver waited its ticks for the slave and clocked nothing */
             rx->word[t] = MLINK_NO_DATA;
-            rx->timeout_mask |= (uint16_t)(1u << t);
+            rx->timeout_mask |= bit;
+            rx->notready_mask |= bit;
+            ticks += MLINK_NORMAL_STALL_TICKS;
             continue;
         }
-        uint16_t reply = fake_helper_xfer(f, tx->word[t], f->now_us + (uint64_t)t * MLINK_TICK_US);
+        ticks++;
+        if(fake_helper_lost(f, n)) {
+            rx->word[t] = MLINK_NO_DATA;
+            rx->timeout_mask |= bit;
+            continue;
+        }
+        uint16_t reply = fake_helper_xfer(f, tx->word[t], at);
         if(f->corrupt && f->corrupt_at == n) {
             reply ^= 0x0001u;
             f->corrupt = false;
         }
         rx->word[t] = reply;
     }
-    f->now_us += elapsed_us;
+    if(!ticks) ticks = 1; /* an idle tick */
+    rx->ticks = (uint16_t)ticks;
+    const uint64_t took = (uint64_t)ticks * MLINK_TICK_US;
+    f->now_us += normal && took > elapsed_us ? took : elapsed_us;
 }
 
 void fake_helper_unplug_at(FakeHelper* f, uint32_t transfer, uint32_t len) {
@@ -126,10 +161,10 @@ static void fake_helper_run(FakeHelper* f) {
             fake_helper_misuse("transport: gave up after this many transfers", f->pump_transfers);
         }
         f->pump_transfers += f->pending.count ? f->pending.count : 1u;
-        const uint32_t us = mlink_frame_us(MlinkModeStream, f->pending.count);
         MlinkRx rx;
-        fake_helper_frame(f, &f->pending, &rx, us);
-        gen3_hlink_frame(f->pump, &rx, &f->pending, us);
+        /* At least a tick per slot; on the Normal wire, not-ready slots take longer */
+        fake_helper_frame(f, &f->pending, &rx, mlink_frame_us(MlinkModeStream, f->pending.count));
+        gen3_hlink_frame(f->pump, &rx, &f->pending, (uint32_t)rx.ticks * MLINK_TICK_US);
     }
 }
 

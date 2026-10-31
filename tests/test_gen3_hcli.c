@@ -132,17 +132,20 @@ static void tap_drop(uint8_t code, uint32_t times, Gen3HlinkFail as) {
 }
 
 /* The fake helper's command hook: counts each code, and when `code` next runs, unplugs the cable
- * for the next `unplug` transfers and corrupts the reply `corrupt` transfers on (if non-zero), and
- * XORs 0x01 into the flash byte at `flip` (if non-zero), so that running that command again would
- * see another save. */
+ * for `unplug` transfers from `unplug_after` transfers on and corrupts the reply `corrupt`
+ * transfers on (if non-zero), XORs 0x01 into the flash byte at `flip` (if non-zero), so that
+ * running that command again would see another save, and makes the command's modelled time
+ * `busy_us` from the packet's last word (if non-zero). */
 typedef struct {
     uint32_t calls[256];
     uint16_t last_arg0;
     bool armed;
     uint8_t code;
     uint32_t unplug;
+    uint32_t unplug_after;
     uint32_t corrupt;
     uint32_t flip;
+    uint32_t busy_us;
 } Hook;
 
 static Hook hook;
@@ -153,17 +156,23 @@ static void hook_cb(void* ctx, uint8_t code, uint16_t arg0) {
     k->last_arg0 = arg0;
     if(!k->armed || code != k->code) return;
     k->armed = false;
-    if(k->unplug) fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), k->unplug);
+    if(k->unplug) {
+        fake_helper_unplug_at(&fh, fake_helper_transfers(&fh) + k->unplug_after, k->unplug);
+    }
     if(k->corrupt) fake_helper_corrupt_at(&fh, fake_helper_transfers(&fh) + k->corrupt);
     if(k->flip) fake_gba_flash(&gba)[k->flip] ^= 0x01;
+    /* heard_us is the packet's last word's time: the helper just heard it */
+    if(k->busy_us) fh.busy_end_us = fh.heard_us + k->busy_us;
 }
 
 static void hook_arm(uint8_t code, uint32_t unplug, uint32_t corrupt) {
     hook.armed = true;
     hook.code = code;
     hook.unplug = unplug;
+    hook.unplug_after = 0;
     hook.corrupt = corrupt;
     hook.flip = 0;
+    hook.busy_us = 0;
 }
 
 /* The default save: Ruby, slot A with counter 4 and id 0 at its first sector, slot B absent. */
@@ -207,16 +216,32 @@ static void setup(void) {
     insert("AXVE", 16 * MIB, NULL);
 }
 
-/* The default cart as the Flipper starts on it: connected, CART_INFO, SAVE_PROBE; the flash counts
- * start at 0. */
-static bool setup_identified(void) {
+/* The default cart on the Normal wire (insert starts the fake helper on MultiPlay) */
+static void setup_normal(void) {
     setup();
+    fake_helper_set_wire(&fh, MlinkWireNormal);
+}
+
+/* The cart inserted, as the Flipper starts on it: connected, CART_INFO, SAVE_PROBE; the flash
+ * counts start at 0. */
+static bool identify(void) {
     Gen3HProbe probe;
     const bool ok = gen3_hcli_connect(&cli, NULL) == Gen3HcliOk &&
                     gen3_hcli_cart_info(&cli, &info) == Gen3HcliOk &&
                     gen3_hcli_save_probe(&cli, &probe) == Gen3HcliOk;
     memset(&gba.counts, 0, sizeof(gba.counts));
     return ok;
+}
+
+/* The default cart, identified */
+static bool setup_identified(void) {
+    setup();
+    return identify();
+}
+
+static bool setup_identified_normal(void) {
+    setup_normal();
+    return identify();
 }
 
 /* Slot A's sector of id k with its counter set: an image as a game save would carry it. */
@@ -234,13 +259,18 @@ static bool holds_img(uint32_t s, uint8_t commit) {
 /* ---- Driving the fake helper word by word ---- */
 
 static bool last_lost;
+static bool last_notready;
+static uint16_t last_ticks;
 
-/* One one-word stream frame: the reply (MLINK_NO_DATA if lost, with last_lost set). */
+/* One one-word stream frame: the reply (MLINK_NO_DATA if lost, with last_lost set, and on the
+ * Normal wire last_notready too); last_ticks is the frame's time in ticks. */
 static uint16_t xfer(uint16_t w) {
     const MlinkTx tx = {.count = 1, .word = {w}};
     MlinkRx rx;
     fake_helper_frame(&fh, &tx, &rx, MLINK_TICK_US);
     last_lost = (rx.timeout_mask & 1u) != 0;
+    last_notready = (rx.notready_mask & 1u) != 0;
+    last_ticks = rx.ticks;
     return rx.word[0];
 }
 
@@ -563,6 +593,71 @@ TEST(test_fake_helper_power_cut_restart) {
     make_img(0, 5);
     ASSERT_EQ(gen3_hcli_write_sector(&cli, 14, true, img), Gen3HcliOk);
     ASSERT_TRUE(holds_img(14, 0xFF));
+}
+
+/* On the Normal wire the helper sends no BUSY: it runs the command right after the packet's last
+ * word, and while it runs the slave isn't ready, so every slot is not ready (nothing clocked,
+ * MLINK_NORMAL_STALL_TICKS ticks each). The first slot delivered after it carries the response's
+ * SOF. */
+TEST(test_fake_helper_normal_busy_is_notready) {
+    setup();
+    /* MultiPlay, the default: a frame takes max(count, 1) ticks, and no slot is ever not ready */
+    MlinkTx tx = {.count = MLINK_BURST_LEN};
+    MlinkRx rx;
+    fake_helper_frame(&fh, &tx, &rx, MLINK_BURST_LEN * MLINK_TICK_US);
+    ASSERT_EQ(rx.ticks, MLINK_BURST_LEN);
+    ASSERT_EQ(rx.notready_mask, 0);
+    tx.count = 0;
+    fake_helper_frame(&fh, &tx, &rx, MLINK_TICK_US);
+    ASSERT_EQ(rx.ticks, 1);
+    fake_helper_set_wire(&fh, MlinkWireNormal);
+    /* HELLO, its modelled time made 100 ms */
+    hook_arm(HP_CMD_HELLO, 0, 0);
+    hook.busy_us = 100000u;
+    ASSERT_EQ(xfer(hello_req[0]), HP_READY);
+    ASSERT_EQ(last_ticks, 1);
+    for(uint32_t i = 1; i < 5; i++) ASSERT_EQ(xfer(hello_req[i]), HP_RECV);
+    ASSERT_EQ(hook.calls[HP_CMD_HELLO], 1);
+    /* From the slot 1 tick after the last word, every 16 ticks, until the 100 ms are over: the
+     * slots at 1, 17, 33, 49, 65 and 81 ticks */
+    const uint32_t n0 = fake_helper_transfers(&fh);
+    for(uint32_t i = 0; i < 6; i++) {
+        ASSERT_EQ(xfer(0x1234), MLINK_NO_DATA);
+        ASSERT_TRUE(last_notready);
+        ASSERT_TRUE(last_lost);
+        ASSERT_EQ(last_ticks, MLINK_NORMAL_STALL_TICKS);
+    }
+    /* At 97 ticks, the response from its SOF, then READY: every reply is pinned, none is BUSY */
+    ASSERT_TRUE(hello_response(1));
+    ASSERT_FALSE(last_notready);
+    ASSERT_EQ(last_ticks, 1);
+    ASSERT_EQ(fake_helper_transfers(&fh), n0 + 6 + 10);
+    ASSERT_EQ(hook.calls[HP_CMD_HELLO], 1);
+    /* The cable out: those slots are not ready too. A frame's ticks are 1 per delivered slot and
+     * 16 per not-ready one; an idle tick is 1. */
+    const uint32_t n1 = fake_helper_transfers(&fh);
+    fake_helper_unplug_at(&fh, n1 + 3, 2);
+    tx.count = MLINK_BURST_LEN;
+    fake_helper_frame(&fh, &tx, &rx, MLINK_TICK_US);
+    ASSERT_EQ(rx.notready_mask, 0x0018);
+    ASSERT_EQ(rx.timeout_mask, 0x0018);
+    ASSERT_EQ(rx.word[2], HP_READY);
+    ASSERT_EQ(rx.word[3], MLINK_NO_DATA);
+    ASSERT_EQ(rx.word[5], HP_READY);
+    ASSERT_EQ(rx.ticks, 7 + 2 * MLINK_NORMAL_STALL_TICKS);
+    tx.count = 0;
+    fake_helper_frame(&fh, &tx, &rx, MLINK_TICK_US);
+    ASSERT_EQ(rx.ticks, 1);
+    ASSERT_EQ(fake_helper_transfers(&fh), n1 + MLINK_BURST_LEN);
+    /* After a power cut, not ready for good; a restart keeps the wire: no BUSY after HELLO */
+    gba.frozen = true;
+    ASSERT_EQ(xfer(0x0000), MLINK_NO_DATA);
+    ASSERT_TRUE(last_notready);
+    ASSERT_EQ(last_ticks, MLINK_NORMAL_STALL_TICKS);
+    fake_helper_restart(&fh);
+    ASSERT_EQ(xfer(hello_req[0]), HP_READY);
+    for(uint32_t i = 1; i < 5; i++) ASSERT_EQ(xfer(hello_req[i]), HP_RECV);
+    ASSERT_TRUE(hello_response(1));
 }
 
 /* ---- Each command against the helper ---- */
@@ -1034,6 +1129,138 @@ TEST(test_hcli_too_long_then_hello) {
     ASSERT_EQ(le16(buf), GEN3_HELPER_PROTO);
 }
 
+/* ---- The Normal wire ---- */
+
+/* test_hcli_connect, test_hcli_cart_info and test_hcli_read_sector on the Normal wire, with the
+ * same assertions. The helper's time (CART_INFO's 7 s scan, a sector read) comes as not-ready
+ * slots, which the pump takes as BUSY; with the cable out every slot is not ready. The fake GBA's
+ * own header says boot mode 3 whatever the wire. */
+TEST(test_hcli_normal_roundtrip) {
+    setup_normal();
+    Gen3HHello hello;
+    memset(&hello, 0xEE, sizeof(hello));
+    ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliOk);
+    ASSERT_EQ(hello.proto, 1);
+    ASSERT_EQ(hello.build, HP_BUILD_ID);
+    ASSERT_EQ(hello.max_payload, 2064);
+    ASSERT_EQ(hello.boot_mode, 3);
+    ASSERT_EQ(hello.slave_id, 1);
+    ASSERT_EQ(tap.syncs, 1);
+    ASSERT_EQ(tap.exchanges, 1);
+    ASSERT_EQ(cli.resends, 0);
+    ASSERT_EQ(cli.last_status, GEN3_HST_OK);
+    ASSERT_EQ(hook.calls[HP_CMD_HELLO], 1);
+    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
+    /* The cable out: no READY, so LinkLost before any HELLO */
+    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), FOREVER);
+    ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliLinkLost);
+    ASSERT_EQ(tap.syncs, 3);
+    ASSERT_EQ(tap.exchanges, 2);
+    fake_helper_replug(&fh);
+    ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliOk);
+    ASSERT_EQ(hook.calls[HP_CMD_HELLO], 3);
+
+    setup_normal();
+    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
+    memset(&info, 0xEE, sizeof(info));
+    ASSERT_EQ(gen3_hcli_cart_info(&cli, &info), Gen3HcliOk);
+    ASSERT_MEM_EQ(info.header, hdr, sizeof(hdr));
+    ASSERT_TRUE(info.logo_ok);
+    ASSERT_TRUE(info.fixed_ok);
+    ASSERT_TRUE(info.complement_ok);
+    ASSERT_FALSE(info.other_lib);
+    ASSERT_TRUE(info.write_game);
+    ASSERT_EQ(info.rom_size, 0x1000000);
+    ASSERT_EQ(info.lib, 1);
+    ASSERT_EQ(info.lib, GEN3_HLIB_FLASH1M);
+    ASSERT_EQ(info.lib_off, 0x3B0000);
+    /* A Japanese cart, one logo byte wrong, a second library string */
+    default_spec();
+    insert("AXVJ", 16 * MIB, "EEPROM_V124");
+    fake_helper_set_wire(&fh, MlinkWireNormal);
+    gba.header[0x20] ^= 0x01u;
+    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_cart_info(&cli, &info), Gen3HcliOk);
+    ASSERT_MEM_EQ(info.header, gba.header, sizeof(hdr));
+    ASSERT_FALSE(info.logo_ok);
+    ASSERT_TRUE(info.fixed_ok);
+    ASSERT_TRUE(info.complement_ok);
+    ASSERT_TRUE(info.other_lib);
+    ASSERT_FALSE(info.write_game);
+    ASSERT_EQ(info.lib, GEN3_HLIB_FLASH1M);
+    ASSERT_EQ(info.lib_off, 0x3B0000);
+
+    ASSERT_TRUE(setup_identified_normal());
+    memset(buf, 0xEE, sizeof(buf));
+    ASSERT_EQ(gen3_hcli_read_sector(&cli, 9, buf), Gen3HcliOk);
+    ASSERT_MEM_EQ(buf, sector(9), SECTOR_LEN);
+    ASSERT_EQ(buf[SECTOR_LEN], 0xEE);
+    for(uint32_t i = 0; i < SECTOR_LEN; i++) sector(20)[i] = (uint8_t)(i * 7u + 1u);
+    ASSERT_EQ(gen3_hcli_read_sector(&cli, 20, buf), Gen3HcliOk);
+    ASSERT_MEM_EQ(buf, sector(20), SECTOR_LEN);
+    ASSERT_EQ(gen3_hcli_read_sector(&cli, 32, buf), Gen3HcliStatusError);
+    ASSERT_EQ(cli.last_status, GEN3_HST_BAD_ARG);
+    ASSERT_EQ(cli.last_fail_off, 32);
+    ASSERT_EQ(cli.resends, 0);
+}
+
+/* A flash command keeps the helper at work for seconds, and on the Normal wire every slot
+ * meanwhile is not ready. The request stays alive within its BUSY budget: no NoResponse, no
+ * resend. */
+TEST(test_hcli_normal_busy_flash) {
+    ASSERT_TRUE(setup_identified_normal());
+    ASSERT_EQ(gen3_hcli_arm_write(&cli, MX, 1, 0, 4), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_erase_sector(&cli, 14), Gen3HcliOk);
+    make_img(0, 5);
+    hook_arm(GEN3_HCMD_WRITE_SECTOR, 0, 0);
+    hook.busy_us = 3000000u;
+    const uint32_t n0 = fake_helper_transfers(&fh);
+    ASSERT_EQ(gen3_hcli_write_sector(&cli, 14, true, img), Gen3HcliOk);
+    ASSERT_EQ(tap.busy_us[GEN3_HCMD_WRITE_SECTOR], GEN3_HCLI_BUSY_FLASH_US);
+    /* The request's 2048 data words, and the 3 s as 175 not-ready slots of 16 ticks */
+    ASSERT_TRUE(fake_helper_transfers(&fh) - n0 >= 2048u + 175u);
+    ASSERT_EQ(cli.resends, 0);
+    ASSERT_EQ(hook.calls[HP_CMD_WRITE_SECTOR], 1);
+    ASSERT_TRUE(holds_img(14, 0xFF));
+}
+
+/* The cable pulled for good as a READ_SECTOR's response starts: from then every slot is not ready,
+ * which the pump takes as BUSY, so the request ends at its BUSY budget, not in a hang. Once the
+ * cable is back, connect links again. */
+TEST(test_hcli_normal_unplug) {
+    ASSERT_TRUE(setup_identified_normal());
+    /* The read's time made 10 ms: one not-ready slot after the request's last word, then the
+     * response's first word, from which the cable is out */
+    hook_arm(GEN3_HCMD_READ_SECTOR, FOREVER, 0);
+    hook.unplug_after = 1;
+    hook.busy_us = 10000u;
+    const Gen3HcliResult r = gen3_hcli_read_sector(&cli, 9, buf);
+    ASSERT_TRUE(r == Gen3HcliLinkLost || r == Gen3HcliBusyTimeout);
+    ASSERT_TRUE(fake_helper_transfers(&fh) < FAKE_HELPER_MAX_TRANSFERS);
+    ASSERT_EQ(hook.calls[HP_CMD_READ_SECTOR], 1);
+    fake_helper_replug(&fh);
+    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_read_sector(&cli, 9, buf), Gen3HcliOk);
+    ASSERT_MEM_EQ(buf, sector(9), SECTOR_LEN);
+}
+
+/* A word never delivered inside a response (the cable out for one slot at its 5th word): the
+ * helper's words from there on come one slot late, the pump fails the packet as Wire, and the
+ * resend reads the sector right. */
+TEST(test_hcli_normal_resend_after_stall) {
+    ASSERT_TRUE(setup_identified_normal());
+    /* The read's time made 10 ms: one not-ready slot after the request's last word, then the
+     * response from its SOF; its 5th word, the second payload word, isn't delivered */
+    hook_arm(GEN3_HCMD_READ_SECTOR, 1, 0);
+    hook.unplug_after = 1 + 4;
+    hook.busy_us = 10000u;
+    memset(buf, 0, sizeof(buf));
+    ASSERT_EQ(gen3_hcli_read_sector(&cli, 9, buf), Gen3HcliOk);
+    ASSERT_TRUE(cli.resends >= 1);
+    ASSERT_MEM_EQ(buf, sector(9), SECTOR_LEN);
+    ASSERT_EQ(hook.calls[HP_CMD_READ_SECTOR], 1 + cli.resends);
+}
+
 /* ---- The client's rules, on scripted exchanges ---- */
 
 TEST(test_hcli_resend_rules) {
@@ -1307,6 +1534,7 @@ int main(void) {
     RUN(test_fake_helper_rx_timeout);
     RUN(test_fake_helper_unplug_corrupt);
     RUN(test_fake_helper_power_cut_restart);
+    RUN(test_fake_helper_normal_busy_is_notready);
     RUN(test_hcli_connect);
     RUN(test_hcli_cart_info);
     RUN(test_hcli_probe);
@@ -1324,6 +1552,10 @@ int main(void) {
     RUN(test_hcli_busy_per_command);
     RUN(test_hcli_connect_drains_tail);
     RUN(test_hcli_too_long_then_hello);
+    RUN(test_hcli_normal_roundtrip);
+    RUN(test_hcli_normal_busy_flash);
+    RUN(test_hcli_normal_unplug);
+    RUN(test_hcli_normal_resend_after_stall);
     RUN(test_hcli_resend_rules);
     RUN(test_hcli_response_checks);
     RUN(test_hcli_requests);
