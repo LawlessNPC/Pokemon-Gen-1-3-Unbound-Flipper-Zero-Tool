@@ -216,10 +216,10 @@ static void setup(void) {
     insert("AXVE", 16 * MIB, NULL);
 }
 
-/* The default cart on the Normal wire (insert starts the fake helper on MultiPlay) */
-static void setup_normal(void) {
+/* The default cart, with the fake helper on that wire (insert starts it on MultiPlay) */
+static void setup_on(MlinkWire wire) {
     setup();
-    fake_helper_set_wire(&fh, MlinkWireNormal);
+    fake_helper_set_wire(&fh, wire);
 }
 
 /* The cart inserted, as the Flipper starts on it: connected, CART_INFO, SAVE_PROBE; the flash
@@ -233,15 +233,14 @@ static bool identify(void) {
     return ok;
 }
 
-/* The default cart, identified */
-static bool setup_identified(void) {
-    setup();
+/* The default cart on that wire, identified */
+static bool setup_identified_on(MlinkWire wire) {
+    setup_on(wire);
     return identify();
 }
 
-static bool setup_identified_normal(void) {
-    setup_normal();
-    return identify();
+static bool setup_identified(void) {
+    return setup_identified_on(MlinkWireMulti);
 }
 
 /* Slot A's sector of id k with its counter set: an image as a game save would carry it. */
@@ -662,8 +661,9 @@ TEST(test_fake_helper_normal_busy_is_notready) {
 
 /* ---- Each command against the helper ---- */
 
-TEST(test_hcli_connect) {
-    setup();
+/* test_hcli_connect's body on that wire (test_hcli_normal_roundtrip runs it on Normal) */
+static void connect_on(MlinkWire wire) {
+    setup_on(wire);
     Gen3HHello hello;
     memset(&hello, 0xEE, sizeof(hello));
     ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliOk);
@@ -688,8 +688,13 @@ TEST(test_hcli_connect) {
     ASSERT_EQ(hook.calls[HP_CMD_HELLO], 3);
 }
 
-TEST(test_hcli_cart_info) {
-    setup();
+TEST(test_hcli_connect) {
+    connect_on(MlinkWireMulti);
+}
+
+/* test_hcli_cart_info's body on that wire */
+static void cart_info_on(MlinkWire wire) {
+    setup_on(wire);
     ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
     memset(&info, 0xEE, sizeof(info));
     ASSERT_EQ(gen3_hcli_cart_info(&cli, &info), Gen3HcliOk);
@@ -706,6 +711,7 @@ TEST(test_hcli_cart_info) {
     /* A Japanese cart, one logo byte wrong, a second library string */
     default_spec();
     insert("AXVJ", 16 * MIB, "EEPROM_V124");
+    fake_helper_set_wire(&fh, wire);
     gba.header[0x20] ^= 0x01u;
     ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
     ASSERT_EQ(gen3_hcli_cart_info(&cli, &info), Gen3HcliOk);
@@ -717,6 +723,10 @@ TEST(test_hcli_cart_info) {
     ASSERT_FALSE(info.write_game);
     ASSERT_EQ(info.lib, GEN3_HLIB_FLASH1M);
     ASSERT_EQ(info.lib_off, 0x3B0000);
+}
+
+TEST(test_hcli_cart_info) {
+    cart_info_on(MlinkWireMulti);
 }
 
 TEST(test_hcli_probe) {
@@ -742,8 +752,9 @@ TEST(test_hcli_probe) {
     ASSERT_TRUE(probe.sram);
 }
 
-TEST(test_hcli_read_sector) {
-    ASSERT_TRUE(setup_identified());
+/* test_hcli_read_sector's body on that wire */
+static void read_sector_on(MlinkWire wire) {
+    ASSERT_TRUE(setup_identified_on(wire));
     memset(buf, 0xEE, sizeof(buf));
     ASSERT_EQ(gen3_hcli_read_sector(&cli, 9, buf), Gen3HcliOk);
     ASSERT_MEM_EQ(buf, sector(9), SECTOR_LEN);
@@ -755,6 +766,10 @@ TEST(test_hcli_read_sector) {
     ASSERT_EQ(cli.last_status, GEN3_HST_BAD_ARG);
     ASSERT_EQ(cli.last_fail_off, 32);
     ASSERT_EQ(cli.resends, 0);
+}
+
+TEST(test_hcli_read_sector) {
+    read_sector_on(MlinkWireMulti);
 }
 
 TEST(test_hcli_read_footers) {
@@ -1136,79 +1151,16 @@ TEST(test_hcli_too_long_then_hello) {
  * slots, which the pump takes as BUSY; with the cable out every slot is not ready. The fake GBA's
  * own header says boot mode 3 whatever the wire. */
 TEST(test_hcli_normal_roundtrip) {
-    setup_normal();
-    Gen3HHello hello;
-    memset(&hello, 0xEE, sizeof(hello));
-    ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliOk);
-    ASSERT_EQ(hello.proto, 1);
-    ASSERT_EQ(hello.build, HP_BUILD_ID);
-    ASSERT_EQ(hello.max_payload, 2064);
-    ASSERT_EQ(hello.boot_mode, 3);
-    ASSERT_EQ(hello.slave_id, 1);
-    ASSERT_EQ(tap.syncs, 1);
-    ASSERT_EQ(tap.exchanges, 1);
-    ASSERT_EQ(cli.resends, 0);
-    ASSERT_EQ(cli.last_status, GEN3_HST_OK);
-    ASSERT_EQ(hook.calls[HP_CMD_HELLO], 1);
-    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
-    /* The cable out: no READY, so LinkLost before any HELLO */
-    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), FOREVER);
-    ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliLinkLost);
-    ASSERT_EQ(tap.syncs, 3);
-    ASSERT_EQ(tap.exchanges, 2);
-    fake_helper_replug(&fh);
-    ASSERT_EQ(gen3_hcli_connect(&cli, &hello), Gen3HcliOk);
-    ASSERT_EQ(hook.calls[HP_CMD_HELLO], 3);
-
-    setup_normal();
-    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
-    memset(&info, 0xEE, sizeof(info));
-    ASSERT_EQ(gen3_hcli_cart_info(&cli, &info), Gen3HcliOk);
-    ASSERT_MEM_EQ(info.header, hdr, sizeof(hdr));
-    ASSERT_TRUE(info.logo_ok);
-    ASSERT_TRUE(info.fixed_ok);
-    ASSERT_TRUE(info.complement_ok);
-    ASSERT_FALSE(info.other_lib);
-    ASSERT_TRUE(info.write_game);
-    ASSERT_EQ(info.rom_size, 0x1000000);
-    ASSERT_EQ(info.lib, 1);
-    ASSERT_EQ(info.lib, GEN3_HLIB_FLASH1M);
-    ASSERT_EQ(info.lib_off, 0x3B0000);
-    /* A Japanese cart, one logo byte wrong, a second library string */
-    default_spec();
-    insert("AXVJ", 16 * MIB, "EEPROM_V124");
-    fake_helper_set_wire(&fh, MlinkWireNormal);
-    gba.header[0x20] ^= 0x01u;
-    ASSERT_EQ(gen3_hcli_connect(&cli, NULL), Gen3HcliOk);
-    ASSERT_EQ(gen3_hcli_cart_info(&cli, &info), Gen3HcliOk);
-    ASSERT_MEM_EQ(info.header, gba.header, sizeof(hdr));
-    ASSERT_FALSE(info.logo_ok);
-    ASSERT_TRUE(info.fixed_ok);
-    ASSERT_TRUE(info.complement_ok);
-    ASSERT_TRUE(info.other_lib);
-    ASSERT_FALSE(info.write_game);
-    ASSERT_EQ(info.lib, GEN3_HLIB_FLASH1M);
-    ASSERT_EQ(info.lib_off, 0x3B0000);
-
-    ASSERT_TRUE(setup_identified_normal());
-    memset(buf, 0xEE, sizeof(buf));
-    ASSERT_EQ(gen3_hcli_read_sector(&cli, 9, buf), Gen3HcliOk);
-    ASSERT_MEM_EQ(buf, sector(9), SECTOR_LEN);
-    ASSERT_EQ(buf[SECTOR_LEN], 0xEE);
-    for(uint32_t i = 0; i < SECTOR_LEN; i++) sector(20)[i] = (uint8_t)(i * 7u + 1u);
-    ASSERT_EQ(gen3_hcli_read_sector(&cli, 20, buf), Gen3HcliOk);
-    ASSERT_MEM_EQ(buf, sector(20), SECTOR_LEN);
-    ASSERT_EQ(gen3_hcli_read_sector(&cli, 32, buf), Gen3HcliStatusError);
-    ASSERT_EQ(cli.last_status, GEN3_HST_BAD_ARG);
-    ASSERT_EQ(cli.last_fail_off, 32);
-    ASSERT_EQ(cli.resends, 0);
+    connect_on(MlinkWireNormal);
+    cart_info_on(MlinkWireNormal);
+    read_sector_on(MlinkWireNormal);
 }
 
 /* A flash command keeps the helper at work for seconds, and on the Normal wire every slot
  * meanwhile is not ready. The request stays alive within its BUSY budget: no NoResponse, no
  * resend. */
 TEST(test_hcli_normal_busy_flash) {
-    ASSERT_TRUE(setup_identified_normal());
+    ASSERT_TRUE(setup_identified_on(MlinkWireNormal));
     ASSERT_EQ(gen3_hcli_arm_write(&cli, MX, 1, 0, 4), Gen3HcliOk);
     ASSERT_EQ(gen3_hcli_erase_sector(&cli, 14), Gen3HcliOk);
     make_img(0, 5);
@@ -1228,7 +1180,7 @@ TEST(test_hcli_normal_busy_flash) {
  * which the pump takes as BUSY, so the request ends at its BUSY budget, not in a hang. Once the
  * cable is back, connect links again. */
 TEST(test_hcli_normal_unplug) {
-    ASSERT_TRUE(setup_identified_normal());
+    ASSERT_TRUE(setup_identified_on(MlinkWireNormal));
     /* The read's time made 10 ms: one not-ready slot after the request's last word, then the
      * response's first word, from which the cable is out */
     hook_arm(GEN3_HCMD_READ_SECTOR, FOREVER, 0);
@@ -1248,7 +1200,7 @@ TEST(test_hcli_normal_unplug) {
  * helper's words from there on come one slot late, the pump fails the packet as Wire, and the
  * resend reads the sector right. */
 TEST(test_hcli_normal_resend_after_stall) {
-    ASSERT_TRUE(setup_identified_normal());
+    ASSERT_TRUE(setup_identified_on(MlinkWireNormal));
     /* The read's time made 10 ms: one not-ready slot after the request's last word, then the
      * response from its SOF; its 5th word, the second payload word, isn't delivered */
     hook_arm(GEN3_HCMD_READ_SECTOR, 1, 0);

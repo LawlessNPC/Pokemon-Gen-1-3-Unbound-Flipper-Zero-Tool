@@ -2182,11 +2182,14 @@ static uint32_t sweep_points(
  * loads the old save or the new one at every step, both oracles naming the same slot at the cut.
  * Then the cable back and a reconnect: a cut once the game loads the new save (past the 14th
  * commit) is found done and finished by it; one before stays pending, and the write again
- * finishes it. */
-TEST(test_write_link_drop_sweep) {
+ * finishes it. On the Normal wire (the GBC cable pulled, or the GBA switched off) every slot with
+ * the cable out is not ready, which the pump takes as BUSY, so a request can also end at its BUSY
+ * budget: BusyTimeout, lost too. */
+static void link_drop_sweep(MlinkWire wire) {
     ASSERT_TRUE(backed_up());
     ASSERT_TRUE(edit_party());
     watch_write();
+    fake_helper_set_wire(&fh, wire);
     snap_take();
     uint32_t xfers = 0, ops = 0;
     ASSERT_TRUE(reference_run(&xfers, &ops));
@@ -2197,7 +2200,8 @@ TEST(test_write_link_drop_sweep) {
         snap_restore();
         fake_helper_unplug_at(&fh, fake_helper_transfers(&fh) + points[i], FOREVER);
         const Gen3CartResult r = gen3_cart_write(&cart, STAMP2);
-        if(r != Gen3CartLinkLost && r != Gen3CartOk) {
+        const bool busy_lost = wire == MlinkWireNormal && r == Gen3CartBusyTimeout;
+        if(r != Gen3CartLinkLost && r != Gen3CartOk && !busy_lost) {
             printf("  d=%u: write %d\n", (unsigned)points[i], r);
             ASSERT_TRUE(false);
         }
@@ -2234,59 +2238,12 @@ TEST(test_write_link_drop_sweep) {
     ASSERT_TRUE(finished >= 3u && finished < n);
 }
 
-/* test_write_link_drop_sweep on the Normal wire (the GBC cable pulled, or the GBA switched off):
- * with the cable out every slot is not ready, which the pump takes as BUSY, so a request can also
- * end at its BUSY budget, BusyTimeout, which counts as lost too. */
+TEST(test_write_link_drop_sweep) {
+    link_drop_sweep(MlinkWireMulti);
+}
+
 TEST(test_write_link_drop_sweep_normal) {
-    ASSERT_TRUE(backed_up());
-    ASSERT_TRUE(edit_party());
-    watch_write();
-    fake_helper_set_wire(&fh, MlinkWireNormal);
-    snap_take();
-    uint32_t xfers = 0, ops = 0;
-    ASSERT_TRUE(reference_run(&xfers, &ops));
-    static uint32_t points[400];
-    const uint32_t n = sweep_points(400, 400, xfers + 1u, ref.xfer, ref.n, points, 400);
-    uint32_t lost = 0, finished = 0;
-    for(uint32_t i = 0; i < n; i++) {
-        snap_restore();
-        fake_helper_unplug_at(&fh, fake_helper_transfers(&fh) + points[i], FOREVER);
-        const Gen3CartResult r = gen3_cart_write(&cart, STAMP2);
-        if(r != Gen3CartLinkLost && r != Gen3CartBusyTimeout && r != Gen3CartOk) {
-            printf("  d=%u: write %d\n", (unsigned)points[i], r);
-            ASSERT_TRUE(false);
-        }
-        ASSERT_EQ(watch.violations, 0);
-        ASSERT_TRUE(oracles_agree());
-        const View cut = game_view();
-        fake_helper_replug(&fh);
-        if(r == Gen3CartOk) {
-            ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartNothing);
-        } else {
-            lost++;
-            ASSERT_EQ(gen3_cart_reconnect(&cart), Gen3CartOk);
-            if(cut == ViewNew) {
-                finished++;
-                ASSERT_EQ(gen3_cart_finished(&cart), Gen3CartFinishedWrite);
-                ASSERT_EQ(gen3_cart_write(&cart, STAMP2), Gen3CartNothing);
-            } else {
-                /* pending once it armed; before, nothing is */
-                ASSERT_EQ(gen3_cart_finished(&cart), Gen3CartFinishedNone);
-                const Gen3CartResult again = gen3_cart_write(&cart, STAMP2);
-                if(again != Gen3CartOk) {
-                    printf("  d=%u: write again %d\n", (unsigned)points[i], again);
-                }
-                ASSERT_EQ(again, Gen3CartOk);
-            }
-        }
-        ASSERT_EQ(watch.violations, 0);
-        ASSERT_TRUE(written_and_backed_up());
-    }
-    /* every point is inside the write: each was lost, then finished, those past the 14th commit
-     * (the check and the new backup) by the reconnect */
-    ASSERT_TRUE(n >= 100u);
-    ASSERT_EQ(lost, n);
-    ASSERT_TRUE(finished >= 3u && finished < n);
+    link_drop_sweep(MlinkWireNormal);
 }
 
 /* The next session after a power cut that left the game loading `cut`: the GBA on again, the
