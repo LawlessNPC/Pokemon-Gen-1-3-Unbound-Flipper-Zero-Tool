@@ -21,7 +21,7 @@ _start:
     .byte   0x00                    @ 0xBD complement, written by fix_header.py
     .fill   2, 1, 0                 @ 0xBE reserved
     b       mb_start                @ 0xC0 MultiPlay and Normal entry
-    .byte   0, 0                    @ 0xC4 boot mode, 0xC5 slave id: the BIOS writes 3, 1
+    .byte   0, 0                    @ 0xC4 boot mode, 0xC5 slave id: the BIOS writes 3 (MultiPlay) or 2 (Normal), and 1
     .fill   26, 1, 0                @ 0xC6 .. 0xDF
     b       mb_start                @ 0xE0 JOY Bus entry
 mb_start:

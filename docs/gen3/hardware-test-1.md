@@ -4,6 +4,8 @@ Goal: the Flipper acts as the other player in Pokemon Ruby's Cable Club Trade Ce
 
 You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable, genuine Ruby. FireRed has its own checklist, `docs/gen3/hardware-test-frlg.md`.
 
+The Game Link module's SD line must be connected (KBEmbedded module: the two SD jumper pads bridged). Without it Ruby never answers, and the log shows `R:FFFF` with a timeout on every frame.
+
 ## Steps
 
 1. **Build and install.** Run `ufbt` (release build). Copy `dist/pokemon.fap` to `apps/GPIO/` on the SD card with qFlipper, or run `ufbt launch`.

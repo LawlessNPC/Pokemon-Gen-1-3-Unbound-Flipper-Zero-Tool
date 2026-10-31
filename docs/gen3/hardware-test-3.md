@@ -4,6 +4,8 @@ Goal: the Flipper sends its helper program to a GBA over the link cable (multibo
 
 You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GBA link cable, a genuine Pokemon Ruby cartridge and a genuine Pokemon FireRed cartridge.
 
+**Cable.** With a Game Link module whose SD line is connected (KBEmbedded: SD jumper bridged), use the GBA link cable, small plug in the Flipper. Otherwise use a Game Boy Color link cable, either end. The log's `wire` line says which link Connect used.
+
 **Build and install.** Run `ufbt` (release build). It builds two apps: `dist/pokemon.fap` (Pokemon Trade Tool) and `dist/pokemon_cart.fap` (Pokemon Cartridge). Copy both into the same folder on the SD card, for example `apps/GPIO/` with qFlipper. Or run `ufbt launch APPID=pokemon_cart`, then `ufbt launch APPID=pokemon`: each installs its app in `apps/GPIO/` and starts it.
 
 ## Notes
@@ -19,6 +21,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GB
 - **The instructions screen** (`Cartridge`) reads: `GBA off, cart in.` / `Small plug: Flipper.` / `Hold START+SELECT` / `and power on.`, with `Back` and `Start`.
 - **The progress screen** shows what is happening on top, two lines under it, a bar, and at the bottom `Back: stop` (Back stops the step), `Do not power off` (while the save is being written), or nothing.
 - **The log's `mb` lines** record each helper upload: `restarts` (failures counted) and `all` (every restart, counted or not), `cc` and `rr` (the GBA's two handshake bytes), `palette_busy` (how often the GBA answered "busy" to the palette word before it went on, at about 1 ms each, against a 4 s limit) and `final_us` (microseconds from the Flipper's first `0x0065` to the GBA's `0x0075`, against a 5 s limit). A.3 asks for the last two.
+- **The `wire` lines** in the log: `wire multi` or `wire normal` when Connect starts; `wire normal (SI high)` when it switched during multiboot. With a GBC cable and the GBA off at Start, SI may read low through the unpowered GBA, so Connect may begin with `wire multi` and switch to `wire normal (SI high)` once the GBA is powered on. That is expected. A failed upload also logs `mb failed … want %04x got %04x` (expected and received word; Header, Data, Handshake, Length or Crc failures only).
 - On any failure, report the step, what the Flipper and the GBA showed, and the log file.
 
 ## A. Connect (Ruby)
@@ -27,7 +30,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), GB
 2. **Waiting.** With the GBA off and the Ruby cartridge in it, put the cable's small plug in the Flipper and the other in the GBA. Press `Start`. The Flipper shows `Waiting for GBA`. After 3 s its lines show `Hold START+SELECT` / `and power on the GBA`.
 3. **Connect.** Hold START+SELECT on the GBA and switch it on; keep holding until the Nintendo logo is gone. The Flipper shows `Sending helper` with a bar (about 3–5 s), and the GBA screen turns green. Then the Flipper shows `Reading cart`, then `Backing up save` with `about 70 s` and a bar, then `Checking backup` and `Reading save`, and then the hub, headed `POKEMON RUBY`, with `Cart info`.
 4. **Without the keys.** Back on the hub closes Cartridge. Switch the GBA off, open Cartridge again, press `Start`, and switch the GBA on without holding START+SELECT. The game starts, and the Flipper keeps waiting (`Waiting for GBA`, with the power-on lines). Switch the GBA off, then on again holding START+SELECT: it connects as in step 3.
-5. **Wrong plug.** On the instructions, press `Start` with the cable's other plug in the Flipper (or no cable): the Flipper shows `Cable: plug in/swap ends` under `Waiting for GBA`. Swap the plugs: it carries on waiting for the GBA.
+5. **Wrong plug.** On the instructions, press `Start` with the cable's other plug in the Flipper (or no cable). The Flipper shows `Waiting for GBA`, then after 3 s the power-on lines (`Hold START+SELECT` / `and power on the GBA`); `Cable: plug in/swap ends` does not show. The log says `wire normal`. Back, then plug the right way round (or the GBC cable) before the next Connect. Don't switch the GBA on in this step. A reversed GBA cable drives SC from the Flipper, so a GBA running a game in the Cable Club would fight it.
 6. **Back while sending.** Start a Connect, and press Back while `Sending helper` shows. The Flipper shows `Stopping`, then the instructions. Back again closes Cartridge, and the Flipper returns to its app list. Switch the GBA off before the next Connect.
 7. **Data missing.** On a computer, replace `apps_assets/pokemon_cart/gen3_bulk.bin` with an empty file, and open Cartridge: `Data missing` shows (`Gen III data missing.` / `Delete apps_assets/` / `pokemon_cart on the` / `SD card, then reopen.`), and OK closes the app. Then delete the folder `apps_assets/pokemon_cart` and open Cartridge again: the instructions show and a Connect works, because the Flipper unpacked the assets again.
 
@@ -106,6 +109,14 @@ Repeat A–E with the FireRed cartridge in place of Ruby. A.4–A.7 may be skipp
 
 LeafGreen, if you have it (optional): the same, with `POKEMON LEAF` and `BPGE`.
 
+## N. Game Boy Color cable
+
+Use a Game Boy Color link cable, either end in the Flipper. The module's SD line may be open (KBEmbedded: SD jumper not bridged); the cable can't carry SD anyway.
+
+1. **Connect.** Connect as in A.3 with the GBC cable. The Flipper shows `Waiting for GBA`, `Sending helper`, `Reading cart`, `Backing up save` and the hub, as with the GBA cable. The log has `wire normal` (or `wire multi` then `wire normal (SI high)`, see Notes) and `mb done`; write down its `final_us`. If it never gets past `Sending helper`, or `Reading cart` never ends, see "If it fails".
+2. **Run the same steps over it.** B.1, C.1, D.1–D.4 and D.6 (the link drop: pull the cable, plug it back, `Retry`).
+3. **Time it.** Time the `Backing up save` step, and write it down below. Over MultiPlay it takes about 70 s; the Normal wire has the same throughput, so expect about the same.
+
 ## R. Regression (Pokemon Trade Tool)
 
 1. **Link Test.** In Pokemon Trade Tool, Gen III → `Link Test` with Ruby still reaches `in Trade Center`: `docs/gen3/hardware-test-1.md` steps 4–8. Cartridge added a second link mode; the trade's own is unchanged.
@@ -117,7 +128,7 @@ LeafGreen, if you have it (optional): the same, with `POKEMON LEAF` and `BPGE`.
 
 1. **Pokemon Trade Tool.** Start a trade and enter the Trade Center with Ruby (Gen III → `Trade`), then open `Edit Pokemon`. In the qFlipper CLI (or `ufbt cli`), run `free` and write down `Free heap size`. It must be at least 12,000, as in `docs/gen3/hardware-test-2.md` K.
 2. **Pokemon Cartridge.** During a Connect, while `Backing up save` shows, run `free` again and write down `Free heap size`. If it is under 4,000, report it.
-3. **No crash.** Neither app crashed or froze anywhere in A–H.
+3. **No crash.** Neither app crashed or froze anywhere in A–H and N.
 
 ## Results
 
@@ -127,7 +138,7 @@ LeafGreen, if you have it (optional): the same, with `POKEMON LEAF` and `BPGE`.
 | A.2 `Waiting for GBA`, power-on lines after 3 s | | |
 | A.3 Connect to the hub (`Sending helper` took ___ s, `Backing up save` ___ s; the log's `mb done` line: `palette_busy` ___, `final_us` ___) | | |
 | A.4 Without the keys, then with them | | |
-| A.5 `Cable: plug in/swap ends` | | |
+| A.5 Wrong plug: `Waiting for GBA`, power-on lines, log `wire normal` | | |
 | A.6 Back while sending | | |
 | A.7 Data missing, then unpacked again | | |
 | B.1 Cart info (flash ____, save ____, trainer ____) | | |
@@ -165,13 +176,16 @@ LeafGreen, if you have it (optional): the same, with `POKEMON LEAF` and `BPGE`.
 | H.3 FireRed: browse, edit, write; the game loads it (D.6 too) | | |
 | H.4 FireRed: put and write; trainer memo: ____ | | |
 | H LeafGreen (optional) | | |
+| N.1 GBC cable: Connect to the hub (log: `wire` line ____, `mb done` `final_us` ___) | | |
+| N.2 GBC cable: B.1, C.1, D.1–D.4, D.6 | | |
+| N.3 GBC cable: `Backing up save` took ___ s | | |
 | R.1 Link Test reaches `in Trade Center` | | |
 | R.2 `Cartridge` hidden during a trade, back after it | | |
 | R.3 Gen I and Gen II editors | | |
 | R.4 Pokemon Trade Tool's `Data missing` | | |
 | M.1 Pokemon Trade Tool, free heap in a trade: ______ bytes | | |
 | M.2 Pokemon Cartridge, free heap while backing up: ______ bytes | | |
-| M.3 No crash in A–H | | |
+| M.3 No crash in A–H and N | | |
 
 ## On failure
 
@@ -185,7 +199,11 @@ The log's `cart` line is the cart as the helper found it; its `why` is the reaso
 
 | Symptom | Likely cause | Try |
 |---|---|---|
-| Never leaves `Waiting for GBA` | the plugs (the small one goes in the Flipper), or START+SELECT not held while the GBA powered on | swap the plugs; switch the GBA off, then on holding START+SELECT until the logo is gone |
+| Never leaves `Waiting for GBA` | START+SELECT not held while the GBA powered on, or (GBA cable) the plugs: the small one goes in the Flipper | switch the GBA off, then on holding START+SELECT until the logo is gone; check the cable |
+| `Waiting for GBA` and `wire multi` in the log with a GBA cable, then `T:B9A0 R:FFFF` | the module's SD line is open (MultiPlay never gets a reply) | bridge the SD jumper, or use a Game Boy Color cable |
+| (GBC cable) the GBA's screen shows the helper's colour, but Connect never gets past `Reading cart` / HELLO; every slot stays not ready | M24: the GBA may show the shift register's MSB on SO while a transfer is armed, instead of the low level (the helper arms with `0x5080`) | report the log |
+| (GBC cable) `mb failed … want … got …` | M23 (the data reply's offsets) or the Normal constants (multiboot-and-save.md §7.2) | report the log's `want`/`got` and the step before it |
+| A reversed GBA cable, or a GBA running a game in the Cable Club, upsets the link | the Normal wire drives SC from the Flipper; a GBA acting as MultiPlay parent would fight it | use Cartridge only with the GBA held at START+SELECT at power-on, as the instructions say |
 | The log shows `mb restart` lines with `last_fail 2` (header) or `8` (CRC) | the GBA's boot ROM and the Flipper's timing, or its state after a bad header (multiboot-and-save.md M3, M4) | report the log |
 | `Connect failed`: `Power the GBA off,` / `hold START+SELECT,` / `power on, then Retry.` | the upload failed 4 times, or ran out of its 20 s (multiboot-and-save.md M4) | do as it says |
 | `Link lost` often during long jobs (backup, ROM copy) | stream mode's load on the Flipper (multiboot-and-save.md M18) | raise `GEN3_CART_GAP_TICKS` in `src/gen3/gen3_cart_furi.c` (1, then 2), and rebuild |

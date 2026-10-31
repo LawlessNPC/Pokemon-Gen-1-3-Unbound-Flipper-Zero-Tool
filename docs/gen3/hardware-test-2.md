@@ -4,6 +4,8 @@ Goal: the Flipper trades Pokemon with a genuine Pokemon Ruby in the Cable Club T
 
 You need: Flipper with the KBEmbedded Game Link GPIO module, GBA, GBA link cable, genuine Ruby.
 
+The Game Link module's SD line must be connected (KBEmbedded module: the two SD jumper pads bridged). Without it Ruby never answers, and the log shows `R:FFFF` with a timeout on every frame.
+
 **Build and install.** Run `ufbt` (release build). Copy `dist/pokemon.fap` to `apps/GPIO/` on the SD card with qFlipper, or run `ufbt launch`.
 
 ## Notes

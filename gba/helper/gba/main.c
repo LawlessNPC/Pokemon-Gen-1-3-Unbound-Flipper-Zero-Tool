@@ -2,9 +2,10 @@
 #include "hp_hal.h"
 #include "hp_link.h"
 
-/* The helper's main loop: the multiplayer child side of the link (multiboot-and-save.md §4.8),
- * one hp_step per transfer, with interrupts off and everything polled (multiboot-and-save.md
- * §4.7). */
+/* The helper's main loop: the slave side of the link, one hp_step per transfer, with interrupts
+ * off and everything polled (multiboot-and-save.md §4.7). The BIOS's boot mode (header 0xC4)
+ * picks the transport: MultiPlay child (§4.8), or the Normal-mode slave over a Game Boy Color
+ * cable (§7.4). */
 
 /* WAITCNT: SRAM 8 cycles (field 3), ROM wait state 0 at 3/1 cycles, wait state 2 at 8, prefetch
  * on. 0x0003 (SRAM 8 cycles only) is the fallback if a cart misbehaves with it. */
