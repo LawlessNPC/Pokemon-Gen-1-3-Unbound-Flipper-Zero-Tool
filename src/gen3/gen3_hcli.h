@@ -42,6 +42,8 @@
 /* CART_INFO: its whole-ROM scan, about 6.7 s for 16 MiB and 14.5 s for 32 MiB, so that a 32 MiB
  * cart that isn't a Pokemon game still gets its answer */
 #define GEN3_HCLI_BUSY_SCAN_US 20000000u
+/* OMEGA_SHA256: one step of at most 1 MiB, read from the Omega's card and hashed on the GBA */
+#define GEN3_HCLI_BUSY_HASH_US 30000000u
 
 /* Commands (multiboot-and-save.md §6.3) */
 #define GEN3_HCMD_HELLO 0x01u
@@ -58,6 +60,16 @@
 #define GEN3_HCMD_COMMIT_SECTOR 0x1Bu
 #define GEN3_HCMD_ROM_READ 0x20u
 #define GEN3_HCMD_ROM_CRC32 0x22u
+/* The EZ-Flash Omega's microSD, read-only (multiboot-and-save.md §8) */
+#define GEN3_HCMD_OMEGA_MOUNT 0x30u
+#define GEN3_HCMD_OMEGA_OPEN 0x31u
+#define GEN3_HCMD_OMEGA_READ 0x32u
+#define GEN3_HCMD_OMEGA_CRC32 0x33u
+#define GEN3_HCMD_OMEGA_SHA256 0x34u
+#define GEN3_HCLI_OMEGA_PATH_MAX 96u /* a path's bytes, with its terminator */
+#define GEN3_HCLI_OMEGA_SLOTS 3u
+#define GEN3_HSHA_INIT 1u
+#define GEN3_HSHA_FINAL 2u
 
 /* Status codes (multiboot-and-save.md §6.4). Any but OK comes with a fail code and offset. */
 #define GEN3_HST_OK 0x00u
@@ -202,5 +214,41 @@ Gen3HcliResult gen3_hcli_copy_sector(
 Gen3HcliResult gen3_hcli_commit_sector(Gen3Hcli* c, uint8_t sector);
 /* words (1..2048) halfwords from addr into out, 2 * words bytes */
 Gen3HcliResult gen3_hcli_rom_read(Gen3Hcli* c, uint32_t addr, uint16_t words, uint8_t* out);
+
+/* OMEGA_MOUNT's answer: the card's FAT32 layout */
+typedef struct {
+    uint32_t part; /* the partition's first block */
+    uint8_t spc; /* sectors a cluster */
+    uint16_t reserved;
+    uint8_t fats;
+    uint32_t fatsz; /* sectors a FAT */
+    uint32_t root; /* the root directory's cluster */
+} Gen3HOmegaInfo;
+/* OMEGA_OPEN's answer */
+typedef struct {
+    uint32_t size, first_cluster;
+    uint16_t date, time; /* the directory entry's write date and time */
+} Gen3HOmegaFile;
+Gen3HcliResult gen3_hcli_omega_mount(Gen3Hcli* c, Gen3HOmegaInfo* out);
+/* path: "/...", 1..95 characters; otherwise BadResponse with no link traffic */
+Gen3HcliResult
+    gen3_hcli_omega_open(Gen3Hcli* c, uint8_t slot, const char* path, Gen3HOmegaFile* out);
+/* blocks (1..8) 512-byte blocks from off into out */
+Gen3HcliResult
+    gen3_hcli_omega_read(Gen3Hcli* c, uint8_t slot, uint32_t off, uint8_t blocks, uint8_t* out);
+Gen3HcliResult gen3_hcli_omega_crc32(
+    Gen3Hcli* c,
+    uint8_t slot,
+    uint32_t off,
+    uint32_t len,
+    uint32_t* crc);
+/* One step of the file's SHA-256 (multiboot-and-save.md §8.3): digest is filled with FINAL only */
+Gen3HcliResult gen3_hcli_omega_sha256(
+    Gen3Hcli* c,
+    uint8_t slot,
+    uint8_t flags,
+    uint32_t off,
+    uint32_t len,
+    uint8_t digest[32]);
 /* len: 2..0x40000 bytes, even */
 Gen3HcliResult gen3_hcli_rom_crc32(Gen3Hcli* c, uint32_t addr, uint32_t len, uint32_t* crc);

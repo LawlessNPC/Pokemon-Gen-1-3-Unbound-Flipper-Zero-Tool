@@ -1,4 +1,5 @@
 #include "test.h"
+#include "fake_fat.h"
 #include "fake_gba.h"
 #include "fake_helper.h"
 #include "fake_save.h"
@@ -8,6 +9,8 @@
 #include <hp_core.h>
 #include <hp_flash.h>
 #include <hp_link.h>
+#include <hp_omega.h>
+#include <hp_sha256.h>
 #include <hp_save.h>
 #include <hp_version.h>
 #include <src/gen3/gen3_hcli.h>
@@ -407,6 +410,13 @@ TEST(test_hcli_codes_match_helper) {
     _Static_assert(GEN3_HCMD_COMMIT_SECTOR == HP_CMD_COMMIT_SECTOR, "COMMIT_SECTOR");
     _Static_assert(GEN3_HCMD_ROM_READ == HP_CMD_ROM_READ, "ROM_READ");
     _Static_assert(GEN3_HCMD_ROM_CRC32 == HP_CMD_ROM_CRC32, "ROM_CRC32");
+    _Static_assert(GEN3_HCMD_OMEGA_MOUNT == HP_CMD_OMEGA_MOUNT, "OMEGA_MOUNT");
+    _Static_assert(GEN3_HCMD_OMEGA_OPEN == HP_CMD_OMEGA_OPEN, "OMEGA_OPEN");
+    _Static_assert(GEN3_HCMD_OMEGA_READ == HP_CMD_OMEGA_READ, "OMEGA_READ");
+    _Static_assert(GEN3_HCMD_OMEGA_CRC32 == HP_CMD_OMEGA_CRC32, "OMEGA_CRC32");
+    _Static_assert(GEN3_HCMD_OMEGA_SHA256 == HP_CMD_OMEGA_SHA256, "OMEGA_SHA256");
+    _Static_assert(GEN3_HSHA_INIT == HP_SHA_INIT && GEN3_HSHA_FINAL == HP_SHA_FINAL, "SHA flags");
+    _Static_assert(GEN3_HCLI_OMEGA_PATH_MAX == HP_OMEGA_PATH_MAX, "path max");
     _Static_assert(GEN3_HST_OK == HP_ST_OK, "OK");
     _Static_assert(GEN3_HST_BAD_PACKET == HP_ST_BAD_PACKET, "BAD_PACKET");
     _Static_assert(GEN3_HST_BAD_ARG == HP_ST_BAD_ARG, "BAD_ARG");
@@ -1522,7 +1532,121 @@ TEST(test_hcli_requests) {
     ASSERT_EQ(script.syncs, 1);
 }
 
+/* ---- The Omega commands ---- */
+
+#define OMEGA_SAV_LEN 131072u
+#define OMEGA_ROM_LEN 70000u
+
+static FakeFat card;
+static uint8_t omega_data[OMEGA_SAV_LEN];
+
+/* An Omega at power-on (its kernel's header: title and code empty) with a card holding
+ * /SAVER/Pokemon - Unbound.sav and /ROMS/game.gba; connected, CART_INFO done */
+static bool omega_setup(void) {
+    static const char zero4[4] = {0};
+    uint32_t x = 12345u;
+    for(uint32_t i = 0; i < OMEGA_SAV_LEN; i++) omega_data[i] = (uint8_t)((x = x * 1103515245u + 12345u) >> 16);
+    fake_gba_init(&gba);
+    helper_cmd_header(hdr, gba.own, "", zero4, 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    fake_fat_init(&card, 2048, 8, 65536u);
+    const uint32_t saver = fake_fat_mkdir(&card, fake_fat_root(&card), "SAVER");
+    fake_fat_add_file(&card, saver, "Pokemon - Unbound.sav", omega_data, OMEGA_SAV_LEN, 0);
+    const uint32_t roms = fake_fat_mkdir(&card, fake_fat_root(&card), "ROMS");
+    fake_fat_add_file(&card, roms, "game.gba", omega_data, OMEGA_ROM_LEN, 3);
+    fake_gba_omega(&gba, &card);
+    fake_helper_init(&fh, &gba);
+    memset(&hook, 0, sizeof(hook));
+    fake_helper_on_command(&fh, hook_cb, &hook);
+    memset(&tap, 0, sizeof(tap));
+    tap.inner = fake_helper_transport(&fh, &pump);
+    const Gen3HTransport t = {
+        .ctx = &tap,
+        .exchange = tap_exchange,
+        .sync = tap_sync,
+    };
+    gen3_hcli_init(&cli, &t);
+    return gen3_hcli_connect(&cli, NULL) == Gen3HcliOk &&
+           gen3_hcli_cart_info(&cli, &info) == Gen3HcliOk;
+}
+
+TEST(test_hcli_omega_round_trip) {
+    ASSERT_TRUE(omega_setup());
+    Gen3HOmegaInfo oi;
+    ASSERT_EQ(gen3_hcli_omega_mount(&cli, &oi), Gen3HcliOk);
+    ASSERT_EQ(oi.part, 2048);
+    ASSERT_EQ(oi.spc, 8);
+    ASSERT_EQ(oi.root, fake_fat_root(&card));
+    Gen3HOmegaFile f;
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 0, "/SAVER/Pokemon - Unbound.sav", &f), Gen3HcliOk);
+    ASSERT_EQ(f.size, OMEGA_SAV_LEN);
+    ASSERT_TRUE(f.first_cluster >= 2u);
+    ASSERT_EQ(gen3_hcli_omega_read(&cli, 0, 8192, 8, buf), Gen3HcliOk);
+    ASSERT_MEM_EQ(buf, omega_data + 8192, SECTOR_LEN);
+    uint32_t crc = 0;
+    ASSERT_EQ(gen3_hcli_omega_crc32(&cli, 0, 8192, SECTOR_LEN, &crc), Gen3HcliOk);
+    ASSERT_EQ(crc, gen3_crc32(omega_data + 8192, SECTOR_LEN));
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 2, "/ROMS/game.gba", &f), Gen3HcliOk);
+    ASSERT_EQ(f.size, OMEGA_ROM_LEN);
+    HpSha256 s;
+    uint8_t want[32], got[32];
+    hp_sha256_init(&s);
+    hp_sha256_update(&s, omega_data, OMEGA_ROM_LEN);
+    hp_sha256_final(&s, want);
+    ASSERT_EQ(gen3_hcli_omega_sha256(&cli, 2, GEN3_HSHA_INIT, 0, 65536u, got), Gen3HcliOk);
+    ASSERT_EQ(
+        gen3_hcli_omega_sha256(&cli, 2, GEN3_HSHA_FINAL, 65536u, OMEGA_ROM_LEN - 65536u, got),
+        Gen3HcliOk);
+    ASSERT_MEM_EQ(got, want, 32);
+    ASSERT_EQ(tap.busy_us[GEN3_HCMD_OMEGA_SHA256], GEN3_HCLI_BUSY_HASH_US);
+    ASSERT_EQ(tap.busy_us[GEN3_HCMD_OMEGA_CRC32], GEN3_HCLI_BUSY_SCAN_US);
+    fake_fat_free(&card);
+}
+
+TEST(test_hcli_omega_status) {
+    ASSERT_TRUE(omega_setup());
+    Gen3HOmegaInfo oi;
+    ASSERT_EQ(gen3_hcli_omega_mount(&cli, &oi), Gen3HcliOk);
+    Gen3HOmegaFile f;
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 0, "/SAVER/Pokemon - Ruby.sav", &f), Gen3HcliStatusError);
+    ASSERT_EQ(cli.last_status, GEN3_HST_UNSUPPORTED);
+    ASSERT_EQ(cli.last_fail_code, HpOmegaNotFound);
+    fake_fat_free(&card);
+}
+
+TEST(test_hcli_omega_path_len) {
+    ASSERT_TRUE(omega_setup());
+    char path[GEN3_HCLI_OMEGA_PATH_MAX + 1];
+    memset(path, 'a', sizeof(path));
+    path[0] = '/';
+    path[GEN3_HCLI_OMEGA_PATH_MAX] = 0; /* 96 characters */
+    Gen3HOmegaFile f;
+    const uint32_t ex = tap.exchanges;
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 0, path, &f), Gen3HcliBadResponse);
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 0, "", &f), Gen3HcliBadResponse);
+    ASSERT_EQ(tap.exchanges, ex);
+    fake_fat_free(&card);
+}
+
+TEST(test_hcli_omega_hash_busy) {
+    /* A SHA256 step the helper is busy with for 25 s still answers */
+    ASSERT_TRUE(omega_setup());
+    Gen3HOmegaInfo oi;
+    Gen3HOmegaFile f;
+    ASSERT_EQ(gen3_hcli_omega_mount(&cli, &oi), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 2, "/ROMS/game.gba", &f), Gen3HcliOk);
+    hook_arm(GEN3_HCMD_OMEGA_SHA256, 0, 0);
+    hook.busy_us = 25000000u;
+    uint8_t got[32];
+    ASSERT_EQ(gen3_hcli_omega_sha256(&cli, 2, GEN3_HSHA_INIT | GEN3_HSHA_FINAL, 0, OMEGA_ROM_LEN, got), Gen3HcliOk);
+    fake_fat_free(&card);
+}
+
 int main(void) {
+    RUN(test_hcli_omega_round_trip);
+    RUN(test_hcli_omega_status);
+    RUN(test_hcli_omega_path_len);
+    RUN(test_hcli_omega_hash_busy);
     RUN(test_hcli_codes_match_helper);
     RUN(test_fake_helper_words);
     RUN(test_fake_helper_busy_by_time);

@@ -277,6 +277,101 @@ Gen3HcliResult gen3_hcli_rom_read(Gen3Hcli* c, uint32_t addr, uint16_t words, ui
     return r;
 }
 
+/* ---- The Omega's microSD ---- */
+
+#define HCLI_OMEGA_MOUNT_WORDS 9u
+#define HCLI_OMEGA_OPEN_WORDS 6u
+#define HCLI_OMEGA_DIGEST_WORDS 16u
+
+Gen3HcliResult gen3_hcli_omega_mount(Gen3Hcli* c, Gen3HOmegaInfo* out) {
+    Gen3HlinkReq req = {.code = GEN3_HCMD_OMEGA_MOUNT};
+    const Gen3HcliResult r = hcli_small(c, &req, HCLI_OMEGA_MOUNT_WORDS);
+    if(r != Gen3HcliOk) return r;
+    const uint8_t* p = c->resp;
+    out->part = hcli_le32(p);
+    out->spc = (uint8_t)hcli_le16(p + 4);
+    out->reserved = hcli_le16(p + 6);
+    out->fats = (uint8_t)hcli_le16(p + 8);
+    out->fatsz = hcli_le32(p + 10);
+    out->root = hcli_le32(p + 14);
+    return Gen3HcliOk;
+}
+
+Gen3HcliResult
+    gen3_hcli_omega_open(Gen3Hcli* c, uint8_t slot, const char* path, Gen3HOmegaFile* out) {
+    hcli_begin(c);
+    const size_t len = strlen(path);
+    if(len < 1u || len >= GEN3_HCLI_OMEGA_PATH_MAX || slot >= GEN3_HCLI_OMEGA_SLOTS) {
+        return Gen3HcliBadResponse;
+    }
+    uint8_t bytes[GEN3_HCLI_OMEGA_PATH_MAX];
+    memset(bytes, 0, sizeof(bytes));
+    memcpy(bytes, path, len);
+    Gen3HlinkReq req = {
+        .code = GEN3_HCMD_OMEGA_OPEN,
+        .args = {slot, (uint16_t)len},
+        .nargs = 2,
+        .data = bytes,
+        .data_words = GEN3_HCLI_OMEGA_PATH_MAX / 2u,
+    };
+    const Gen3HcliResult r = hcli_small(c, &req, HCLI_OMEGA_OPEN_WORDS);
+    if(r != Gen3HcliOk) return r;
+    const uint8_t* p = c->resp;
+    out->size = hcli_le32(p);
+    out->first_cluster = hcli_le32(p + 4);
+    out->date = hcli_le16(p + 8);
+    out->time = hcli_le16(p + 10);
+    return Gen3HcliOk;
+}
+
+Gen3HcliResult
+    gen3_hcli_omega_read(Gen3Hcli* c, uint8_t slot, uint32_t off, uint8_t blocks, uint8_t* out) {
+    Gen3HlinkReq req = {
+        .code = GEN3_HCMD_OMEGA_READ,
+        .args = {slot, (uint16_t)off, (uint16_t)(off >> 16), blocks},
+        .nargs = 4,
+        .resp = out,
+    };
+    return hcli_run(c, &req, (uint16_t)(blocks * 256u));
+}
+
+Gen3HcliResult gen3_hcli_omega_crc32(
+    Gen3Hcli* c,
+    uint8_t slot,
+    uint32_t off,
+    uint32_t len,
+    uint32_t* crc) {
+    Gen3HlinkReq req = {
+        .code = GEN3_HCMD_OMEGA_CRC32,
+        .args = {slot, (uint16_t)off, (uint16_t)(off >> 16), (uint16_t)len, (uint16_t)(len >> 16)},
+        .nargs = 5,
+        .busy_us = GEN3_HCLI_BUSY_SCAN_US,
+    };
+    const Gen3HcliResult r = hcli_small(c, &req, HCLI_CRC_WORDS);
+    if(r == Gen3HcliOk) *crc = hcli_le32(c->resp);
+    return r;
+}
+
+Gen3HcliResult gen3_hcli_omega_sha256(
+    Gen3Hcli* c,
+    uint8_t slot,
+    uint8_t flags,
+    uint32_t off,
+    uint32_t len,
+    uint8_t digest[32]) {
+    Gen3HlinkReq req = {
+        .code = GEN3_HCMD_OMEGA_SHA256,
+        .args =
+            {slot, flags, (uint16_t)off, (uint16_t)(off >> 16), (uint16_t)len, (uint16_t)(len >> 16)},
+        .nargs = 6,
+        .busy_us = GEN3_HCLI_BUSY_HASH_US,
+    };
+    const bool final = (flags & GEN3_HSHA_FINAL) != 0;
+    const Gen3HcliResult r = hcli_small(c, &req, final ? HCLI_OMEGA_DIGEST_WORDS : 0u);
+    if(r == Gen3HcliOk && final) memcpy(digest, c->resp, 32);
+    return r;
+}
+
 Gen3HcliResult gen3_hcli_rom_crc32(Gen3Hcli* c, uint32_t addr, uint32_t len, uint32_t* crc) {
     Gen3HlinkReq req = {
         .code = GEN3_HCMD_ROM_CRC32,
