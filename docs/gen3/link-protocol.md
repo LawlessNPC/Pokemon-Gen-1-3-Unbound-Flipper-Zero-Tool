@@ -6,8 +6,6 @@ Ruby is the **child** (slot 1, "slave"). Part A (cable plugged in → both
 players idling in the Trade Center) is specified in full; Part B (trade) is an
 outline; Part C lists FireRed differences.
 
-Companion to `docs/superpowers/specs/2026-10-25-gen3-gba-design.md`.
-
 ## Sources and conventions
 
 | Repo (read-only clone) | Commit |

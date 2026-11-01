@@ -206,7 +206,7 @@ crc32step(c, d):            ; 32 rounds
 GBATEK writes the CRC as `c = c xor data; 32× (c = c shr 1; if carry: c ^= x)`.
 afska keeps `c` and `d` separate (`calculateCRCData`). The two forms are
 algebraically identical. I checked that both give the same encrypted stream and
-CRC on 200 random images (`/tmp/claude-mb-scripts/mbcheck.py`, not committed).
+CRC on 200 random images (a one-off script, not committed).
 
 **Test vector** (for a Flipper unit test; computed with both formulations):
 header = 0xC0 zero bytes; payload = bytes `00 01 02 … FF` (L = 0x100, file
@@ -614,7 +614,7 @@ The ufbt toolchain ships a usable compiler:
 
 | Item | Value |
 |---|---|
-| Path | `/Users/kyvo/.ufbt/toolchain/arm64-darwin/bin/arm-none-eabi-gcc` (`~/.ufbt/toolchain/current` → `arm64-darwin`) |
+| Path | `~/.ufbt/toolchain/arm64-darwin/bin/arm-none-eabi-gcc` (`~/.ufbt/toolchain/current` → `arm64-darwin`) |
 | Version | `arm-none-eabi-gcc (GCC) 12.3.1 20230626`; toolchain `VERSION` file: `39` |
 | Defaults | `-mcpu=arm7tdmi -march=armv4t -mfloat-abi=soft` (`-Q --help=target`) |
 | Multilib for `-mcpu=arm7tdmi -mthumb` | `thumb/nofp`; its `libgcc.a` is `Tag_CPU_arch: v4T`, Thumb-1, so it is safe on the GBA |
@@ -622,7 +622,7 @@ The ufbt toolchain ships a usable compiler:
 | Missing | `gbafix`; do the header fix in a script (§4.5) |
 
 Verified: the crt0 and linker script below build with this toolchain into a
-480-byte image (`/tmp/claude-mb-build/`, not committed). Header fields land at
+480-byte image (a scratch build, not committed). Header fields land at
 0xA0–0xBF. `0xC0` and `0xE0` hold `b mb_start` (`ea000007`/`eaffffff`). A
 Thumb→ARM call into IWRAM gets a linker veneer (`__…_from_thumb`).
 
@@ -1399,11 +1399,11 @@ Header, Data, Handshake, Length and Crc.
 true while it runs). The tick stays 1073 µs, so throughput equals MultiPlay's.
 SD is left alone, in analog mode.
 
-- **The word (D2).** The Flipper sends `(uint32_t)tx.hi[t] << 16 | tx.word[t]`
+- **The word.** The Flipper sends `(uint32_t)tx.hi[t] << 16 | tx.word[t]`
   MSB first and reports the reply's **high** half as `rx.word[t]`. The driver
   zeroes `next.hi[]` before every frame callback, so only multiboot's data words
   set a high half. The helper protocol uses the same convention.
-- **Ready, stall, not ready (D3), when gated.** At each tick the driver reads
+- **Ready, stall, not ready, when gated.** At each tick the driver reads
   SI. SI high: the slave isn't ready; the slot waits for the next tick, up to
   `MLINK_NORMAL_STALL_TICKS` (16). After that the slot is *not ready*:
   `notready_mask` and `timeout_mask` bit set, word `MLINK_NO_DATA`, nothing
@@ -1426,7 +1426,7 @@ SD is left alone, in analog mode.
 - `rx.ticks` is the frame's time in ticks; callers multiply by `MLINK_TICK_US`.
   On the MultiPlay wire it is `max(count, 1)`, so the cores' timing there is
   unchanged.
-- **Not ready is BUSY in the pump (D4).** A slave that runs a command can't
+- **Not ready is BUSY in the pump.** A slave that runs a command can't
   answer, so the helper sends no `0xB0B0` over this wire. `gen3_hlink` handles a
   not-ready word like a valid BUSY wherever it waits (Sending before READY,
   Waiting); in Sync it breaks the run of READYs; inside a response it is a wire
