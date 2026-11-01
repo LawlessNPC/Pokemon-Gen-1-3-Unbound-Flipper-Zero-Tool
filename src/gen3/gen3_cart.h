@@ -217,6 +217,16 @@ void gen3_cart_init(
  * or an error midway, no job runs until the next one. Progress Identify; cancel between
  * commands. */
 Gen3CartResult gen3_cart_connect(Gen3Cart* c);
+/* gen3_cart_connect's first half: HELLO and CART_INFO. Not linked after it. Progress Identify
+ * 0..2; cancel between commands. */
+Gen3CartResult gen3_cart_connect_info(Gen3Cart* c);
+/* gen3_cart_connect's second half, after connect_info: SAVE_PROBE, gen3_cart_identify, and the
+ * link. Never for an Omega candidate: SAVE_PROBE writes a byte of save memory to test it. */
+Gen3CartResult gen3_cart_connect_finish(Gen3Cart* c);
+/* After connect_info: the cart shows an EZ-Flash Omega's kernel, as a START+SELECT power-on finds
+ * it: its title and code start with 0 bytes, the logo is good, and it isn't a game the helper
+ * writes (multiboot-and-save.md §8.1) */
+bool gen3_cart_omega_candidate(const Gen3Cart* c);
 /* The helper was just sent: the next gen3_cart_connect keeps trying HELLO for at least
  * GEN3_CART_BOOT_US. After the last multiboot word a GBA takes a few seconds before it starts the
  * helper (3.5 s on the first one measured, 2026-10-31), longer than one sync. */
@@ -510,4 +520,5 @@ typedef struct {
     Gen3CartFinished finished;
     Gen3SaveTrainer restore_trainer; /* RestoreCheck: the backup's trainer */
     bool restore_has_trainer;
+    bool omega; /* the last Connect found an EZ-Flash Omega and went its way (gen3_omega.h) */
 } Gen3CartSessionStatus;

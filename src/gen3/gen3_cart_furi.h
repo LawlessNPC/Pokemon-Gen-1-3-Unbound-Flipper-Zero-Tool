@@ -4,6 +4,7 @@
 #include <stdint.h>
 #include <src/gen3/gen3_cart.h>
 #include <src/gen3/gen3_mb.h>
+#include <src/gen3/gen3_omega.h>
 #include <src/gen3/gen3_save.h>
 
 /* The Cartridge session: the link driver in stream mode, running first the BIOS multiboot sender
@@ -38,3 +39,6 @@ void gen3_cart_session_status(Gen3CartSession* s, Gen3CartSessionStatus* out);
  * ids. All zero, with no cart, no backup and no change, until the first Connect loads the helper
  * file. */
 Gen3Cart* gen3_cart_session_cart(Gen3CartSession* s);
+/* An EZ-Flash Omega's state (status.omega), under the same rules as gen3_cart_session_cart: all
+ * zero, not connected and with no backup, until a Connect finds one */
+Gen3Omega* gen3_cart_session_omega(Gen3CartSession* s);

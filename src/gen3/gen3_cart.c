@@ -198,7 +198,7 @@ void gen3_cart_expect_boot(Gen3Cart* c) {
     if(c->relink_us < GEN3_CART_BOOT_US) c->relink_us = GEN3_CART_BOOT_US;
 }
 
-Gen3CartResult gen3_cart_connect(Gen3Cart* c) {
+Gen3CartResult gen3_cart_connect_info(Gen3Cart* c) {
     cart_step(c, Gen3CartStepIdentify, 0, 3);
     /* Unlinked until the end: after a cancel or an error midway, info and id may describe
      * different carts, and no job may run on them */
@@ -211,9 +211,23 @@ Gen3CartResult gen3_cart_connect(Gen3Cart* c) {
     if(r != Gen3CartOk) return r;
     if(memcmp(c->info.header, c->header, CART_HEADER_LEN) != 0) cart_drop_backup(c);
     cart_step(c, Gen3CartStepIdentify, 2, 3);
+    return Gen3CartOk;
+}
+
+bool gen3_cart_omega_candidate(const Gen3Cart* c) {
+    return c->info.header[0xA0] == 0 && c->info.header[0xAC] == 0 && c->info.logo_ok &&
+           !c->info.write_game;
+}
+
+Gen3CartResult gen3_cart_connect(Gen3Cart* c) {
+    const Gen3CartResult r = gen3_cart_connect_info(c);
+    return r == Gen3CartOk ? gen3_cart_connect_finish(c) : r;
+}
+
+Gen3CartResult gen3_cart_connect_finish(Gen3Cart* c) {
     if(cart_cancelled(c)) return Gen3CartCancelled;
     Gen3HProbe probe;
-    r = cart_read(c, gen3_hcli_save_probe(c->cli, &probe));
+    Gen3CartResult r = cart_read(c, gen3_hcli_save_probe(c->cli, &probe));
     if(r != Gen3CartOk) return r;
     gen3_cart_identify(&c->info, &probe, &c->id);
     c->cart_why = c->id.why;

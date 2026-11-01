@@ -361,6 +361,49 @@ TEST(test_job_connect) {
     ASSERT_FALSE(gen3_cart_trainer(&cart, &t));
 }
 
+/* gen3_cart_connect is connect_info then connect_finish: the same commands, id and link */
+TEST(test_job_connect_split) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(gen3_cart_connect_info(&cart), Gen3CartOk);
+    ASSERT_EQ(calls(GEN3_HCMD_HELLO), 1);
+    ASSERT_EQ(calls(GEN3_HCMD_CART_INFO), 1);
+    ASSERT_EQ(calls(GEN3_HCMD_SAVE_PROBE), 0);
+    ASSERT_FALSE(gen3_cart_linked(&cart));
+    ASSERT_FALSE(gen3_cart_omega_candidate(&cart));
+    ASSERT_EQ(gen3_cart_connect_finish(&cart), Gen3CartOk);
+    ASSERT_EQ(calls(GEN3_HCMD_SAVE_PROBE), 1);
+    ASSERT_TRUE(gen3_cart_linked(&cart));
+    const Gen3CartId* id = gen3_cart_id(&cart);
+    ASSERT_TRUE(id->can_write);
+    ASSERT_STR_EQ(id->code, "AXVE");
+    ASSERT_EQ(id->flash_id, MX);
+}
+
+/* An EZ-Flash Omega at power-on shows its kernel: title and code empty, a good logo */
+TEST(test_omega_candidate) {
+    static const char zero4[4] = {0};
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(gen3_cart_connect_info(&cart), Gen3CartOk);
+    ASSERT_FALSE(gen3_cart_omega_candidate(&cart));
+    fake_gba_init(&gba);
+    helper_cmd_header(hdr, gba.own, "", zero4, 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    fake_helper_init(&fh, &gba);
+    tap.inner = fake_helper_transport(&fh, &pump);
+    ASSERT_EQ(gen3_cart_connect_info(&cart), Gen3CartOk);
+    ASSERT_TRUE(gen3_cart_omega_candidate(&cart));
+    /* a bad logo: not one */
+    hdr[0x10] ^= 0x01;
+    fake_gba_rom(&gba, hdr, MIB);
+    ASSERT_EQ(gen3_cart_connect_info(&cart), Gen3CartOk);
+    ASSERT_FALSE(gen3_cart_omega_candidate(&cart));
+    /* a title: not one */
+    helper_cmd_header(hdr, gba.own, "HOMEBREW", zero4, 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    ASSERT_EQ(gen3_cart_connect_info(&cart), Gen3CartOk);
+    ASSERT_FALSE(gen3_cart_omega_candidate(&cart));
+}
+
 /* A lost command can keep the helper busy past one connect's sync: the next connect keeps trying
  * for that command's BUSY budget. A 16 MiB ROM: CART_INFO's scan takes about 7 s. */
 TEST(test_job_connect_waits_out_busy) {
@@ -2018,6 +2061,8 @@ TEST(test_result_texts) {
 int main(void) {
     if(!bulk_file_open()) return 1;
     RUN(test_job_connect);
+    RUN(test_job_connect_split);
+    RUN(test_omega_candidate);
     RUN(test_job_connect_waits_out_busy);
     RUN(test_job_connect_late_helper);
     RUN(test_job_connect_after_boot);

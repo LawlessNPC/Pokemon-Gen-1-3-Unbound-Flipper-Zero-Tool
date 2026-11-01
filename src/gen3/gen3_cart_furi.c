@@ -12,6 +12,7 @@
 
 #include <src/gen3/gen3_hcli.h>
 #include <src/gen3/gen3_hlink.h>
+#include <src/gen3/gen3_omega.h>
 #include <src/gen3/gen3_store_furi.h>
 #include <src/gen3/mlink_hw_furi.h>
 
@@ -88,7 +89,8 @@ struct Gen3CartSession {
     char stamp[16]; /* YYYYMMDD-HHMMSS */
     Gen3Hcli cli;
     Gen3Cart cart;
-    bool cart_ready; /* buf, cli and cart are set up */
+    Gen3Omega omega; /* an EZ-Flash Omega's jobs, on the same buf and cli */
+    bool cart_ready; /* buf, cli, cart and omega are set up */
     File* log;
     bool log_open;
     char line[GEN3_CART_LOG_LINE];
@@ -405,6 +407,7 @@ static void cart_setup(Gen3CartSession* s, uint64_t image_len) {
     };
     gen3_hcli_init(&s->cli, &t);
     gen3_cart_init(&s->cart, &s->cli, gen3_store_furi_api(s->store), s->buf, &p);
+    gen3_omega_init(&s->omega, &s->cli, gen3_store_furi_api(s->store), s->buf, &p);
     s->cart_ready = true;
 }
 
@@ -573,6 +576,72 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
 }
 
 /* Sends the helper (again), then connects to it and attaches the cart */
+/* ---- An EZ-Flash Omega (gen3_omega.h) ---- */
+
+static void cart_hex(const uint8_t* p, uint32_t n, char* out) {
+    static const char hex[] = "0123456789abcdef";
+    for(uint32_t i = 0; i < n; i++) {
+        out[2u * i] = hex[p[i] >> 4];
+        out[2u * i + 1u] = hex[p[i] & 15u];
+    }
+    out[2u * n] = 0;
+}
+
+/* After a Connect's or a Backup's backup of the Omega's save */
+static void cart_log_omega_backup(Gen3CartSession* s) {
+    const Gen3Omega* o = &s->omega;
+    if(!o->backup_current) {
+        CART_LOG(s, "backup %s", "none");
+        return;
+    }
+    CART_LOG(s, "backup %s", o->backup_name);
+    CART_LOG(
+        s,
+        "ub slots a %u/%lu b %u/%lu loads %d",
+        (unsigned)o->slots.valid[0],
+        (unsigned long)o->slots.counter[0],
+        (unsigned)o->slots.valid[1],
+        (unsigned long)o->slots.counter[1],
+        (int)o->slots.loaded);
+    if(o->has_trainer) {
+        CART_LOG(s, "ub trainer %s %u", o->trainer.name, (unsigned)o->trainer.tid);
+    }
+}
+
+/* The Omega's way after CART_INFO: its game, the game file's check, and a backup */
+static Gen3CartResult cart_omega_connect(Gen3CartSession* s) {
+    Gen3Omega* o = &s->omega;
+    CART_LOG(s, "omega %s", "kernel header");
+    Gen3CartResult r = gen3_omega_connect(o);
+    CART_LOG(
+        s,
+        "omega mount part %lu spc %u root %lu",
+        (unsigned long)o->info.part,
+        (unsigned)o->info.spc,
+        (unsigned long)o->info.root);
+    if(r == Gen3CartOmegaPending) CART_LOG(s, "omega flag %04x", (unsigned)GEN3_OMEGA_FLAG_PENDING);
+    if(o->rom_path[0]) CART_LOG(s, "omega recent '%s'", o->rom_path);
+    if(r != Gen3CartOk) return r;
+    CART_LOG(s, "omega save '%s' size %lu", o->save_path, (unsigned long)o->save.size);
+    CART_LOG(
+        s,
+        "omega rom '%s' size %lu clus %lu",
+        o->rom_path,
+        (unsigned long)o->rom.size,
+        (unsigned long)o->rom.first_cluster);
+    char hex[65];
+    cart_hex(o->sha, 32, hex);
+    CART_LOG(
+        s,
+        "omega sha %s cached %u match %u",
+        o->hashed ? hex : "-",
+        (unsigned)o->from_cache,
+        (unsigned)o->verified);
+    r = gen3_omega_backup(o, s->stamp);
+    cart_log_omega_backup(s);
+    return r;
+}
+
 static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     cart_driver_stop(s);
     uint32_t len = 0;
@@ -597,7 +666,14 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
 
     /* The GBA starts the helper a few seconds after the last multiboot word */
     gen3_cart_expect_boot(&s->cart);
-    r = gen3_cart_connect(&s->cart);
+    r = gen3_cart_connect_info(&s->cart);
+    if(r != Gen3CartOk) return r;
+    const bool omega = gen3_cart_omega_candidate(&s->cart);
+    cart_lock(s);
+    s->status.omega = omega;
+    cart_unlock(s);
+    if(omega) return cart_omega_connect(s);
+    r = gen3_cart_connect_finish(&s->cart);
     if(r != Gen3CartOk) return r;
     cart_log_cart(s);
     bool dropped = false;
@@ -628,6 +704,13 @@ static Gen3CartResult cart_job(Gen3CartSession* s, Gen3CartJob job) {
     const char* arg = s->req_has_arg ? s->req_arg : NULL;
     if(job == Gen3CartJobConnect) return cart_job_connect(s);
     if(!s->cart_ready) return Gen3CartBadArg; /* no Connect has loaded the helper yet */
+    if(s->status.omega) {
+        /* An Omega: back up only (multiboot-and-save.md §8) */
+        if(job != Gen3CartJobBackup) return Gen3CartBadArg;
+        const Gen3CartResult r = gen3_omega_backup(&s->omega, s->stamp);
+        cart_log_omega_backup(s);
+        return r;
+    }
     switch(job) {
     case Gen3CartJobBackup:
         return gen3_cart_backup(c, s->stamp);
@@ -686,8 +769,8 @@ static void cart_run_one(Gen3CartSession* s, Gen3CartJob job) {
         cart_result_name(r),
         (unsigned long)(s->cli.resends - resends),
         (unsigned)s->status.finished);
-    if(s->cart_ready && job != Gen3CartJobDiscard && job != Gen3CartJobRestoreCheck &&
-       job != Gen3CartJobRom) {
+    if(s->cart_ready && !s->status.omega && job != Gen3CartJobDiscard &&
+       job != Gen3CartJobRestoreCheck && job != Gen3CartJobRom) {
         cart_log_slots(s);
     }
 
@@ -813,6 +896,11 @@ void gen3_cart_session_status(Gen3CartSession* s, Gen3CartSessionStatus* out) {
     }
     if(s->driver_on) out->cable_ok = mlink_hw_cable_ok(s->hw);
     cart_unlock(s);
+}
+
+Gen3Omega* gen3_cart_session_omega(Gen3CartSession* s) {
+    furi_check(s);
+    return &s->omega;
 }
 
 Gen3Cart* gen3_cart_session_cart(Gen3CartSession* s) {
