@@ -1,5 +1,11 @@
 # Changelog - Patch Notes
 
+## Version 3.2
+**New Features**
+- Cartridge reads Pokemon Unbound from an EZ-Flash Omega Definitive Edition (read-only for now): it finds the game the Omega started last and its save on the Omega's microSD card, checks the game file is Unbound 2.1.1.1, backs the save up and lists the party and the 24 boxes. The checklist is `docs/gen3/hardware-test-unbound.md`
+- Unbound's save layout and species data come from PUSE (github.com/Zannael/PUSE, MIT License); the Omega's SD interface follows EZ-Flash's Omega Definitive Edition kernel (Apache License 2.0)
+- The helper program is now up to 14 KB
+
 ## Version 3.1
 **New Features**
 - Gen III cartridge save access (experimental): back up, browse and edit the party and boxes, write back with verify, restore, copy ROM
