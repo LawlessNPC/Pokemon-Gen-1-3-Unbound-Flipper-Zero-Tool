@@ -8,6 +8,7 @@
 
 #include <gblink/include/gblink_pinconf.h>
 #include <src/gen3/gen3_bulk_furi.h>
+#include <src/gen3/gen3_ub_data_furi.h>
 #include <src/gen3/gen3_pins_furi.h>
 #include <src/views/gen3_species_select.h>
 
@@ -104,6 +105,10 @@ static PokemonFap* pokemon_cart_alloc(void) {
     gblink_pinconf_load(pokemon_fap->gblink_handle);
     gen3_sd_pin_load(pokemon_fap->gblink_handle);
 
+    // Unbound's names and growth rates, for an EZ-Flash Omega's save; a missing file leaves the
+    // names "#<id>" and the levels unknown
+    gen3_ub_data_furi_open();
+
     // The instructions; on the first entry they check the Gen III data file
     scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3CartConnect, 0);
     scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartConnect);
@@ -135,8 +140,9 @@ static void pokemon_cart_free(PokemonFap* pokemon_fap) {
     view_dispatcher_free(pokemon_fap->view_dispatcher);
     scene_manager_free(pokemon_fap->scene_manager);
 
-    // Gen III bulk data file, opened by gen3_menu_editor_ready
+    // Gen III bulk data file, opened by gen3_menu_editor_ready, and Unbound's
     gen3_bulk_furi_close();
+    gen3_ub_data_furi_close();
 
     furi_record_close(RECORD_GUI);
 

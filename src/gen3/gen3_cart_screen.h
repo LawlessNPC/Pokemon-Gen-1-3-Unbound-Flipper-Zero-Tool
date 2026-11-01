@@ -6,6 +6,7 @@
 #include <src/gen3/gen3_cart.h>
 #include <src/gen3/gen3_cart_id.h>
 #include <src/gen3/gen3_mb.h>
+#include <src/gen3/gen3_omega.h>
 #include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_save.h>
 
@@ -163,6 +164,14 @@ void gen3_cart_screen_info(
     char header[GEN3_CART_SCREEN_HEADER_SIZE],
     char text[GEN3_CART_SCREEN_INFO_SIZE]);
 
+/* An EZ-Flash Omega's Cart info: header "EZ-Flash Omega"; text: whether the game file is Unbound
+ * 2.1.1.1, the save the game loads, the trainer, that this version only reads, and the backup's
+ * stamp (MMDD-HHMMSS) */
+void gen3_cart_screen_omega_info(
+    const Gen3Omega* o,
+    char header[GEN3_CART_SCREEN_HEADER_SIZE],
+    char text[GEN3_CART_SCREEN_INFO_SIZE]);
+
 /* The leave warning: "<n> changes not\nwritten." ("1 change" for one) */
 #define GEN3_CART_SCREEN_LEAVE_SIZE 32u
 void gen3_cart_screen_leave(uint16_t changes, char out[GEN3_CART_SCREEN_LEAVE_SIZE]);
@@ -185,6 +194,16 @@ void gen3_cart_screen_row(
     const Gen3MonSummary* s,
     const char* species,
     bool changed,
+    char out[GEN3_CART_SCREEN_ROW_SIZE]);
+
+/* An Unbound slot's row: "01 BULBASAUR Lv5" (Lv? for an unknown level), "05 EGG",
+ * "07 -- empty --" (r Empty), or "03 ?" (r anything else); k counts from 0 and name is the
+ * species' (gen3_ub_species_name) */
+void gen3_cart_screen_ub_row(
+    uint8_t k,
+    const Gen3UbSummary* m,
+    const char* name,
+    Gen3CartMon r,
     char out[GEN3_CART_SCREEN_ROW_SIZE]);
 
 /* The Put dialog: header "Put <SPECIES> Lv<n>", text "in <box>\nslot <k>?" (slot numbered from

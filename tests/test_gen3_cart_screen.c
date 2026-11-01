@@ -1440,7 +1440,92 @@ TEST(test_leave_text) {
     ASSERT_TRUE(fits(t, 2, GEN3_CART_SCREEN_LINE_LEN));
 }
 
+/* ---- An EZ-Flash Omega (Unbound) ---- */
+
+TEST(test_screen_ub_row) {
+    char out[GEN3_CART_SCREEN_ROW_SIZE];
+    Gen3UbSummary m;
+    memset(&m, 0, sizeof(m));
+    m.species = 1;
+    m.level = 5;
+    gen3_cart_screen_ub_row(0, &m, "BULBASAUR", Gen3CartMonOk, out);
+    ASSERT_STR_EQ(out, "01 BULBASAUR Lv5");
+    m.level = 0;
+    gen3_cart_screen_ub_row(9, &m, "BULBASAUR", Gen3CartMonOk, out);
+    ASSERT_STR_EQ(out, "10 BULBASAUR Lv?");
+    m.egg = true;
+    gen3_cart_screen_ub_row(4, &m, "BULBASAUR", Gen3CartMonOk, out);
+    ASSERT_STR_EQ(out, "05 EGG");
+    gen3_cart_screen_ub_row(6, &m, "", Gen3CartMonEmpty, out);
+    ASSERT_STR_EQ(out, "07 -- empty --");
+    gen3_cart_screen_ub_row(2, &m, "", Gen3CartMonSdError, out);
+    ASSERT_STR_EQ(out, "03 ?");
+    /* the longest: a 10-letter name at level 100 in slot 30 */
+    m.egg = false;
+    m.level = 100;
+    gen3_cart_screen_ub_row(29, &m, "CHARMANDER", Gen3CartMonOk, out);
+    ASSERT_STR_EQ(out, "30 CHARMANDER Lv100");
+}
+
+TEST(test_screen_omega_info) {
+    static Gen3Omega o;
+    char header[GEN3_CART_SCREEN_HEADER_SIZE];
+    char text[GEN3_CART_SCREEN_INFO_SIZE];
+    memset(&o, 0, sizeof(o));
+    o.hashed = true;
+    o.verified = true;
+    o.backup_current = true;
+    snprintf(o.backup_name, sizeof(o.backup_name), "backups/UNBOUND_12345_20261101-120000.sav");
+    o.slots.loaded = 1;
+    o.slots.counter[1] = 21;
+    o.has_trainer = true;
+    snprintf(o.trainer.name, sizeof(o.trainer.name), "RED");
+    o.trainer.tid = 12345;
+    gen3_cart_screen_omega_info(&o, header, text);
+    ASSERT_STR_EQ(header, "EZ-Flash Omega");
+    ASSERT_STR_EQ(
+        text, "Unbound 2.1.1.1: yes\nSave: B #21\nRED 12345\nRead-only for now\nBackup 1101-120000");
+    o.verified = false;
+    o.slots.loaded = -1;
+    o.has_trainer = false;
+    o.backup_current = false;
+    gen3_cart_screen_omega_info(&o, header, text);
+    ASSERT_STR_EQ(text, "Version: not 2.1.1.1\nSave: none\nNo trainer\nRead-only for now\nNo backup");
+    o.hashed = false;
+    gen3_cart_screen_omega_info(&o, header, text);
+    ASSERT_STR_EQ(text, "Version: unknown\nSave: none\nNo trainer\nRead-only for now\nNo backup");
+}
+
+TEST(test_screen_result_omega) {
+    Gen3CartScreenResult res;
+    gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepOmegaFind, Gen3CartOmegaPending, false, false, &res);
+    ASSERT_EQ(res.retry, Gen3CartRetryConnect);
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartOmegaPending));
+    gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepOmegaFind, Gen3CartNoGame, false, false, &res);
+    ASSERT_EQ(res.retry, Gen3CartRetryConnect);
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartNoGame));
+    /* the two new steps have titles */
+    Gen3CartSessionStatus st;
+    memset(&st, 0, sizeof(st));
+    st.busy = true;
+    st.cable_ok = true;
+    st.link_up = true;
+    st.job = Gen3CartJobConnect;
+    st.step = Gen3CartStepRomHash;
+    st.done = 1;
+    st.total = 32;
+    Gen3CartScreenProgress p;
+    gen3_cart_screen_progress(&st, Gen3CartScreenRunning, &p);
+    ASSERT_STR_EQ(p.title, "Checking game file");
+    st.step = Gen3CartStepOmegaFind;
+    gen3_cart_screen_progress(&st, Gen3CartScreenRunning, &p);
+    ASSERT_STR_EQ(p.title, "Finding the game");
+}
+
 int main(void) {
+    RUN(test_screen_ub_row);
+    RUN(test_screen_omega_info);
+    RUN(test_screen_result_omega);
     RUN(test_back);
     RUN(test_new_trainer);
     RUN(test_progress_connect_steps);

@@ -15,6 +15,14 @@ void pokemon_scene_gen3_cart_info_on_enter(void* context) {
     DialogEx* dialog_ex = pokemon_fap->dialog_ex;
 
     gen3_cart_ui_dialog(pokemon_fap);
+    const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    if(o && gen3_cart_ui_status(pokemon_fap)->omega) {
+        gen3_cart_screen_omega_info(o, gen3_cart_info_header, gen3_cart_info_text);
+        dialog_ex_set_header(dialog_ex, gen3_cart_info_header, 64, 0, AlignCenter, AlignTop);
+        dialog_ex_set_text(dialog_ex, gen3_cart_info_text, 64, 12, AlignCenter, AlignTop);
+        view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
+        return;
+    }
     if(!c) {
         dialog_ex_set_header(dialog_ex, "Cartridge", 64, 0, AlignCenter, AlignTop);
         dialog_ex_set_text(dialog_ex, "Busy. Try again.", 64, 12, AlignCenter, AlignTop);

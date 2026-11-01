@@ -89,6 +89,8 @@ const Gen3CartSessionStatus* gen3_cart_ui_status(PokemonFap* pokemon_fap);
  * cart is the job's then). It reads the status, so it refreshes gen3_cart_ui_status's buffer. Only
  * the app starts jobs, so the cart stays the app's until it starts one. */
 Gen3Cart* gen3_cart_ui_cart(PokemonFap* pokemon_fap);
+/* The session's Omega state while no job runs, else NULL (as gen3_cart_ui_cart) */
+Gen3Omega* gen3_cart_ui_omega(PokemonFap* pokemon_fap);
 /* Pokemon slots changed and not written; 0 before the session exists, and while a job runs */
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap);
 /* The editor takes the save's trainer (gen3_cart_trainer), so a new Pokemon for this cart gets it

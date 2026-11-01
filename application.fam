@@ -30,7 +30,7 @@ App(
     entry_point="pokemon_cart_app",
     requires=["gui"],
     stack_size=2 * 1024,
-    fap_version=[3,1],
+    fap_version=[3,2],
     fap_category="GPIO",
     cdefines=["POKEMON_CART_APP"],
     sources=[

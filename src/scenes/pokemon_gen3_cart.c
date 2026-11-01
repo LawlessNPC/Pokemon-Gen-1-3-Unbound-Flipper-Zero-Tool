@@ -22,6 +22,7 @@
 #define GEN3_CART_ITEM_DISCARD 0x47330517u
 #define GEN3_CART_ITEM_RESTORE 0x47330518u
 #define GEN3_CART_ITEM_ROM 0x47330519u
+#define GEN3_CART_ITEM_OMEGA_BROWSE 0x4733051Au
 
 /* gen3_cart_ui_status's buffer */
 static Gen3CartSessionStatus gen3_cart_status;
@@ -100,6 +101,12 @@ Gen3Cart* gen3_cart_ui_cart(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_cart_ui) return NULL;
     if(gen3_cart_ui_status(pokemon_fap)->busy) return NULL;
     return gen3_cart_session_cart(pokemon_fap->gen3_cart_ui->session);
+}
+
+Gen3Omega* gen3_cart_ui_omega(PokemonFap* pokemon_fap) {
+    if(!pokemon_fap->gen3_cart_ui) return NULL;
+    if(gen3_cart_ui_status(pokemon_fap)->busy) return NULL;
+    return gen3_cart_session_omega(pokemon_fap->gen3_cart_ui->session);
 }
 
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap) {
@@ -279,10 +286,33 @@ static void gen3_cart_add(PokemonFap* pokemon_fap, const char* label, uint32_t i
     submenu_add_item(pokemon_fap->submenu, label, item, gen3_cart_item_callback, pokemon_fap);
 }
 
+/* An EZ-Flash Omega's hub: browse and back up, read-only (gen3_omega.h) */
+static void gen3_cart_omega_hub(PokemonFap* pokemon_fap) {
+    Submenu* submenu = pokemon_fap->submenu;
+    /* NULL while a job runs: then only Cart info, which waits for it too */
+    const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+
+    submenu_reset(submenu);
+    submenu_set_header(submenu, o && o->verified ? "POKEMON UNBOUND" : "EZ-FLASH OMEGA");
+    if(o && gen3_omega_browsable(o)) {
+        gen3_cart_add(pokemon_fap, "Party and boxes", GEN3_CART_ITEM_OMEGA_BROWSE);
+    }
+    if(o && o->connected) gen3_cart_add(pokemon_fap, "Back up again", GEN3_CART_ITEM_BACKUP);
+    gen3_cart_add(pokemon_fap, "Cart info", GEN3_CART_ITEM_INFO);
+    submenu_set_selected_item(
+        submenu, scene_manager_get_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3Cart));
+    gen3_menu_show_menu(pokemon_fap);
+}
+
 void pokemon_scene_gen3_cart_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
     Submenu* submenu = pokemon_fap->submenu;
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    if(gen3_cart_ui_status(pokemon_fap)->omega) {
+        ui->edit_mode = Gen3CartEditNone;
+        gen3_cart_omega_hub(pokemon_fap);
+        return;
+    }
     /* NULL while a job runs: then only Cart info, which waits for it too */
     Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     Gen3CartScreenHubIn in;
@@ -341,6 +371,14 @@ bool pokemon_scene_gen3_cart_on_event(void* context, SceneManagerEvent event) {
         case GEN3_CART_ITEM_WRITING_OFF:
             scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, event.event);
             scene_manager_next_scene(scene_manager, PokemonSceneGen3CartInfo);
+            consumed = true;
+            break;
+        case GEN3_CART_ITEM_OMEGA_BROWSE:
+            scene_manager_set_scene_state(scene_manager, PokemonSceneGen3Cart, event.event);
+            if(gen3_cart_ui_omega(pokemon_fap)) {
+                scene_manager_set_scene_state(scene_manager, PokemonSceneGen3CartOmegaBoxes, 0);
+                scene_manager_next_scene(scene_manager, PokemonSceneGen3CartOmegaBoxes);
+            }
             consumed = true;
             break;
         case GEN3_CART_ITEM_BROWSE:

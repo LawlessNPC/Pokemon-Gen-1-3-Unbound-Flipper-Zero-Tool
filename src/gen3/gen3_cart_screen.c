@@ -416,6 +416,68 @@ void gen3_cart_screen_info(
     cart_screen_line(text, pos, line, true);
 }
 
+void gen3_cart_screen_omega_info(
+    const Gen3Omega* o,
+    char header[GEN3_CART_SCREEN_HEADER_SIZE],
+    char text[GEN3_CART_SCREEN_INFO_SIZE]) {
+    char line[24];
+    size_t pos = 0;
+    text[0] = '\0';
+    snprintf(header, GEN3_CART_SCREEN_HEADER_SIZE, "EZ-Flash Omega");
+
+    pos = cart_screen_line(
+        text,
+        pos,
+        !o->hashed  ? "Version: unknown" :
+        o->verified ? "Unbound 2.1.1.1: yes" :
+                      "Version: not 2.1.1.1",
+        false);
+    if(o->backup_current && o->slots.loaded >= 0) {
+        snprintf(
+            line,
+            sizeof(line),
+            "Save: %c #%lu",
+            o->slots.loaded ? 'B' : 'A',
+            (unsigned long)o->slots.counter[o->slots.loaded]);
+    } else {
+        snprintf(line, sizeof(line), "Save: none");
+    }
+    pos = cart_screen_line(text, pos, line, false);
+    if(o->backup_current && o->has_trainer) {
+        snprintf(line, sizeof(line), "%.7s %05u", o->trainer.name, (unsigned)o->trainer.tid);
+    } else {
+        snprintf(line, sizeof(line), "No trainer");
+    }
+    pos = cart_screen_line(text, pos, line, false);
+    pos = cart_screen_line(text, pos, "Read-only for now", false);
+    const Gen3CartScreenInfo in = {
+        .backup_current = o->backup_current,
+        .backup_name = o->backup_name,
+    };
+    cart_screen_backup(&in, line);
+    cart_screen_line(text, pos, line, true);
+}
+
+void gen3_cart_screen_ub_row(
+    uint8_t k,
+    const Gen3UbSummary* m,
+    const char* name,
+    Gen3CartMon r,
+    char out[GEN3_CART_SCREEN_ROW_SIZE]) {
+    const unsigned n = (unsigned)k + 1u;
+    if(r == Gen3CartMonEmpty) {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u -- empty --", n);
+    } else if(r != Gen3CartMonOk) {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u ?", n);
+    } else if(m->egg) {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u EGG", n);
+    } else if(m->level == 0) {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u %.10s Lv?", n, name);
+    } else {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%02u %.10s Lv%u", n, name, (unsigned)m->level);
+    }
+}
+
 static const char* cart_screen_changes(uint16_t changes) {
     return changes == 1 ? "change" : "changes";
 }
