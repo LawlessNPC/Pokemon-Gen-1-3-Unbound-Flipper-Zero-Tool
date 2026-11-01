@@ -27,9 +27,11 @@
 #define GEN3_MB_PALETTE 0x93u /* logo palette: color 1, direction 0, speed 1 */
 #define GEN3_MB_HEADER_LEN 0xC0u
 #define GEN3_MB_MIN_LEN 0x1C0u
-/* our helper cap (the helper is about 6.5-8.5 KB); the BIOS allows 0x40000. The helper's build
- * has its own copy, MAX_LEN in gba/helper/Makefile; tests/test_helper_image.c checks they agree. */
-#define GEN3_MB_MAX_LEN 0x3000u
+/* our helper cap (the helper is about 12.6 KB with the Omega commands; one resend of a 14 KB image
+ * still fits GEN3_MB_ATTEMPT_US); the BIOS allows 0x40000. The
+ * session holds the whole image in RAM while it sends it. The helper's build has its own copy,
+ * MAX_LEN in gba/helper/Makefile; tests/test_helper_image.c checks they agree. */
+#define GEN3_MB_MAX_LEN 0x3800u
 /* Counted failures allowed; one more and the sender gives up, to ask for a power cycle with
  * Start+Select (multiboot-and-save.md §2.6). How the BIOS recovers is not documented:
  * multiboot-and-save.md M4. */

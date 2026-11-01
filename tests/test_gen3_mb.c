@@ -220,12 +220,12 @@ TEST(test_mb_image_check) {
     ASSERT_EQ(gen3_mb_image_check(image, 0x1C0, 1), Gen3MbImageOk);
     make_image(image, 0x2010);
     ASSERT_EQ(gen3_mb_image_check(image, 0x2010, 1), Gen3MbImageOk);
-    make_image(image, 0x3000);
-    ASSERT_EQ(gen3_mb_image_check(image, 0x3000, 1), Gen3MbImageOk);
-    make_image(image, 0x3010);
+    make_image(image, GEN3_MB_MAX_LEN);
+    ASSERT_EQ(gen3_mb_image_check(image, GEN3_MB_MAX_LEN, 1), Gen3MbImageOk);
+    make_image(image, GEN3_MB_MAX_LEN + 0x10u);
     ASSERT_EQ(gen3_mb_image_check(image, 0x1B0, 1), Gen3MbImageBadLen);
     ASSERT_EQ(gen3_mb_image_check(image, 0x1C8, 1), Gen3MbImageBadLen);
-    ASSERT_EQ(gen3_mb_image_check(image, 0x3010, 1), Gen3MbImageBadLen);
+    ASSERT_EQ(gen3_mb_image_check(image, GEN3_MB_MAX_LEN + 0x10u, 1), Gen3MbImageBadLen);
     make_image(image, 0x1C0);
     image[0xB2] = 0;
     ASSERT_EQ(gen3_mb_image_check(image, 0x1C0, 1), Gen3MbImageBadHeader);
@@ -789,7 +789,7 @@ TEST(test_mb_stale_after_marked_reply) {
 /* A length gen3_mb_image_check refuses starts Failed: idle ticks only, and the image is never
  * read. */
 TEST(test_mb_bad_len) {
-    static const uint32_t lens[] = {0, 0x100, 0x1B0, 0x1C8, 0x3010};
+    static const uint32_t lens[] = {0, 0x100, 0x1B0, 0x1C8, GEN3_MB_MAX_LEN + 0x10u};
     for(size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
         gen3_mb_init(&mb, MlinkWireMulti, NULL, lens[i], BENCH_SEED);
         Gen3MbStatus st = status();

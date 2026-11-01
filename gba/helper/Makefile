@@ -20,7 +20,7 @@ GCC_VERSION = 12.3.1
 # The helper side's one copy of the image cap, passed to fix_header.py. It must equal
 # GEN3_MB_MAX_LEN (src/gen3/gen3_mb.h), the Flipper sender's cap; tests/test_helper_image.c
 # checks that the two agree.
-MAX_LEN = 12288
+MAX_LEN = 14336
 
 BUILD = build
 IMAGE = ../../files/gen3_helper.mb

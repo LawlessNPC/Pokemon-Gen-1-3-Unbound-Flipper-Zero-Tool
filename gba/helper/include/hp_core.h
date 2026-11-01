@@ -5,6 +5,8 @@
 #include "hp_cart.h"
 #include "hp_flash.h"
 #include "hp_link.h"
+#include "hp_omega.h"
+#include "hp_sha256.h"
 
 /* The helper's protocol core, portable C: the packet layer and the commands
  * (multiboot-and-save.md §6). The GBA's main loop feeds it one word per transfer; host tests do the
@@ -26,6 +28,12 @@
 #define HP_CMD_COMMIT_SECTOR 0x1Bu
 #define HP_CMD_ROM_READ 0x20u
 #define HP_CMD_ROM_CRC32 0x22u
+/* The EZ-Flash Omega's microSD, read-only (multiboot-and-save.md §8, hp_omega.h) */
+#define HP_CMD_OMEGA_MOUNT 0x30u
+#define HP_CMD_OMEGA_OPEN 0x31u
+#define HP_CMD_OMEGA_READ 0x32u
+#define HP_CMD_OMEGA_CRC32 0x33u
+#define HP_CMD_OMEGA_SHA256 0x34u
 
 /* Status codes (multiboot-and-save.md §6.4). A response with any status but OK carries two words:
  * a fail code and a fail offset. */
@@ -50,6 +58,13 @@
 #define HP_REFUSE_VALID 6u /* another sector of the armed slot still holds a valid signature */
 #define HP_REFUSE_NOT_PROGRAMMED 7u /* COMMIT_SECTOR on a sector this arming didn't program */
 #define HP_REFUSE_LAYOUT 8u /* the cart's game code has no save layout the helper knows */
+#define HP_REFUSE_OMEGA 9u /* an Omega command before OMEGA_MOUNT succeeded */
+
+/* OMEGA_SHA256's flags: INIT starts the hash at offset 0; FINAL ends it and answers the digest */
+#define HP_SHA_INIT 0x0001u
+#define HP_SHA_FINAL 0x0002u
+#define HP_SHA_STEP_MAX 0x100000u /* bytes one OMEGA_SHA256 hashes, at most */
+#define HP_OMEGA_CRC_MAX 0x40000u /* bytes one OMEGA_CRC32 covers, at most */
 
 /* ARM_WRITE's first word, "WR" */
 #define HP_ARM_MAGIC 0x5752u
@@ -109,6 +124,13 @@ struct Hp {
     uint16_t last_w1;
     uint32_t last_crc;
     uint16_t last_len;
+    /* The Omega's card: mounted by OMEGA_MOUNT; HELLO and CART_INFO start afresh */
+    HpOmega omega;
+    /* OMEGA_SHA256's hash in progress: of slot sha_slot, the next byte expected at sha_next */
+    HpSha256 sha;
+    bool sha_on;
+    uint8_t sha_slot;
+    uint32_t sha_next;
 };
 
 void hp_init(Hp* hp);

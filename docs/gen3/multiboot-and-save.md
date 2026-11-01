@@ -323,7 +323,7 @@ in frame mode (≈ 0.25 s):
 | 8 KB | ≈ 8.0 s | ≈ 4.6 s |
 | 16 KB | ≈ 15.6 s | ≈ 9.0 s |
 
-The sender takes images up to 12 KB (`GEN3_MB_MAX_LEN`, 0x3000).
+The sender takes images up to 14 KB (`GEN3_MB_MAX_LEN`, 0x3800).
 
 ## 2.6 Failure behaviour
 
@@ -1513,6 +1513,69 @@ The Cartridge runner picks the wire (`gen3_mb_wire_next(wire, si_low, phase)`):
   Use Cartridge only with the GBA held at START+SELECT at power-on.
 
 ---
+
+# 8. The EZ-Flash Omega's microSD
+
+Pokemon Unbound runs from an EZ-Flash Omega Definitive Edition (DE), not a cartridge with a save
+chip. A game started from the Omega's menu keeps its save in a file on the Omega's microSD,
+`/SAVER/<game>.sav`. So for this cart the helper reads that **file**, through the Omega's own SD
+interface on the cartridge bus, as the Omega's kernel does. This version only reads; nothing writes
+to the card.
+
+## 8.1 What the Omega shows at power-on
+
+- A START+SELECT power-on skips the Omega's kernel, so the cart shows the kernel's ROM: its header
+  has an empty title and game code and a good logo (measured 2026-11-01, with a 1 MiB ROM). CART_INFO
+  finds no game the helper writes.
+- **The DE's pending save.** The DE keeps a running game's save in its FRAM, and copies it back over
+  the `.sav` at the next **normal** power-on (`Check_save_flag` in `omega-de-kernel`
+  `source/ezkernelnew.c`), with `FA_CREATE_ALWAYS`: the file may move to other clusters. Until then
+  its kernel NOR holds a flag, the 16-bit word at `0x08790000`: `0x0011` while a copy is pending
+  (`Read_sav_info(0)`). While it is set, the `.sav` on the card is older than the game's save, and the
+  next normal power-on would overwrite whatever is written there now. The Flipper reads it with
+  ROM_READ.
+- `/SAVER/Recently play.txt` starts with the path of the game started last, for example
+  `/ROMS/Pokemon - Unbound.gba`; its save is `/SAVER/` + that file's name with `.sav` for `.gba`.
+
+## 8.2 The SD interface
+
+From `ez-flash/omega-de-kernel`, `source/Ezcard_OP.c` (Apache License 2.0). 16-bit writes:
+
+- **Unlock:** `0xD200` to `0x09FE0000`, `0x1500` to `0x08000000`, `0xD200` to `0x08020000`,
+  `0x1500` to `0x08040000`.
+- **SD control:** unlock, the value to `0x09400000`, `0x1500` to `0x09FC0000`. 0 off, 1 on, 3 read
+  state.
+- **Read** `count` (1-4) blocks at `lba`: control 1; unlock, `lba` low half to `0x09600000`, high half
+  to `0x09620000`, `count` to `0x09640000`, `0x1500` to `0x09FC0000`; control 3; poll `0x09E00000`
+  until it isn't `0xEEE1` (the kernel allows 0x100000 polls, and tries again after a delay); control
+  1; DMA3, 16-bit, from `0x09E00000`; control 0 at the end. The helper does it at WAITCNT 0, the
+  kernel's (it never sets one), and puts its own back after.
+
+The helper's FAT32 reader (`hp_omega.c`) mounts the card (an MBR's first partition, or a boot
+sector at block 0), walks directories by long name (an LFN run whose checksum matches its 8.3
+entry) or 8.3 name, case-insensitively, and reads files through their cluster chains.
+
+## 8.3 Commands
+
+Request lengths are fixed, in words; 32-bit numbers go low half first. None is write-class.
+
+| Code | Command | Request | OK response |
+|---|---|---|---|
+| `0x30` | OMEGA_MOUNT | — | 9: partition LBA (2), sectors a cluster, reserved sectors, FATs, FAT size (2), root cluster (2) |
+| `0x31` | OMEGA_OPEN | 50: slot (0-2), path length (1-95), the path's bytes, two a word, low byte first, zero-padded | 6: size (2), first cluster (2), the entry's date, time |
+| `0x32` | OMEGA_READ | 4: slot, offset (2, a multiple of 512), blocks (1-8) | 256 a block |
+| `0x33` | OMEGA_CRC32 | 5: slot, offset (2), length (2: 512-0x40000, a multiple of 512) | 2: the CRC-32 (as READ_SECTOR's) |
+| `0x34` | OMEGA_SHA256 | 6: slot, flags (INIT 1, FINAL 2), offset (2), length (2: at most 0x100000) | 0, or with FINAL 16: the digest's bytes, two a word |
+
+- **OMEGA_MOUNT is REFUSED** (`HP_REFUSE_CART`) unless this session's CART_INFO found no game the
+  helper writes: no Omega command ever goes to a genuine cart. Every other Omega command is REFUSED
+  (`HP_REFUSE_OMEGA`, 9) until a MOUNT succeeded. HELLO and CART_INFO end the mount.
+- A reader failure is UNSUPPORTED with fail code 1 (the card didn't answer, or a broken chain),
+  2 (no file system), 3 (not FAT32), 4 (not found) or 5 (a directory); arguments outside the rules
+  are BAD_ARG.
+- **OMEGA_SHA256** hashes a file in steps: INIT starts at offset 0, and each later call must begin
+  where the last ended, on the same slot. Only the step that reaches the file's size may end short of
+  a block. 1 MiB a step keeps each command's BUSY time well inside the Flipper's budget.
 
 # Uncertain
 

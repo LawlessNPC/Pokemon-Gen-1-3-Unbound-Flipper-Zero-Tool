@@ -1,9 +1,12 @@
 #include "test.h"
 #include "fake_fat.h"
 #include "fake_gba.h"
+#include "helper_cmd.h"
 #include <stdbool.h>
 #include <stdlib.h>
+#include <hp_core.h>
 #include <hp_omega.h>
+#include <hp_sha256.h>
 
 /* The helper's read-only FAT32 layer over an EZ-Flash Omega's microSD (hp_omega.h), on the fake
  * GBA with a fake card (fake_fat.h). */
@@ -191,6 +194,168 @@ TEST(test_omega_read_bounds) {
     fake_fat_free(&card);
 }
 
+/* ---- The Omega commands (hp_core.h) ---- */
+
+#define MIB 0x100000u
+#define TXT_LEN 70000u
+
+static Hp hp;
+static uint16_t resp[HELPER_CMD_RESP_MAX];
+static const uint16_t* const p = resp + 2;
+
+/* payload words i and i + 1 as a 32-bit number */
+static uint32_t w32(uint32_t i) {
+    return (uint32_t)p[i] | (uint32_t)p[i + 1u] << 16;
+}
+static uint8_t hdr[0xC0];
+
+/* An Omega at power-on: the kernel's header, title and code empty; the card as make_card's, plus
+ * /ROMS/game.gba of TXT_LEN bytes */
+static void omega_cart(void) {
+    static const char zero4[4] = {0};
+    make_card(2048, 8, 0);
+    const uint32_t roms = fake_fat_mkdir(&card, fake_fat_root(&card), "ROMS");
+    fake_fat_add_file(&card, roms, "game.gba", data, TXT_LEN, 2);
+    helper_cmd_header(hdr, gba.own, "", zero4, 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    hp_init(&hp);
+}
+
+static uint16_t run(uint8_t seq, uint8_t code, const uint16_t* args, uint16_t n) {
+    return helper_cmd_run(&hp, seq, code, args, n, resp);
+}
+
+static uint16_t open_path(uint8_t seq, uint8_t slot, const char* path) {
+    uint16_t a[50];
+    memset(a, 0, sizeof(a));
+    a[0] = slot;
+    a[1] = (uint16_t)strlen(path);
+    for(uint32_t i = 0; path[i]; i++) a[2u + i / 2u] |= (uint16_t)((uint8_t)path[i] << ((i & 1u) * 8u));
+    return run(seq, HP_CMD_OMEGA_OPEN, a, 50);
+}
+
+/* resp's payload bytes, little-endian, equal q for n bytes */
+static bool payload_is(const uint8_t* q, uint32_t n) {
+    for(uint32_t i = 0; i < n; i++) {
+        if((uint8_t)(p[i / 2u] >> ((i & 1u) * 8u)) != q[i]) return false;
+    }
+    return true;
+}
+
+TEST(test_cmd_mount_refused_genuine) {
+    omega_cart();
+    helper_cmd_header(hdr, gba.own, "POKEMON RUBY", "AXVE", 0);
+    fake_gba_rom(&gba, hdr, 16u * MIB);
+    fake_gba_rom_string(&gba, 0x3B0000, "FLASH1M_V103");
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    const uint32_t reads = gba.omega_reads;
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_CART);
+    ASSERT_EQ(gba.omega_reads, reads); /* not one Omega command went to the cart */
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_mount_before_info) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_CART);
+    ASSERT_EQ(gba.omega_reads, 0);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_read_before_mount) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(open_path(2, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    const uint16_t rd[4] = {0, 0, 0, 1};
+    ASSERT_EQ(run(3, HP_CMD_OMEGA_READ, rd, 4), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_omega_flow) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(resp[1], 9);
+    ASSERT_EQ(w32(0), 2048);
+    ASSERT_EQ(p[2], 8);
+    ASSERT_EQ(w32(7), fake_fat_root(&card));
+    /* the save: open, read 8 blocks at 4096, CRC-32 of the first 4 KB */
+    ASSERT_EQ(open_path(3, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    ASSERT_EQ(resp[1], 6);
+    ASSERT_EQ(w32(0), SAV_LEN);
+    const uint16_t rd[4] = {0, 4096, 0, 8};
+    ASSERT_EQ(run(4, HP_CMD_OMEGA_READ, rd, 4), HP_ST_OK);
+    ASSERT_EQ(resp[1], 8 * 256);
+    ASSERT_TRUE(payload_is(data + 4096, 4096));
+    const uint16_t cr[5] = {0, 0, 0, 4096, 0};
+    ASSERT_EQ(run(5, HP_CMD_OMEGA_CRC32, cr, 5), HP_ST_OK);
+    ASSERT_EQ(w32(0), ~hp_crc32_bytes(0xFFFFFFFFu, data, 4096));
+    /* the ROM: SHA-256 of all TXT_LEN bytes in one call, then in two */
+    ASSERT_EQ(open_path(6, 2, "/ROMS/game.gba"), HP_ST_OK);
+    HpSha256 s;
+    uint8_t d[32];
+    hp_sha256_init(&s);
+    hp_sha256_update(&s, data, TXT_LEN);
+    hp_sha256_final(&s, d);
+    const uint16_t one[6] = {2, HP_SHA_INIT | HP_SHA_FINAL, 0, 0, (uint16_t)TXT_LEN, (uint16_t)(TXT_LEN >> 16)};
+    ASSERT_EQ(run(7, HP_CMD_OMEGA_SHA256, one, 6), HP_ST_OK);
+    ASSERT_EQ(resp[1], 16);
+    ASSERT_TRUE(payload_is(d, 32));
+    const uint16_t first[6] = {2, HP_SHA_INIT, 0, 0, 65536u & 0xFFFFu, 1};
+    ASSERT_EQ(run(8, HP_CMD_OMEGA_SHA256, first, 6), HP_ST_OK);
+    ASSERT_EQ(resp[1], 0);
+    const uint16_t rest[6] = {2, HP_SHA_FINAL, 0, 1, (uint16_t)(TXT_LEN - 65536u), 0};
+    ASSERT_EQ(run(9, HP_CMD_OMEGA_SHA256, rest, 6), HP_ST_OK);
+    ASSERT_EQ(resp[1], 16);
+    ASSERT_TRUE(payload_is(d, 32));
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_sha_continuity) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(open_path(3, 2, "/ROMS/game.gba"), HP_ST_OK);
+    /* without INIT before any hash, at the wrong offset, a length not a multiple of 512 short of
+     * the end, past the end, and over 1 MiB */
+    const uint16_t no_init[6] = {2, 0, 0, 0, 512, 0};
+    ASSERT_EQ(run(4, HP_CMD_OMEGA_SHA256, no_init, 6), HP_ST_BAD_ARG);
+    const uint16_t first[6] = {2, HP_SHA_INIT, 0, 0, 4096, 0};
+    ASSERT_EQ(run(5, HP_CMD_OMEGA_SHA256, first, 6), HP_ST_OK);
+    const uint16_t gap[6] = {2, 0, 8192, 0, 512, 0};
+    ASSERT_EQ(run(6, HP_CMD_OMEGA_SHA256, gap, 6), HP_ST_BAD_ARG);
+    const uint16_t odd[6] = {2, 0, 4096, 0, 100, 0};
+    ASSERT_EQ(run(7, HP_CMD_OMEGA_SHA256, odd, 6), HP_ST_BAD_ARG);
+    const uint16_t past[6] = {2, 0, 4096, 0, (uint16_t)(TXT_LEN), 0};
+    ASSERT_EQ(run(8, HP_CMD_OMEGA_SHA256, past, 6), HP_ST_BAD_ARG);
+    const uint16_t big[6] = {2, HP_SHA_INIT, 0, 0, 0, 0x11};
+    ASSERT_EQ(run(9, HP_CMD_OMEGA_SHA256, big, 6), HP_ST_BAD_ARG);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_open_notfound) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(open_path(3, 0, "/SAVER/Pokemon - Ruby.sav"), HP_ST_UNSUPPORTED);
+    ASSERT_EQ(p[0], HpOmegaNotFound);
+    /* a path length that doesn't match its bytes, or over 95 */
+    uint16_t a[50];
+    memset(a, 0, sizeof(a));
+    a[1] = 96;
+    ASSERT_EQ(run(4, HP_CMD_OMEGA_OPEN, a, 50), HP_ST_BAD_ARG);
+    a[1] = 0;
+    ASSERT_EQ(run(5, HP_CMD_OMEGA_OPEN, a, 50), HP_ST_BAD_ARG);
+    /* HELLO ends the mount */
+    ASSERT_EQ(run(6, HP_CMD_HELLO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(open_path(7, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    fake_fat_free(&card);
+}
+
 int main(void) {
     RUN(test_omega_mount_mbr);
     RUN(test_omega_mount_superfloppy);
@@ -202,5 +367,11 @@ int main(void) {
     RUN(test_omega_lfn_split);
     RUN(test_omega_read_fragmented);
     RUN(test_omega_read_bounds);
+    RUN(test_cmd_mount_refused_genuine);
+    RUN(test_cmd_mount_before_info);
+    RUN(test_cmd_read_before_mount);
+    RUN(test_cmd_omega_flow);
+    RUN(test_cmd_sha_continuity);
+    RUN(test_cmd_open_notfound);
     TEST_EXIT();
 }
