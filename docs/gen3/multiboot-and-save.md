@@ -195,7 +195,7 @@ crc32step(c, d):            ; 32 rounds
 GBATEK writes the CRC as `c = c xor data; 32× (c = c shr 1; if carry: c ^= x)`.
 afska keeps `c` and `d` separate (`calculateCRCData`). The two forms are
 algebraically identical. I checked that both give the same encrypted stream and
-CRC on 200 random images (`/tmp/claude-mb-scripts/mbcheck.py`, not committed).
+CRC on 200 random images (a one-off script, not committed).
 
 **Test vector** (for a Flipper unit test; computed with both formulations):
 header = 0xC0 zero bytes; payload = bytes `00 01 02 … FF` (L = 0x100, file
@@ -566,7 +566,7 @@ The ufbt toolchain ships a usable compiler:
 
 | Item | Value |
 |---|---|
-| Path | `/Users/kyvo/.ufbt/toolchain/arm64-darwin/bin/arm-none-eabi-gcc` (`~/.ufbt/toolchain/current` → `arm64-darwin`) |
+| Path | `~/.ufbt/toolchain/arm64-darwin/bin/arm-none-eabi-gcc` (`~/.ufbt/toolchain/current` → `arm64-darwin`) |
 | Version | `arm-none-eabi-gcc (GCC) 12.3.1 20230626`; toolchain `VERSION` file: `39` |
 | Defaults | `-mcpu=arm7tdmi -march=armv4t -mfloat-abi=soft` (`-Q --help=target`) |
 | Multilib for `-mcpu=arm7tdmi -mthumb` | `thumb/nofp`; its `libgcc.a` is `Tag_CPU_arch: v4T`, Thumb-1, so it is safe on the GBA |
@@ -574,7 +574,7 @@ The ufbt toolchain ships a usable compiler:
 | Missing | `gbafix`; do the header fix in a script (§4.5) |
 
 Verified: the crt0 and linker script below build with this toolchain into a
-480-byte image (`/tmp/claude-mb-build/`, not committed). Header fields land at
+480-byte image (a scratch build, not committed). Header fields land at
 0xA0–0xBF. `0xC0` and `0xE0` hold `b mb_start` (`ea000007`/`eaffffff`). A
 Thumb→ARM call into IWRAM gets a linker veneer (`__…_from_thumb`).
 
