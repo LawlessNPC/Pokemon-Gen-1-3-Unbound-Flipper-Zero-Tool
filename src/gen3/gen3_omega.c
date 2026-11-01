@@ -204,17 +204,36 @@ static Gen3CartResult om_hash(Gen3Omega* o) {
     return Gen3CartOk;
 }
 
+/* An Unbound signature in the footer of the save's sector s, read through its 512-byte block 7 */
+static Gen3CartResult om_unbound_footer(Gen3Omega* o, uint32_t s, bool* yes) {
+    const Gen3CartResult r = om_link(
+        o, gen3_hcli_omega_read(o->cli, GEN3_OMEGA_SLOT_SAVE, s * OM_SECTOR + 0xE00u, 1, o->buf));
+    if(r != Gen3CartOk) return r;
+    const uint8_t* f = o->buf + 0x1F8u;
+    const uint32_t sig = (uint32_t)f[0] | (uint32_t)f[1] << 8 | (uint32_t)f[2] << 16 | (uint32_t)f[3] << 24;
+    *yes = sig == GEN3_UB_SIG_A || sig == GEN3_UB_SIG_B;
+    return Gen3CartOk;
+}
+
 Gen3CartResult gen3_omega_connect(Gen3Omega* o) {
     o->connected = false;
+    o->flag_read = false;
+    o->mounted = false;
+    memset(&o->info, 0, sizeof(o->info));
+    o->rom_path[0] = 0;
+    o->save_path[0] = 0;
     o->hashed = o->verified = o->from_cache = false;
     o->backup_current = false;
     om_step(o, Gen3CartStepOmegaFind, 0, OM_FIND_STEPS);
     uint8_t flag[2];
     Gen3CartResult r = om_link(o, gen3_hcli_rom_read(o->cli, GEN3_OMEGA_FLAG_ADDR, 1, flag));
     if(r != Gen3CartOk) return r;
-    if((uint16_t)(flag[0] | flag[1] << 8) == GEN3_OMEGA_FLAG_PENDING) return Gen3CartOmegaPending;
+    o->flag = (uint16_t)(flag[0] | flag[1] << 8);
+    o->flag_read = true;
+    if(o->flag == GEN3_OMEGA_FLAG_PENDING) return Gen3CartOmegaPending;
     r = om_link(o, gen3_hcli_omega_mount(o->cli, &o->info));
     if(r != Gen3CartOk) return r;
+    o->mounted = true;
     om_step(o, Gen3CartStepOmegaFind, 1, OM_FIND_STEPS);
     if(om_cancelled(o)) return Gen3CartCancelled;
 
@@ -230,6 +249,12 @@ Gen3CartResult gen3_omega_connect(Gen3Omega* o) {
     r = om_link(o, gen3_hcli_omega_open(o->cli, GEN3_OMEGA_SLOT_SAVE, o->save_path, &o->save));
     if(r != Gen3CartOk) return r;
     if(o->save.size != GEN3_UB_SAVE_SIZE) return Gen3CartNoGame;
+    /* Unbound's save, in either slot: another game's, or one never saved, is NoGame */
+    bool ub = false;
+    r = om_unbound_footer(o, 0, &ub);
+    if(r == Gen3CartOk && !ub) r = om_unbound_footer(o, GEN3_UB_SLOT_SECTORS, &ub);
+    if(r != Gen3CartOk) return r;
+    if(!ub) return Gen3CartNoGame;
     r = om_link(o, gen3_hcli_omega_open(o->cli, GEN3_OMEGA_SLOT_ROM, o->rom_path, &o->rom));
     if(r != Gen3CartOk) return r;
     om_step(o, Gen3CartStepOmegaFind, 3, OM_FIND_STEPS);
@@ -364,6 +389,10 @@ Gen3CartResult gen3_omega_backup(Gen3Omega* o, const char* stamp) {
         st->remove(st->ctx, GEN3_CART_BACKUP_TMP);
         o->backup_name[0] = 0;
         o->has_trainer = false;
+        /* The helper may still be busy with a lost command: a new Connect first */
+        if(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout || r == Gen3CartHelperError) {
+            o->connected = false;
+        }
         return r;
     }
     om_step(o, Gen3CartStepAnalyze, 1, 1);

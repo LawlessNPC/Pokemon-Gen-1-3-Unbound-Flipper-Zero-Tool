@@ -30,7 +30,10 @@ typedef struct {
     uint8_t* buf; /* GEN3_CART_BUF_SIZE bytes */
     Gen3CartProgress progress;
     /* The last gen3_omega_connect's */
-    bool connected; /* it ran to its end */
+    bool connected; /* it ran to its end, and no command was lost since */
+    bool flag_read; /* flag holds the DE's pending-save word, as read */
+    uint16_t flag;
+    bool mounted; /* info holds OMEGA_MOUNT's answer */
     Gen3HOmegaInfo info;
     char rom_path[GEN3_HCLI_OMEGA_PATH_MAX], save_path[GEN3_HCLI_OMEGA_PATH_MAX];
     Gen3HOmegaFile rom, save;
@@ -59,8 +62,9 @@ void gen3_omega_init(
     const Gen3CartProgress* p);
 /* After HELLO and CART_INFO: the DE's pending-save flag (OmegaPending while it reads 0x0011, before
  * any Omega command), OMEGA_MOUNT, Recently play.txt's first line (the game file, "/....gba", 1..95
- * characters, trailing spaces dropped) and its save (/SAVER/<name>.sav, exactly 131072 bytes);
- * NoGame for any of these missing or outside the rules. Then the game file's identity: the cache's
+ * characters, trailing spaces dropped) and its save (/SAVER/<name>.sav, exactly 131072 bytes, with
+ * an Unbound signature in sector 0's or sector 14's footer); NoGame for any of these missing or
+ * outside the rules: another game's save, or an Unbound one never saved. Then the game file's identity: the cache's
  * line for it (path, size, first cluster, date and time), else SHA256 in GEN3_OMEGA_HASH_STEP steps
  * and a new line. Ok with verified true or false. The backup is no longer current. Progress
  * OmegaFind 0..4, RomHash per step; cancel between steps (Cancelled, no cache line). */
@@ -68,7 +72,8 @@ Gen3CartResult gen3_omega_connect(Gen3Omega* o);
 /* The save to backups/UNBOUND_<tid | nosave>_<stamp>.sav (-2, -3 ... if taken), verified three
  * ways: the packet CRC, OMEGA_CRC32 of each 4 KB, and an SD read-back. Then the slots and trainer.
  * BadArg unless connected; SdFull before any link traffic unless 131072 + 4096 bytes are free. Any
- * failure leaves no current backup and no temporary file. Progress BackupRead per 4 KB,
+ * failure leaves no current backup and no temporary file; LinkLost, BusyTimeout and HelperError
+ * also end the connect (the helper may still be busy), so the next job needs a new Connect. Progress BackupRead per 4 KB,
  * BackupVerify, Analyze; cancel after each 4 KB read. */
 Gen3CartResult gen3_omega_backup(Gen3Omega* o, const char* stamp);
 /* A current backup whose save has a slot the game loads */

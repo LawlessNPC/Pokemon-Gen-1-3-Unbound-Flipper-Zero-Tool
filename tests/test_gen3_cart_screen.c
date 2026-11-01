@@ -1504,6 +1504,15 @@ TEST(test_screen_result_omega) {
     gen3_cart_screen_result(Gen3CartJobConnect, Gen3CartStepOmegaFind, Gen3CartNoGame, false, false, &res);
     ASSERT_EQ(res.retry, Gen3CartRetryConnect);
     ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartNoGame));
+    /* an Omega's failed backup: Retry connects again after a link failure, else no Retry */
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobBackup, Gen3CartBusyTimeout), Gen3CartRetryConnect);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobBackup, Gen3CartLinkLost), Gen3CartRetryConnect);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobBackup, Gen3CartHelperError), Gen3CartRetryConnect);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobBackup, Gen3CartSdFull), Gen3CartRetryNone);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobBackup, Gen3CartVerifyFailed), Gen3CartRetryNone);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobBackup, Gen3CartOk), Gen3CartRetryNone);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobConnect, Gen3CartNoGame), Gen3CartRetryConnect);
+    ASSERT_EQ(gen3_cart_screen_omega_retry(Gen3CartJobConnect, Gen3CartOk), Gen3CartRetryNone);
     /* the two new steps have titles */
     Gen3CartSessionStatus st;
     memset(&st, 0, sizeof(st));

@@ -260,6 +260,8 @@ void gen3_cart_ui_set_result(
     Gen3CartScreenResult res;
 
     gen3_cart_screen_result(job, step, r, dropped, c && gen3_cart_linked(c), &res);
+    /* An Omega's jobs have no Reconnect: a link failure ends its connect */
+    if(gen3_cart_ui_status(pokemon_fap)->omega) res.retry = gen3_cart_screen_omega_retry(job, r);
     ui->result = r;
     snprintf(ui->result_header, sizeof(ui->result_header), "%s", res.header);
     ui->result_text = res.text;

@@ -164,6 +164,11 @@ void gen3_cart_screen_info(
     char header[GEN3_CART_SCREEN_HEADER_SIZE],
     char text[GEN3_CART_SCREEN_INFO_SIZE]);
 
+/* An EZ-Flash Omega's result screen's Retry: a new Connect after a failed Connect, or after a link
+ * failure (LinkLost, BusyTimeout, HelperError) in another job, as that ends the Omega's connect;
+ * else none */
+Gen3CartRetry gen3_cart_screen_omega_retry(Gen3CartJob job, Gen3CartResult r);
+
 /* An EZ-Flash Omega's Cart info: header "EZ-Flash Omega"; text: whether the game file is Unbound
  * 2.1.1.1, the save the game loads, the trainer, that this version only reads, and the backup's
  * stamp (MMDD-HHMMSS) */

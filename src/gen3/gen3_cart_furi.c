@@ -608,18 +608,34 @@ static void cart_log_omega_backup(Gen3CartSession* s) {
     }
 }
 
+/* The game file's hash, apart so that its 65-byte buffer isn't on the stack for the backup */
+static void cart_log_omega_sha(Gen3CartSession* s) {
+    const Gen3Omega* o = &s->omega;
+    char hex[65];
+    cart_hex(o->sha, 32, hex);
+    CART_LOG(
+        s,
+        "omega sha %s cached %u match %u",
+        o->hashed ? hex : "-",
+        (unsigned)o->from_cache,
+        (unsigned)o->verified);
+}
+
 /* The Omega's way after CART_INFO: its game, the game file's check, and a backup */
 static Gen3CartResult cart_omega_connect(Gen3CartSession* s) {
     Gen3Omega* o = &s->omega;
     CART_LOG(s, "omega %s", "kernel header");
     Gen3CartResult r = gen3_omega_connect(o);
-    CART_LOG(
-        s,
-        "omega mount part %lu spc %u root %lu",
-        (unsigned long)o->info.part,
-        (unsigned)o->info.spc,
-        (unsigned long)o->info.root);
-    if(r == Gen3CartOmegaPending) CART_LOG(s, "omega flag %04x", (unsigned)GEN3_OMEGA_FLAG_PENDING);
+    /* Each line only for what this connect read, so that a log shows where it stopped */
+    if(o->flag_read) CART_LOG(s, "omega flag %04x", (unsigned)o->flag);
+    if(o->mounted) {
+        CART_LOG(
+            s,
+            "omega mount part %lu spc %u root %lu",
+            (unsigned long)o->info.part,
+            (unsigned)o->info.spc,
+            (unsigned long)o->info.root);
+    }
     if(o->rom_path[0]) CART_LOG(s, "omega recent '%s'", o->rom_path);
     if(r != Gen3CartOk) return r;
     CART_LOG(s, "omega save '%s' size %lu", o->save_path, (unsigned long)o->save.size);
@@ -629,14 +645,7 @@ static Gen3CartResult cart_omega_connect(Gen3CartSession* s) {
         o->rom_path,
         (unsigned long)o->rom.size,
         (unsigned long)o->rom.first_cluster);
-    char hex[65];
-    cart_hex(o->sha, 32, hex);
-    CART_LOG(
-        s,
-        "omega sha %s cached %u match %u",
-        o->hashed ? hex : "-",
-        (unsigned)o->from_cache,
-        (unsigned)o->verified);
+    cart_log_omega_sha(s);
     r = gen3_omega_backup(o, s->stamp);
     cart_log_omega_backup(s);
     return r;

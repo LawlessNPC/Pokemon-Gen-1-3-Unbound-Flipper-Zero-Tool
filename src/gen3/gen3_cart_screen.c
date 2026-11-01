@@ -416,6 +416,14 @@ void gen3_cart_screen_info(
     cart_screen_line(text, pos, line, true);
 }
 
+Gen3CartRetry gen3_cart_screen_omega_retry(Gen3CartJob job, Gen3CartResult r) {
+    if(r == Gen3CartOk) return Gen3CartRetryNone;
+    if(job == Gen3CartJobConnect) return Gen3CartRetryConnect;
+    return r == Gen3CartLinkLost || r == Gen3CartBusyTimeout || r == Gen3CartHelperError ?
+               Gen3CartRetryConnect :
+               Gen3CartRetryNone;
+}
+
 void gen3_cart_screen_omega_info(
     const Gen3Omega* o,
     char header[GEN3_CART_SCREEN_HEADER_SIZE],

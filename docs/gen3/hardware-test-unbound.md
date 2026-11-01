@@ -10,7 +10,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), a 
 
 - **The DE's save.** While you play, the Omega Definitive Edition keeps the save in the cart, and copies it to its microSD card the next time you switch on normally (a saving screen, or `Save sav?` if its auto-save setting is off). A START+SELECT power-on skips that, so after playing, **switch on normally once and let the Omega save, then switch off**, and only then connect. Cartridge checks this itself (A).
 - **Which game.** Cartridge reads the game the Omega started last, from `SAVER/Recently play.txt`, and its save, `SAVER/<game name>.sav`.
-- **The log** is `apps_data/pokemon/gen3_cart.log`. Its Omega lines: `omega mount ...`, `omega recent '<game file>'`, `omega save '<save file>' size 131072`, `omega rom '<game file>' size <n> clus <n>`, `omega sha <hash> cached <0|1> match <0|1>`, `backup <name>`, `ub slots ...` and `ub trainer <name> <TID>`. Close Cartridge before copying it off (the USB CLI can't read it while Cartridge runs).
+- **The log** is `apps_data/pokemon/gen3_cart.log`. Its Omega lines, each only for what that Connect got to: `omega flag <word>` (`0011` while the DE has a save to copy; write down what it shows in B), `omega mount ...`, `omega recent '<game file>'`, `omega save '<save file>' size 131072`, `omega rom '<game file>' size <n> clus <n>`, `omega sha <hash> cached <0|1> match <0|1>`, `backup <name>`, `ub slots ...` and `ub trainer <name> <TID>`. Close Cartridge before copying it off (the USB CLI can't read it while Cartridge runs).
 - **Backups** are in `apps_data/pokemon/gen3/backups/`, named `UNBOUND_<TID>_<date>-<time>.sav`: the whole 128 KB save as the Omega's card holds it.
 
 ## A. Pending save
@@ -24,7 +24,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), a 
 1. Switch the GBA on normally, let the Omega save to its card and show its menu, then switch it off.
 2. Press `Retry` (or `Start`), then switch the GBA on holding START+SELECT.
 3. The Flipper shows `Sending helper`, `Finding the game`, `Checking game file` with a bar (the first time only; write down how long it took), then `Backing up save`, `Checking backup` and the hub, headed `POKEMON UNBOUND`.
-4. The log has `omega recent '/ROMS/...gba'`, `omega save ... size 131072`, and `omega sha <hash> cached 0 match 1`. Write the hash down below.
+4. The log has `omega flag <word>` (not `0011`: write it down), `omega recent '/ROMS/...gba'`, `omega save ... size 131072`, and `omega sha <hash> cached 0 match 1`. Write the hash down below.
 
 ## C. Version
 
@@ -60,7 +60,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), a 
 | Step | Pass / fail | What each screen showed (Flipper, GBA) |
 |---|---|---|
 | A Pending save refused, log `omega flag 0011` | | |
-| B Connect to the hub (`Checking game file` took ___ s; `omega sha` ________) | | |
+| B Connect to the hub (`Checking game file` took ___ s; `omega flag` ____; `omega sha` ________) | | |
 | C Cart info, `Unbound 2.1.1.1: yes` | | |
 | D Backup file 131,072 bytes (`Backing up save` took ___ s) | | |
 | E Party and 3 boxes match the game | | |
@@ -75,7 +75,7 @@ Report the step, what the Flipper and the GBA showed, and `apps_data/pokemon/gen
 | Symptom | Likely cause | Try |
 |---|---|---|
 | `Omega hasn't saved` every time | the DE still has a save to copy: its auto-save is off and `Save sav?` was answered B, or it was switched off before the copy ended | switch on normally, answer A at `Save sav?`, wait for the menu, switch off |
-| `Play Unbound on the Omega first` | `Recently play.txt` names another game, or Unbound's save isn't `SAVER/<same name>.sav` of 131,072 bytes | start Unbound from the Omega's menu once and save, then connect again; report the log's `omega recent` and `omega save` lines |
+| `Play Unbound on the Omega first` | `Recently play.txt` names another game, Unbound's save isn't `SAVER/<same name>.sav` of 131,072 bytes, or that save isn't Unbound's (another game's, or Unbound never saved) | start Unbound from the Omega's menu once and save, then connect again; report the log's `omega recent` and `omega save` lines |
 | `The helper reported an error` right after `Finding the game` | the card couldn't be read (`omega mount` missing from the log) | report the log |
 | `Version: not 2.1.1.1` | another Unbound version, or a patched copy | report the `omega sha` hash |
 | A box shows other Pokemon than the game | the save's layout differs from 2.1.1.1's | report the box, and the backup file |

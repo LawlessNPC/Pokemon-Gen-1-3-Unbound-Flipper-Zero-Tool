@@ -205,8 +205,20 @@ TEST(test_omega_hash_mismatch) {
 
 TEST(test_omega_pending) {
     ASSERT_TRUE(setup());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_TRUE(om.flag_read);
+    ASSERT_EQ(om.flag, 0x8000); /* open bus past the kernel's 1 MiB */
+    ASSERT_TRUE(om.mounted);
+    /* a later connect that stops at the flag keeps nothing of the one before */
     fake_gba_rom_word(&gba, 0x790000u, 0x0011);
+    hook.calls[GEN3_HCMD_OMEGA_MOUNT] = 0;
+    gba.omega_reads = 0;
     ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOmegaPending);
+    ASSERT_TRUE(om.flag_read);
+    ASSERT_EQ(om.flag, 0x0011);
+    ASSERT_TRUE(!om.mounted);
+    ASSERT_STR_EQ(om.rom_path, "");
+    ASSERT_STR_EQ(om.save_path, "");
     ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_MOUNT], 0);
     ASSERT_EQ(gba.omega_reads, 0);
 }
@@ -261,6 +273,36 @@ TEST(test_omega_save_size) {
     ASSERT_EQ(fake_store_count(&store, ".sav"), 0);
 }
 
+TEST(test_omega_not_unbound) {
+    /* the last game's save is FireRed's: NoGame, before any backup or hash */
+    fake_store_init(&store, 64u * MIB);
+    api = fake_store_api(&store);
+    make_save();
+    for(uint32_t k = 0; k < 14u; k++) {
+        uint8_t* f = save_img + k * 4096u + 0xFF8u;
+        f[0] = 0x25;
+        f[1] = 0x20;
+        f[2] = 0x01;
+        f[3] = 0x08;
+    }
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartNoGame);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_SHA256], 0);
+    ASSERT_TRUE(!om.connected);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartBadArg);
+    ASSERT_EQ(fake_store_count(&store, ".sav"), 0);
+    /* an Unbound save never saved yet (erased): NoGame too */
+    fake_ub_erase(save_img);
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartNoGame);
+    /* Unbound's signature in slot B only: Unbound's */
+    make_save();
+    fake_ub_build(save_img, 1, 21, 0);
+    for(uint32_t k = 0; k < 14u; k++) save_img[k * 4096u + 0xFF8u] ^= 0x40;
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+}
+
 TEST(test_omega_hash_link_lost) {
     ASSERT_TRUE(setup());
     /* On the Normal wire a pulled cable reads as a helper that stays busy (hardware-test-3 N.2) */
@@ -309,10 +351,12 @@ TEST(test_omega_backup_ok) {
 }
 
 TEST(test_omega_backup_nosave) {
-    /* an erased save: backed up all the same, named nosave, not browsable */
+    /* an Unbound save with no slot the game loads (a bad checksum): backed up all the same, named
+     * nosave, not browsable */
     fake_store_init(&store, 64u * MIB);
     api = fake_store_api(&store);
-    fake_ub_erase(save_img);
+    make_save();
+    save_img[fake_ub_phys(save_img, 0, 7) * 4096u + 0x10] ^= 0x01;
     ASSERT_TRUE(default_bench());
     ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
     ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
@@ -337,6 +381,20 @@ TEST(test_omega_backup_sd_full) {
     fake_store_report_free(&store, FAKE_UB_LEN);
     const uint32_t reads = hook.calls[GEN3_HCMD_OMEGA_READ];
     ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartSdFull);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ], reads);
+}
+
+TEST(test_omega_backup_link_lost) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    fake_helper_unplug_at(&fh, fake_helper_transfers(&fh) + 2000u, FOREVER);
+    const Gen3CartResult r = gen3_omega_backup(&om, STAMP);
+    ASSERT_TRUE(r == Gen3CartBusyTimeout || r == Gen3CartLinkLost);
+    ASSERT_TRUE(!om.connected);
+    ASSERT_EQ(fake_store_count(&store, ".sav"), 0);
+    /* no command goes to a helper that may still be busy: a new Connect first */
+    const uint32_t reads = hook.calls[GEN3_HCMD_OMEGA_READ];
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartBadArg);
     ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ], reads);
 }
 
@@ -391,12 +449,14 @@ int main(void) {
     RUN(test_omega_flag_values);
     RUN(test_omega_recent_lines);
     RUN(test_omega_save_size);
+    RUN(test_omega_not_unbound);
     RUN(test_omega_hash_link_lost);
     RUN(test_omega_cancel_hash);
     RUN(test_omega_backup_ok);
     RUN(test_omega_backup_nosave);
     RUN(test_omega_backup_readback_mismatch);
     RUN(test_omega_backup_sd_full);
+    RUN(test_omega_backup_link_lost);
     RUN(test_omega_backup_cancel);
     RUN(test_omega_summary);
     fake_fat_free(&card);
