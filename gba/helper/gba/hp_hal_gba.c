@@ -76,3 +76,72 @@ void hp_hal_status(HpStatus s) {
         break;
     }
 }
+
+/* ---- The EZ-Flash Omega's microSD ----
+ * Read as the Omega Definitive Edition's own kernel reads it: ez-flash/omega-de-kernel,
+ * source/Ezcard_OP.c (SetSDControl, Wait_SD_Response, Read_SD_sectors), Apache License 2.0,
+ * Copyright EZ-FLASH. At the kernel's WAITCNT, 0: it never sets one. Reads only. */
+
+#define HP_WAITCNT_REG HP_REG16(0x04000204u)
+#define HP_REG32(a) (*(volatile uint32_t*)(a))
+#define HP_DMA3SAD HP_REG32(0x040000D4u)
+#define HP_DMA3DAD HP_REG32(0x040000D8u)
+#define HP_DMA3CNT HP_REG32(0x040000DCu)
+#define HP_OMEGA_DATA 0x09E00000u /* the blocks read, or while reading the card its state */
+#define HP_OMEGA_BUSY 0xEEE1u
+#define HP_OMEGA_WAIT_POLLS 0x100000u /* the kernel's */
+#define HP_OMEGA_TRIES 3u
+#define HP_OMEGA_RETRY_DELAY 5000u /* the kernel's delay(5000) before a second try */
+
+static void hp_omega_unlock(void) {
+    HP_REG16(0x09FE0000u) = 0xD200u;
+    HP_REG16(0x08000000u) = 0x1500u;
+    HP_REG16(0x08020000u) = 0xD200u;
+    HP_REG16(0x08040000u) = 0x1500u;
+}
+
+/* 0 off, 1 on, 3 reading */
+static void hp_omega_sd_control(uint16_t control) {
+    hp_omega_unlock();
+    HP_REG16(0x09400000u) = control;
+    HP_REG16(0x09FC0000u) = 0x1500u;
+}
+
+static bool hp_omega_wait(void) {
+    for(uint32_t n = 0; n < HP_OMEGA_WAIT_POLLS; n++) {
+        if(HP_REG16(HP_OMEGA_DATA) != HP_OMEGA_BUSY) return true;
+    }
+    return false;
+}
+
+bool hp_hal_omega_sd_read(uint32_t lba, uint8_t count, uint16_t* out) {
+    if(count < 1u || count > 4u) return false;
+    const uint16_t waitcnt = HP_WAITCNT_REG;
+    HP_WAITCNT_REG = 0;
+    bool ok = false;
+    hp_omega_sd_control(1);
+    for(uint32_t t = 0; t < HP_OMEGA_TRIES && !ok; t++) {
+        if(t) {
+            for(volatile uint32_t d = 0; d < HP_OMEGA_RETRY_DELAY; d++) {
+            }
+        }
+        hp_omega_unlock();
+        HP_REG16(0x09600000u) = (uint16_t)lba;
+        HP_REG16(0x09620000u) = (uint16_t)(lba >> 16);
+        HP_REG16(0x09640000u) = count;
+        HP_REG16(0x09FC0000u) = 0x1500u;
+        hp_omega_sd_control(3);
+        ok = hp_omega_wait();
+        hp_omega_sd_control(1);
+    }
+    if(ok) {
+        /* DMA3, 16-bit, both addresses incrementing, at once: the kernel's dmaCopy */
+        HP_DMA3SAD = HP_OMEGA_DATA;
+        HP_DMA3DAD = (uint32_t)out;
+        HP_DMA3CNT = 0x80000000u | (256u * count);
+        __asm__ volatile("" ::: "memory");
+    }
+    hp_omega_sd_control(0);
+    HP_WAITCNT_REG = waitcnt;
+    return ok;
+}

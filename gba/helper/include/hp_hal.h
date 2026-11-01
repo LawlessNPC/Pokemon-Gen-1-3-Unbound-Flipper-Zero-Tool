@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* What the helper's portable core needs from the machine it runs on. Implemented by
@@ -40,3 +41,7 @@ void hp_hal_id_delay(void);
  * BIOS writes the boot mode and the slave id (multiboot-and-save.md §2.1) */
 const uint8_t* hp_hal_own_header(void);
 void hp_hal_status(HpStatus s);
+/* Blocks lba .. lba + count - 1 (count 1..4) of an EZ-Flash Omega's microSD, read through the
+ * cart's SD window as the Omega's own kernel does (gba/hp_hal_gba.c): count * 256 halfwords into
+ * out, little-endian. false if the card never answered. */
+bool hp_hal_omega_sd_read(uint32_t lba, uint8_t count, uint16_t* out);

@@ -3,6 +3,7 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <hp_hal.h>
+#include "fake_fat.h"
 
 /* Test-only model of the GBA the helper's portable core runs on, behind hp_hal.h: its own header,
  * the cart ROM, the save chip, the timer and the status backdrop. The hp_hal_* functions act on
@@ -137,6 +138,13 @@ struct FakeGba {
     uint32_t timer_reads; /* flash reads since hp_hal_timer_start */
     uint64_t busy_us;
     uint64_t rom_bytes; /* ROM bytes read since the last fake_gba_take_busy_us */
+
+    /* An EZ-Flash Omega's microSD behind hp_hal_omega_sd_read (fake_gba_omega); NULL: none, and
+     * every read fails as a cart with no SD interface does */
+    FakeFat* omega;
+    uint32_t omega_reads; /* hp_hal_omega_sd_read calls */
+    bool omega_failing;
+    uint32_t omega_fail_after; /* while failing: reads still served before every one fails */
 };
 
 /* The own header gets a test logo at 0x04..0x9F (a fixed 156-byte pattern, not the real logo, but
@@ -184,6 +192,11 @@ void fake_gba_power_cut_partial(FakeGba* g, uint32_t ops);
  * was programmed since its cut gets its old 0 bits back (fake_gba_power_cut_partial). The array
  * otherwise, the cart, the chip's id, the faults the test injected and the counts stay. */
 void fake_gba_power_cycle(FakeGba* g);
+/* The Omega's card from now on (NULL: none). The card stays the caller's. */
+void fake_gba_omega(FakeGba* g, FakeFat* card);
+/* After `reads` more hp_hal_omega_sd_read calls, every one fails, as a card that stopped
+ * answering */
+void fake_gba_omega_fail_after(FakeGba* g, uint32_t reads);
 void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out);
 /* Time the GBA spent since the last call, in µs, as the fake models it: 300,000 per erase, 25 per
  * byte program, 1 per flash read (a sector CRC is 4096), and ROM reads at 7,000,000 per 16 MiB

@@ -479,3 +479,32 @@ uint16_t hp_hal_timer_units(void) {
 void hp_hal_status(HpStatus s) {
     fake_gba_now->status = s;
 }
+
+/* ---- The Omega's microSD ---- */
+
+void fake_gba_omega(FakeGba* g, FakeFat* card) {
+    g->omega = card;
+}
+
+void fake_gba_omega_fail_after(FakeGba* g, uint32_t reads) {
+    g->omega_failing = true;
+    g->omega_fail_after = reads;
+}
+
+bool hp_hal_omega_sd_read(uint32_t lba, uint8_t count, uint16_t* out) {
+    FakeGba* g = fake_gba_now;
+    g->omega_reads++;
+    if(!g->omega || count < 1u || count > 4u) return false;
+    if(g->omega_failing) {
+        if(g->omega_fail_after == 0) return false;
+        g->omega_fail_after--;
+    }
+    uint8_t b[512];
+    for(uint32_t k = 0; k < count; k++) {
+        if(!fake_fat_block(g->omega, lba + k, b)) return false;
+        for(uint32_t i = 0; i < 256u; i++) {
+            out[k * 256u + i] = (uint16_t)(b[2u * i] | b[2u * i + 1u] << 8);
+        }
+    }
+    return true;
+}
