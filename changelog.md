@@ -4,8 +4,8 @@
 **New Features**
 - Gen III cartridge save access (experimental): back up, browse and edit the party and boxes, write back with verify, restore, copy ROM
 - Cartridge is a second app, `pokemon_cart.fap`; install it next to `pokemon.fap`
-- Cartridge also works over a Game Boy Color link cable (GBA Normal mode), for Game Link modules whose SD line isn't connected; tested on hardware with Ruby (connect, backup, edit, write)
-- Writing is allowed only for English Ruby, Sapphire, FireRed and LeafGreen; not yet tested on hardware. The hardware checklist is `docs/gen3/hardware-test-3.md`
+- Cartridge also works over a Game Boy Color link cable (GBA Normal mode), for Game Link modules whose SD line isn't connected; tested on hardware with Ruby and FireRed (connect, backup, edit, write)
+- Writing is allowed only for English Ruby, Sapphire, FireRed and LeafGreen; tested on hardware with Ruby and FireRed, not yet with Sapphire or LeafGreen. The hardware checklist is `docs/gen3/hardware-test-3.md`
 
 ## Version 3.0
 **New Features**
