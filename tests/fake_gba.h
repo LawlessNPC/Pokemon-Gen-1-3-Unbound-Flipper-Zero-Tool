@@ -142,6 +142,10 @@ struct FakeGba {
     /* An EZ-Flash Omega's microSD behind hp_hal_omega_sd_read (fake_gba_omega); NULL: none, and
      * every read fails as a cart with no SD interface does */
     FakeFat* omega;
+    /* fake_gba_rom_word: one halfword of the ROM set, over the pattern and the strings */
+    bool rom_word_on;
+    uint32_t rom_word_off;
+    uint16_t rom_word;
     uint32_t omega_reads; /* hp_hal_omega_sd_read calls */
     bool omega_failing;
     uint32_t omega_fail_after; /* while failing: reads still served before every one fails */
@@ -194,6 +198,8 @@ void fake_gba_power_cut_partial(FakeGba* g, uint32_t ops);
 void fake_gba_power_cycle(FakeGba* g);
 /* The Omega's card from now on (NULL: none). The card stays the caller's. */
 void fake_gba_omega(FakeGba* g, FakeFat* card);
+/* The ROM halfword at off (even, inside or past rom_size) reads w from now on */
+void fake_gba_rom_word(FakeGba* g, uint32_t off, uint16_t w);
 /* After `reads` more hp_hal_omega_sd_read calls, every one fails, as a card that stopped
  * answering */
 void fake_gba_omega_fail_after(FakeGba* g, uint32_t reads);

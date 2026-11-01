@@ -1991,8 +1991,10 @@ TEST(test_result_texts) {
         [Gen3CartMultibootFailed] =
             "Power the GBA off,\nhold START+SELECT,\npower on, then Retry.",
         [Gen3CartLinkBusy] = "The link is busy.\nClose other link\napps, then Retry.",
+        [Gen3CartOmegaPending] = "Omega hasn't saved\nto its card. Switch\non normally once.",
+        [Gen3CartNoGame] = "Play Unbound on the\nOmega first, then\nconnect again.",
     };
-    for(int r = Gen3CartOk; r <= Gen3CartLinkBusy; r++) {
+    for(int r = Gen3CartOk; r <= Gen3CartNoGame; r++) {
         const char* t = gen3_cart_result_text((Gen3CartResult)r);
         ASSERT_TRUE(t != NULL);
         ASSERT_STR_EQ(t, want[r]);
@@ -2010,7 +2012,7 @@ TEST(test_result_texts) {
         }
         ASSERT_TRUE(lines <= 3);
     }
-    ASSERT_STR_EQ(gen3_cart_result_text((Gen3CartResult)(Gen3CartLinkBusy + 1)), "");
+    ASSERT_STR_EQ(gen3_cart_result_text((Gen3CartResult)(Gen3CartNoGame + 1)), "");
 }
 
 int main(void) {

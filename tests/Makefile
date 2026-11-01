@@ -1,6 +1,6 @@
 CC ?= cc
 CFLAGS = -std=c11 -Wall -Wextra -Werror -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -I..
-CFLAGS += -I../gba/helper/include
+CFLAGS += -I../gba/helper/include -DGEN3_TESTING
 
 BUILD = build
 TESTS = $(basename $(notdir $(wildcard test_*.c)))

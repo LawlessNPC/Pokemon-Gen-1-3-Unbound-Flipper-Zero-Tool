@@ -70,6 +70,8 @@
 #define GEN3_HCLI_OMEGA_SLOTS 3u
 #define GEN3_HSHA_INIT 1u
 #define GEN3_HSHA_FINAL 2u
+/* An Omega command's fail code for a path not on the card (hp_omega.h: HpOmegaNotFound) */
+#define GEN3_HOMEGA_NOT_FOUND 4u
 
 /* Status codes (multiboot-and-save.md §6.4). Any but OK comes with a fail code and offset. */
 #define GEN3_HST_OK 0x00u

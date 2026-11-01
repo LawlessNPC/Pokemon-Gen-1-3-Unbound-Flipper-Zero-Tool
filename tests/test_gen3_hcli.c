@@ -417,6 +417,7 @@ TEST(test_hcli_codes_match_helper) {
     _Static_assert(GEN3_HCMD_OMEGA_SHA256 == HP_CMD_OMEGA_SHA256, "OMEGA_SHA256");
     _Static_assert(GEN3_HSHA_INIT == HP_SHA_INIT && GEN3_HSHA_FINAL == HP_SHA_FINAL, "SHA flags");
     _Static_assert(GEN3_HCLI_OMEGA_PATH_MAX == HP_OMEGA_PATH_MAX, "path max");
+    _Static_assert(GEN3_HOMEGA_NOT_FOUND == HpOmegaNotFound, "not found");
     _Static_assert(GEN3_HST_OK == HP_ST_OK, "OK");
     _Static_assert(GEN3_HST_BAD_PACKET == HP_ST_BAD_PACKET, "BAD_PACKET");
     _Static_assert(GEN3_HST_BAD_ARG == HP_ST_BAD_ARG, "BAD_ARG");

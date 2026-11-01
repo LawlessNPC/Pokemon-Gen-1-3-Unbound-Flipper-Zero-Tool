@@ -90,6 +90,8 @@ typedef enum {
     Gen3CartStepRestoreCheck,
     Gen3CartStepRomRead,
     Gen3CartStepRomVerify,
+    Gen3CartStepOmegaFind, /* an EZ-Flash Omega: its pending-save flag, the card, the game */
+    Gen3CartStepRomHash, /* the Omega's game file, checked against Unbound 2.1.1.1 */
 } Gen3CartStep;
 
 /* How a job reports, from its own thread. Initialise it with designated initializers. cb may be
@@ -119,6 +121,8 @@ typedef enum {
     Gen3CartNoHelper,
     Gen3CartMultibootFailed,
     Gen3CartLinkBusy,
+    Gen3CartOmegaPending, /* an Omega DE still holds the game's save to copy to its card */
+    Gen3CartNoGame, /* the Omega's last game, or its save, isn't on the card as expected */
 } Gen3CartResult;
 
 /* At most 3 lines of at most 21 characters, broken with '\n'; "" for a value outside the enum */

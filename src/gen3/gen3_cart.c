@@ -57,6 +57,8 @@ const char* gen3_cart_result_text(Gen3CartResult r) {
         [Gen3CartMultibootFailed] =
             "Power the GBA off,\nhold START+SELECT,\npower on, then Retry.",
         [Gen3CartLinkBusy] = "The link is busy.\nClose other link\napps, then Retry.",
+        [Gen3CartOmegaPending] = "Omega hasn't saved\nto its card. Switch\non normally once.",
+        [Gen3CartNoGame] = "Play Unbound on the\nOmega first, then\nconnect again.",
     };
     return (unsigned)r < sizeof(texts) / sizeof(texts[0]) ? texts[r] : "";
 }

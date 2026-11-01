@@ -98,6 +98,10 @@ static const char* cart_screen_title(Gen3CartStep step) {
         return "Copying ROM";
     case Gen3CartStepRomVerify:
         return "Checking ROM";
+    case Gen3CartStepOmegaFind:
+        return "Finding the game";
+    case Gen3CartStepRomHash:
+        return "Checking game file";
     }
     return "Working";
 }

@@ -161,6 +161,9 @@ uint32_t fake_gba_take_busy_us(FakeGba* g) {
 /* ---- The cart ROM ---- */
 
 static uint8_t fake_rom_byte(const FakeGba* g, uint32_t off) {
+    if(g->rom_word_on && (off & ~1u) == g->rom_word_off) {
+        return (off & 1u) ? (uint8_t)(g->rom_word >> 8) : (uint8_t)g->rom_word;
+    }
     if(off >= g->rom_size) {
         if(g->rom_mirror && g->rom_size) return fake_rom_byte(g, off % g->rom_size);
         const uint16_t open = (uint16_t)(off >> 1);
@@ -507,4 +510,10 @@ bool hp_hal_omega_sd_read(uint32_t lba, uint8_t count, uint16_t* out) {
         }
     }
     return true;
+}
+
+void fake_gba_rom_word(FakeGba* g, uint32_t off, uint16_t w) {
+    g->rom_word_on = true;
+    g->rom_word_off = off & ~1u;
+    g->rom_word = w;
 }
