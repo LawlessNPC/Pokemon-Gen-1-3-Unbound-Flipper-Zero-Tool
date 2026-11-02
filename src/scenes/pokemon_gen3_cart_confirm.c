@@ -5,9 +5,10 @@
 #include <furi.h>
 #include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_edit.h>
+#include <src/gen3/gen3_ub_data.h>
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
-/* The Cartridge app's questions: one scene under seven ids, the one it is entered as kept in
+/* The Cartridge app's questions: one scene under eight ids, the one it is entered as kept in
  * Gen3CartLeave's scene state (gen3_cart_ui_confirm).
  * - Leave? (Gen3CartLeave): leaving the app drops the edits not written. Stay (or Back) returns to
  *   the scene below: the hub, or the instructions after a Retry.
@@ -21,7 +22,9 @@
  *   asks Restart copy? first, since it copies from the start, the old .part removed; Cancel (or
  *   Back) to the hub.
  * - Stop copying? (Gen3CartRomStop), over the ROM copy, which runs on: Stop cancels it; Keep
- *   going (or Back) returns to its progress. */
+ *   going (or Back) returns to its progress.
+ * - Put (Gen3CartOmegaPut), over the Unbound editor: the new Pokemon goes into the Omega's free
+ *   box slot chosen (gen3_omega_mon_put); Cancel drops it; Back returns to the editor. */
 
 static char gen3_cart_confirm_header[GEN3_CART_SCREEN_HEADER_SIZE];
 static char gen3_cart_confirm_text[GEN3_CART_SCREEN_ASK_SIZE];
@@ -74,17 +77,44 @@ static void gen3_cart_confirm_put_enter(PokemonFap* pokemon_fap) {
     gen3_cart_confirm_show(pokemon_fap, gen3_cart_confirm_header, "Cancel", "Put");
 }
 
+/* "Put BULBASAUR Lv5" / "in BOX 2\nslot 1?": the editor's new Unbound Pokemon */
+static void gen3_cart_confirm_omega_put_enter(PokemonFap* pokemon_fap) {
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    const Gen3UbMon* m = &ui->ub_edit.mon;
+    char species[GEN3_UB_NAME_LEN + 1u];
+    char box[9];
+
+    gen3_ub_species_name(gen3_ub_mon_species(m), species);
+    snprintf(box, sizeof(box), "BOX %u", (unsigned)ui->box + 1u);
+    gen3_cart_screen_put(
+        species,
+        gen3_ub_mon_level(m),
+        box,
+        ui->slot,
+        gen3_cart_confirm_header,
+        gen3_cart_confirm_text);
+    gen3_cart_confirm_show(pokemon_fap, gen3_cart_confirm_header, "Cancel", "Put");
+}
+
 /* "Cart: BRENDAN 12345" / "File: MAY 22222" / "Hall of Fame is kept.", and the edits it drops */
 static void gen3_cart_confirm_restore_enter(PokemonFap* pokemon_fap) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
     const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     Gen3SaveTrainer t;
-    const bool has = c && gen3_cart_trainer(c, &t);
+    bool has = false;
 
+    if(gen3_cart_ui_status(pokemon_fap)->omega) {
+        /* The Omega's save as the backup a restore is checked against holds it */
+        const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+        has = o && o->backup_current && o->has_trainer;
+        if(has) gen3_cart_screen_ub_trainer(&o->trainer, &t);
+    } else {
+        has = c && gen3_cart_trainer(c, &t);
+    }
     gen3_cart_screen_restore_ask(
         has ? &t : NULL,
         &ui->restore_trainer,
-        c ? gen3_cart_changes(c) : 0,
+        gen3_cart_ui_changes(pokemon_fap),
         gen3_cart_confirm_text);
     gen3_cart_confirm_show(pokemon_fap, "Restore backup?", "Cancel", "Restore");
 }
@@ -143,6 +173,9 @@ void pokemon_scene_gen3_cart_confirm_on_enter(void* context) {
         snprintf(gen3_cart_confirm_text, sizeof(gen3_cart_confirm_text), "You can resume\nlater.");
         gen3_cart_confirm_show(pokemon_fap, "Stop copying?", "Keep going", "Stop");
         break;
+    case PokemonSceneGen3CartOmegaPut:
+        gen3_cart_confirm_omega_put_enter(pokemon_fap);
+        break;
     default:
         gen3_cart_screen_leave(gen3_cart_ui_changes(pokemon_fap), gen3_cart_confirm_text);
         gen3_cart_confirm_show(pokemon_fap, "Leave?", "Stay", "Leave");
@@ -168,6 +201,22 @@ static void gen3_cart_confirm_put(PokemonFap* pokemon_fap) {
     } else {
         gen3_cart_ui_mon_result(pokemon_fap, true, m);
         scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartResult);
+    }
+}
+
+/* The Omega's Put: the new Pokemon into the free box slot, which gen3_omega_mon_put checks is free */
+static void gen3_cart_confirm_omega_put(PokemonFap* pokemon_fap) {
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    Gen3CartMon m = Gen3CartMonBadArg;
+
+    if(o && ui->ub_new) m = gen3_omega_mon_put(o, ui->box, ui->slot, &ui->ub_edit.mon, true);
+    ui->ub_new = false;
+    if(m == Gen3CartMonOk) {
+        scene_manager_search_and_switch_to_previous_scene(
+            pokemon_fap->scene_manager, PokemonSceneGen3CartOmegaSlots);
+    } else {
+        gen3_cart_ui_omega_mon_result(pokemon_fap, true, m);
     }
 }
 
@@ -205,6 +254,9 @@ static void gen3_cart_confirm_right(PokemonFap* pokemon_fap, uint32_t alias) {
         gen3_cart_ui_stop_job(pokemon_fap);
         scene_manager_previous_scene(pokemon_fap->scene_manager);
         break;
+    case PokemonSceneGen3CartOmegaPut:
+        gen3_cart_confirm_omega_put(pokemon_fap);
+        break;
     default:
         gen3_cart_ui_leave(pokemon_fap);
         break;
@@ -216,6 +268,11 @@ static void gen3_cart_confirm_left(PokemonFap* pokemon_fap, uint32_t alias) {
 
     if(alias == PokemonSceneGen3CartPut) {
         gen3_cart_confirm_put_cancel(pokemon_fap);
+    } else if(alias == PokemonSceneGen3CartOmegaPut) {
+        /* Cancel: the new Pokemon goes nowhere */
+        gen3_cart_ui_get(pokemon_fap)->ub_new = false;
+        scene_manager_search_and_switch_to_previous_scene(
+            pokemon_fap->scene_manager, PokemonSceneGen3CartOmegaSlots);
     } else if(alias == PokemonSceneGen3CartRomAsk && ui->rom_resume && !ui->rom_restart) {
         /* Restart: asked again before the .part is removed */
         gen3_cart_confirm_rom_restart(pokemon_fap);
@@ -248,7 +305,8 @@ bool pokemon_scene_gen3_cart_confirm_on_event(void* context, SceneManagerEvent e
         gen3_cart_slot_reedit(pokemon_fap);
         consumed = true;
     }
-    /* Any other Back is the scene manager's: Stay, Cancel, or Keep going */
+    /* Any other Back is the scene manager's: Stay, Cancel, Keep going, or the Unbound editor again
+     * under the Omega's Put */
 
     return consumed;
 }

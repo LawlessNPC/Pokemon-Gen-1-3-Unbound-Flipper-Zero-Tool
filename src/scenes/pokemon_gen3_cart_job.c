@@ -7,7 +7,8 @@
  * result. Coming back to it (from a scene over it) finds the job running and doesn't start it
  * again. Back stops a job that can stop; a ROM copy asks first (Gen3CartRomStop), and runs on
  * under the question; a Write, Restore or Discard runs to its end. A Restore check that passed
- * goes on to Restore backup? instead of a result. */
+ * goes on to Restore backup? instead of a result, and so does a Back up again that an Omega's
+ * Restore (gen3_cart_ui_omega_restore) ran first to the restore list. */
 
 /* The session takes the job once the last one has ended; until then it is tried on every tick */
 static void gen3_cart_job_start(PokemonFap* pokemon_fap) {
@@ -23,7 +24,18 @@ static void gen3_cart_job_start(PokemonFap* pokemon_fap) {
 static void gen3_cart_job_end(PokemonFap* pokemon_fap, const Gen3CartSessionStatus* st) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
     SceneManager* scene_manager = pokemon_fap->scene_manager;
+    const bool restore_next = ui->restore_next;
 
+    ui->restore_next = false;
+    if(restore_next && ui->job == Gen3CartJobBackup && st->result == Gen3CartOk) {
+        /* Restore on an Omega's WrittenShared, which needed this backup: the restore list now */
+        const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+        if(o && gen3_omega_browsable(o)) {
+            scene_manager_search_and_switch_to_previous_scene(scene_manager, PokemonSceneGen3Cart);
+            scene_manager_next_scene(scene_manager, PokemonSceneGen3CartRestore);
+            return;
+        }
+    }
     if(ui->job == Gen3CartJobRestoreCheck && st->result == Gen3CartOk && st->restore_has_trainer) {
         /* The file is a backup of this game: ask, over the hub, which Cancel returns to */
         ui->restore_trainer = st->restore_trainer;

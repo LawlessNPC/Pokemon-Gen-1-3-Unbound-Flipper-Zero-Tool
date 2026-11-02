@@ -3,8 +3,8 @@
 #include <furi.h>
 
 /* What a job, or a step of the Cartridge scenes, came to: the header and text the ui holds, OK,
- * and Retry when the ui's retry_mode offers one. OK (or Back) returns to the scene result_back
- * names. */
+ * and Retry (Restore, for an Omega's WrittenShared) when the ui's retry_mode offers one. OK (or
+ * Back) returns to the scene result_back names. */
 
 void pokemon_scene_gen3_cart_result_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
@@ -21,7 +21,10 @@ void pokemon_scene_gen3_cart_result_on_enter(void* context) {
         AlignCenter,
         AlignTop);
     dialog_ex_set_center_button_text(dialog_ex, "OK");
-    if(ui->retry_mode != Gen3CartRetryNone) dialog_ex_set_right_button_text(dialog_ex, "Retry");
+    if(ui->retry_mode != Gen3CartRetryNone) {
+        dialog_ex_set_right_button_text(
+            dialog_ex, ui->retry_mode == Gen3CartRetryRestore ? "Restore" : "Retry");
+    }
     view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewDialogEx);
 }
 
@@ -54,6 +57,9 @@ static void gen3_cart_result_retry(PokemonFap* pokemon_fap) {
         break;
     case Gen3CartRetryReconnect:
         gen3_cart_ui_run_job(pokemon_fap, Gen3CartJobReconnect, NULL);
+        break;
+    case Gen3CartRetryRestore:
+        gen3_cart_ui_omega_restore(pokemon_fap);
         break;
     case Gen3CartRetryNone:
         break;

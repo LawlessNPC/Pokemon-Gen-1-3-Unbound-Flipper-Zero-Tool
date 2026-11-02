@@ -10,6 +10,7 @@
 #include <gblink/include/gblink.h>
 #include <gblink/include/gblink_pinconf.h>
 
+#include <src/gen3/gen3_cart_screen.h>
 #include <src/gen3/gen3_hcli.h>
 #include <src/gen3/gen3_hlink.h>
 #include <src/gen3/gen3_omega.h>
@@ -151,8 +152,23 @@ static void cart_unlock(Gen3CartSession* s) {
     furi_check(furi_mutex_release(s->lock) == FuriStatusOk);
 }
 
+static void cart_log_put(Gen3CartSession* s, int len);
+
 static void cart_progress(void* ctx, Gen3CartStep step, uint32_t done, uint32_t total) {
     Gen3CartSession* s = ctx;
+    /* An Omega's sector writes, one line each: the write test, the new slot's 14, then 30 and 31
+     * if an edit changed them */
+    if(s->status.omega && step == Gen3CartStepProgram) {
+        cart_log_put(
+            s,
+            snprintf(
+                s->line,
+                sizeof(s->line),
+                "%08lu omega program %lu/%lu\n",
+                (unsigned long)furi_get_tick(),
+                (unsigned long)done,
+                (unsigned long)total));
+    }
     cart_lock(s);
     s->status.step = step;
     s->status.done = done;
@@ -710,18 +726,67 @@ static Gen3CartResult cart_job_restore_check(Gen3CartSession* s, const char* nam
     return r;
 }
 
+/* An Omega's backup file's trainer, as the status gives a RestoreCheck's */
+static Gen3CartResult cart_job_omega_restore_check(Gen3CartSession* s, const char* name) {
+    Gen3UbTrainer ut;
+    Gen3SaveTrainer t;
+    bool has = false;
+    memset(&ut, 0, sizeof(ut));
+    memset(&t, 0, sizeof(t));
+    const Gen3CartResult r = gen3_omega_restore_check(&s->omega, name, &ut, &has);
+    if(has) gen3_cart_screen_ub_trainer(&ut, &t);
+    cart_lock(s);
+    s->status.restore_trainer = t;
+    s->status.restore_has_trainer = has;
+    cart_unlock(s);
+    return r;
+}
+
+/* An Omega's jobs (gen3_omega.h), with the stamp the backups take; a write and a restore end with
+ * a new backup, which the log shows as a connect's does */
+static Gen3CartResult cart_job_omega(Gen3CartSession* s, Gen3CartJob job, const char* arg) {
+    Gen3Omega* o = &s->omega;
+    Gen3CartResult r = Gen3CartBadArg;
+    switch(job) {
+    case Gen3CartJobBackup:
+        r = gen3_omega_backup(o, s->stamp);
+        cart_log_omega_backup(s);
+        break;
+    case Gen3CartJobWrite:
+        CART_LOG(
+            s,
+            "omega write changes %u dirty %08lx",
+            (unsigned)gen3_omega_changes(o),
+            (unsigned long)o->dirty);
+        r = gen3_omega_write(o, s->stamp);
+        cart_log_omega_backup(s);
+        break;
+    case Gen3CartJobDiscard:
+        r = gen3_omega_discard(o);
+        break;
+    case Gen3CartJobRestoreCheck:
+        r = cart_job_omega_restore_check(s, arg);
+        break;
+    case Gen3CartJobRestore:
+        CART_LOG(s, "omega restore %s", arg ? arg : "-");
+        r = gen3_omega_restore(o, arg, s->stamp);
+        cart_log_omega_backup(s);
+        break;
+    case Gen3CartJobConnect:
+    case Gen3CartJobRom:
+    case Gen3CartJobReconnect:
+        break;
+    }
+    return r;
+}
+
 static Gen3CartResult cart_job(Gen3CartSession* s, Gen3CartJob job) {
     Gen3Cart* c = &s->cart;
     const char* arg = s->req_has_arg ? s->req_arg : NULL;
     if(job == Gen3CartJobConnect) return cart_job_connect(s);
     if(!s->cart_ready) return Gen3CartBadArg; /* no Connect has loaded the helper yet */
-    if(s->status.omega) {
-        /* An Omega: back up only (multiboot-and-save.md §8) */
-        if(job != Gen3CartJobBackup) return Gen3CartBadArg;
-        const Gen3CartResult r = gen3_omega_backup(&s->omega, s->stamp);
-        cart_log_omega_backup(s);
-        return r;
-    }
+    /* An Omega: no ROM copy or Reconnect (multiboot-and-save.md §8) */
+    if(s->status.omega) return cart_job_omega(s, job, arg);
     switch(job) {
     case Gen3CartJobBackup:
         return gen3_cart_backup(c, s->stamp);

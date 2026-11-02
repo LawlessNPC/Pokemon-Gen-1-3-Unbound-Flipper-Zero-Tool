@@ -9,12 +9,16 @@
 #include <src/gen3/gen3_omega.h>
 #include <src/gen3/gen3_pk3.h>
 #include <src/gen3/gen3_save.h>
+#include <src/gen3/gen3_ub_data.h>
+#include <src/gen3/gen3_ub_edit.h>
 
 /* What the Cartridge app's screens show and offer, decided from the session's status and the
  * cart: the progress screen, the hub's items, Cart info, the result after a job, the leave
- * warning, the party and box screens, and the restore and ROM copy questions. Pure C, no heap, no
- * file-scope state, so the host tests check every text fits the 128-pixel screen, which breaks
- * lines only at '\n': a line of at most 21 characters, a title or header of at most 16. */
+ * warning, the party and box screens, the restore and ROM copy questions, and an EZ-Flash
+ * Omega's Unbound editor. Pure C, no heap, no file-scope state, so the host tests check every
+ * text fits the 128-pixel screen, which breaks lines only at '\n': a line of at most 21
+ * characters, a title or header of at most 16. The Unbound editor's names come through the
+ * gen3_ub_data readers, from whatever source is installed. */
 
 #define GEN3_CART_SCREEN_LINE_LEN 21u
 #define GEN3_CART_SCREEN_TITLE_LEN 16u
@@ -26,6 +30,9 @@ typedef enum {
     Gen3CartRetryNone, /* no Retry: OK only */
     Gen3CartRetryConnect, /* back to the instructions, to send the helper again */
     Gen3CartRetryReconnect, /* the Reconnect job */
+    /* An Omega's write or restore that left boxes 20-22 in doubt: "Restore", the restore list
+     * (after a new backup, which the restore needs, if the write dropped it) */
+    Gen3CartRetryRestore,
 } Gen3CartRetry;
 
 /* Back on the progress screen while job runs */
@@ -319,3 +326,79 @@ void gen3_cart_screen_time_left(
     uint32_t total,
     uint32_t elapsed_ms,
     char out[GEN3_CART_SCREEN_LEFT_SIZE]);
+
+/* ---- An EZ-Flash Omega: the Unbound editor, and writing its changes ---- */
+
+/* The texts after an Omega's write or restore that ended Ok, and two the Unbound scenes show */
+#define GEN3_CART_SCREEN_UB_WRITTEN "Written and verified.\nStart Unbound from\nthe Omega menu."
+#define GEN3_CART_SCREEN_UB_RESTORED "Restored, verified.\nStart Unbound from\nthe Omega menu."
+#define GEN3_CART_SCREEN_UB_NO_OWNER "No Pokemon in the\nparty to copy the\ntrainer from."
+#define GEN3_CART_SCREEN_UB_NO_BACKUPS "No Unbound backup\nin gen3/backups."
+
+/* The Omega's hub items beyond Cart info (o NULL: a job runs, none): "Party and boxes" and
+ * "Restore backup" while browsable (gen3_omega_browsable), "Write changes (<n>)" and "Discard
+ * changes" while gen3_omega_changes is over 0, "Back up again" while connected. A cart's own items
+ * (writing_off, reconnect, rom) never. */
+void gen3_cart_screen_omega_hub(const Gen3Omega* o, Gen3CartScreenHub* out);
+
+/* An Omega's result screen after job ended with r: the header and text a cart's have (as
+ * gen3_cart_screen_result's for a job that wasn't stopped), Retry as gen3_cart_screen_omega_retry.
+ * But a Write that ended Ok says GEN3_CART_SCREEN_UB_WRITTEN, a Restore GEN3_CART_SCREEN_UB_RESTORED;
+ * and WrittenShared, after which the game loads the new save, is headed "Written" ("Restored") and
+ * offers Restore (Gen3CartRetryRestore). */
+void gen3_cart_screen_omega_result(Gen3CartJob job, Gen3CartResult r, Gen3CartScreenResult* out);
+
+/* The editor's rows, one per field, in this order: "Pokemon: <NAME>", "Level: <n>" ("?" unknown),
+ * "Nickname: <name>", "Held item: <name or None>", "Move 1: <name or ->" .. "Move 4: ...",
+ * "Nature: <name>" (gen3_nature_name), "Ability: <name>" (the species' ability in the record's
+ * slot, its first where it has none there), "Shiny: Yes/No", "IVs: all 31 / all 0 / as loaded",
+ * "EVs: <total>". A name too long is cut to the row. */
+#define GEN3_CART_SCREEN_UB_ROWS 13u
+void gen3_cart_screen_ub_edit_rows(
+    const Gen3UbEditor* e,
+    char rows[GEN3_CART_SCREEN_UB_ROWS][GEN3_CART_SCREEN_ROW_SIZE]);
+
+/* A slot's row (gen3_cart_screen_ub_row) with '*' after it when changed and not written */
+void gen3_cart_screen_ub_mark(bool changed, char row[GEN3_CART_SCREEN_ROW_SIZE]);
+
+/* The EV list's row for stat 0..5 (HP, Atk, Def, Spe, SpA, SpD): "HP: 252" */
+void gen3_cart_screen_ub_ev_label(uint8_t stat, uint8_t value, char out[GEN3_CART_SCREEN_ROW_SIZE]);
+
+/* The trainer as the restore question takes it (gen3_cart_screen_restore_ask): name, gender and
+ * ids; no play time */
+void gen3_cart_screen_ub_trainer(const Gen3UbTrainer* in, Gen3SaveTrainer* out);
+
+/* The id at index of a sorted list (gen3_ub_sorted) and its name; false (out "#<id>" or "") if
+ * either can't be read */
+#define GEN3_CART_SCREEN_UB_NAME_SIZE 18u /* the longest name, an item's, and its terminator */
+bool gen3_cart_screen_ub_sorted_name(
+    Gen3UbSort s,
+    uint16_t index,
+    uint16_t* id,
+    char out[GEN3_CART_SCREEN_UB_NAME_SIZE]);
+
+/* A letter picker's pages over a sorted list: a page per first character of the names, in list
+ * order; a character with more than GEN3_CART_SCREEN_UB_PAGE_MAX names gets as many even pages as
+ * it needs, each labelled by its first and last names' first 3 characters ("SAB-SHI"), so that no
+ * list a picker shows is longer. */
+#define GEN3_CART_SCREEN_UB_PAGE_MAX 64u
+#define GEN3_CART_SCREEN_UB_PAGES 48u /* room for any of the three lists' pages */
+typedef struct {
+    uint16_t first; /* the list index of its first name */
+    uint16_t count;
+    char label[8]; /* "S", or "SAB-SHI" */
+} Gen3CartScreenUbPage;
+/* How many pages, at most max; 0 if a name can't be read or there are more than max. Each
+ * character's end is found by bisection, a few hundred reads in all. */
+size_t gen3_cart_screen_ub_pages(Gen3UbSort s, Gen3CartScreenUbPage* out, size_t max);
+
+/* A file in the backups folder an Omega's restore takes, as gen3_omega_backup names them:
+ * UNBOUND_<...>.sav with something between, no '/', and short enough that "backups/" and it fit
+ * a job's name (GEN3_CART_NAME_MAX) */
+bool gen3_cart_screen_ub_backup_ok(const char* name);
+/* Its row in the restore list: "1101-120000 12345" (MMDD-HHMMSS of the stamp, then the trainer id
+ * or "nosave"), or what is between UNBOUND_ and .sav for a name not of that shape */
+void gen3_cart_screen_ub_backup_label(const char* name, char out[GEN3_CART_SCREEN_ROW_SIZE]);
+/* a was made after b: its stamp (after the last '_') is later, or the same and its name sorts
+ * after b's */
+bool gen3_cart_screen_ub_backup_newer(const char* a, const char* b);

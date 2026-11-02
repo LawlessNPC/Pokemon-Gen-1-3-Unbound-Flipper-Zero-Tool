@@ -3,6 +3,9 @@
 #include <stdio.h>
 #include <string.h>
 
+#include <src/gen3/gen3_data.h>
+#include <src/gen3/gen3_text.h>
+
 #define CART_SCREEN_CABLE "Cable: plug in/swap ends"
 #define CART_SCREEN_BACK_STOP "Back: stop"
 #define CART_SCREEN_NO_POWER_OFF "Do not power off"
@@ -792,4 +795,258 @@ void gen3_cart_screen_wrap(char* text) {
             space = NULL;
         }
     }
+}
+
+/* ---- An EZ-Flash Omega: the Unbound editor, and writing its changes ---- */
+
+void gen3_cart_screen_omega_hub(const Gen3Omega* o, Gen3CartScreenHub* out) {
+    memset(out, 0, sizeof(*out));
+    if(!o) return;
+    const bool changes = gen3_omega_changes(o) > 0;
+    out->browse = gen3_omega_browsable(o);
+    out->write = changes;
+    out->discard = changes;
+    out->backup = o->connected;
+    out->restore = gen3_omega_browsable(o);
+}
+
+void gen3_cart_screen_omega_result(Gen3CartJob job, Gen3CartResult r, Gen3CartScreenResult* out) {
+    out->header = cart_screen_header(job, r);
+    out->text = gen3_cart_result_text(r);
+    out->retry = gen3_cart_screen_omega_retry(job, r);
+    const bool slot_job = job == Gen3CartJobWrite || job == Gen3CartJobRestore;
+    if(slot_job && r == Gen3CartWrittenShared) {
+        out->header = job == Gen3CartJobWrite ? "Written" : "Restored";
+        out->retry = Gen3CartRetryRestore;
+    }
+    if(job == Gen3CartJobWrite && r == Gen3CartOk) out->text = GEN3_CART_SCREEN_UB_WRITTEN;
+    if(job == Gen3CartJobRestore && r == Gen3CartOk) out->text = GEN3_CART_SCREEN_UB_RESTORED;
+}
+
+/* The ability the record has: the species' in its slot, or its first where it has none there */
+static void cart_screen_ub_ability(const Gen3UbMon* m, char out[GEN3_CART_SCREEN_UB_NAME_SIZE]) {
+    uint8_t a[3] = {0, 0, 0};
+    const uint8_t slot = gen3_ub_ability_slot(m);
+    uint8_t ability = 0;
+    if(gen3_ub_species_abilities(gen3_ub_mon_species(m), a)) {
+        ability = slot < 3u && a[slot] != 0 ? a[slot] : a[0];
+    }
+    gen3_ub_ability_name(ability, out);
+}
+
+static const char* cart_screen_ub_ivs(const Gen3UbMon* m) {
+    uint8_t iv[6];
+    bool all31 = true, all0 = true;
+    gen3_ub_mon_ivs(m, iv);
+    for(uint8_t i = 0; i < 6u; i++) {
+        all31 = all31 && iv[i] == 31u;
+        all0 = all0 && iv[i] == 0u;
+    }
+    return all31 ? "all 31" : all0 ? "all 0" : "as loaded";
+}
+
+void gen3_cart_screen_ub_edit_rows(
+    const Gen3UbEditor* e,
+    char rows[GEN3_CART_SCREEN_UB_ROWS][GEN3_CART_SCREEN_ROW_SIZE]) {
+    const size_t size = GEN3_CART_SCREEN_ROW_SIZE;
+    const Gen3UbMon* m = &e->mon;
+    char name[GEN3_CART_SCREEN_UB_NAME_SIZE];
+    uint8_t nick[GEN3_UB_MON_NICK];
+    uint16_t moves[4];
+    uint8_t evs[6];
+
+    gen3_ub_species_name(gen3_ub_mon_species(m), name);
+    snprintf(rows[0], size, "Pokemon: %.10s", name);
+    const uint8_t level = gen3_ub_mon_level(m);
+    if(level) {
+        snprintf(rows[1], size, "Level: %u", (unsigned)level);
+    } else {
+        snprintf(rows[1], size, "Level: ?");
+    }
+    gen3_ub_mon_nickname(m, nick);
+    gen3_text_decode(nick, sizeof(nick), name, GEN3_UB_MON_NICK + 1u);
+    snprintf(rows[2], size, "Nickname: %.10s", name);
+    const uint16_t item = gen3_ub_mon_item(m);
+    if(item) {
+        gen3_ub_item_name(item, name);
+    } else {
+        snprintf(name, sizeof(name), "None");
+    }
+    snprintf(rows[3], size, "Held item: %.12s", name);
+    gen3_ub_mon_moves(m, moves);
+    for(uint8_t i = 0; i < 4u; i++) {
+        if(moves[i]) {
+            gen3_ub_move_name(moves[i], name);
+        } else {
+            snprintf(name, sizeof(name), "-");
+        }
+        snprintf(rows[4u + i], size, "Move %c: %.12s", (char)('1' + i), name);
+    }
+    snprintf(rows[8], size, "Nature: %.15s", gen3_nature_name(gen3_ub_nature(m)));
+    cart_screen_ub_ability(m, name);
+    snprintf(rows[9], size, "Ability: %.14s", name);
+    snprintf(rows[10], size, "Shiny: %s", gen3_ub_shiny(m) ? "Yes" : "No");
+    snprintf(rows[11], size, "IVs: %s", cart_screen_ub_ivs(m));
+    gen3_ub_mon_evs(m, evs);
+    unsigned total = 0;
+    for(uint8_t i = 0; i < 6u; i++) total += evs[i];
+    snprintf(rows[12], size, "EVs: %u", total);
+}
+
+void gen3_cart_screen_ub_mark(bool changed, char row[GEN3_CART_SCREEN_ROW_SIZE]) {
+    const size_t n = strlen(row);
+    if(!changed || n + 1u >= GEN3_CART_SCREEN_ROW_SIZE) return;
+    row[n] = '*';
+    row[n + 1u] = '\0';
+}
+
+void gen3_cart_screen_ub_ev_label(uint8_t stat, uint8_t value, char out[GEN3_CART_SCREEN_ROW_SIZE]) {
+    static const char names[6][4] = {"HP", "Atk", "Def", "Spe", "SpA", "SpD"};
+    snprintf(
+        out, GEN3_CART_SCREEN_ROW_SIZE, "%.3s: %u", stat < 6u ? names[stat] : "?", (unsigned)value);
+}
+
+void gen3_cart_screen_ub_trainer(const Gen3UbTrainer* in, Gen3SaveTrainer* out) {
+    memset(out, 0, sizeof(*out));
+    memcpy(out->name, in->name, sizeof(out->name));
+    out->name[sizeof(out->name) - 1u] = '\0';
+    out->gender = in->gender;
+    out->tid = in->tid;
+    out->sid = in->sid;
+}
+
+bool gen3_cart_screen_ub_sorted_name(
+    Gen3UbSort s,
+    uint16_t index,
+    uint16_t* id,
+    char out[GEN3_CART_SCREEN_UB_NAME_SIZE]) {
+    out[0] = '\0';
+    *id = gen3_ub_sorted(s, index);
+    if(*id == 0) return false;
+    switch(s) {
+    case Gen3UbSortSpecies:
+        return gen3_ub_species_name(*id, out);
+    case Gen3UbSortMoves:
+        return gen3_ub_move_name(*id, out);
+    case Gen3UbSortItems:
+        return gen3_ub_item_name(*id, out);
+    }
+    return false;
+}
+
+/* The first character of the name at index; 0 if it can't be read */
+static char
+    cart_screen_ub_first(Gen3UbSort s, uint16_t index, char name[GEN3_CART_SCREEN_UB_NAME_SIZE]) {
+    uint16_t id;
+    return gen3_cart_screen_ub_sorted_name(s, index, &id, name) ? name[0] : '\0';
+}
+
+/* The pages of the names from first to end, all starting with the same character; false if a name
+ * can't be read or there is no room */
+static bool cart_screen_ub_split(
+    Gen3UbSort s,
+    uint16_t first,
+    uint16_t end,
+    Gen3CartScreenUbPage* out,
+    size_t max,
+    size_t* n) {
+    const uint32_t names = (uint32_t)end - first;
+    const uint32_t pages =
+        (names + GEN3_CART_SCREEN_UB_PAGE_MAX - 1u) / GEN3_CART_SCREEN_UB_PAGE_MAX;
+    char a[GEN3_CART_SCREEN_UB_NAME_SIZE], b[GEN3_CART_SCREEN_UB_NAME_SIZE];
+    for(uint32_t k = 0; k < pages; k++) {
+        if(*n >= max) return false;
+        Gen3CartScreenUbPage* p = &out[(*n)++];
+        p->first = (uint16_t)(first + names * k / pages);
+        p->count = (uint16_t)(first + names * (k + 1u) / pages - p->first);
+        if(!cart_screen_ub_first(s, p->first, a)) return false;
+        if(pages == 1u) {
+            snprintf(p->label, sizeof(p->label), "%c", a[0]);
+        } else {
+            if(!cart_screen_ub_first(s, (uint16_t)(p->first + p->count - 1u), b)) return false;
+            snprintf(p->label, sizeof(p->label), "%.3s-%.3s", a, b);
+        }
+    }
+    return true;
+}
+
+size_t gen3_cart_screen_ub_pages(Gen3UbSort s, Gen3CartScreenUbPage* out, size_t max) {
+    const uint16_t count = gen3_ub_sorted_count(s);
+    char name[GEN3_CART_SCREEN_UB_NAME_SIZE];
+    size_t n = 0;
+    uint16_t i = 0;
+    while(i < count) {
+        const char c = cart_screen_ub_first(s, i, name);
+        if(!c) return 0;
+        /* The list is sorted by the names' bytes: c's names end where the first character changes */
+        uint16_t lo = (uint16_t)(i + 1u), hi = count;
+        while(lo < hi) {
+            const uint16_t mid = (uint16_t)(lo + (hi - lo) / 2u);
+            const char m = cart_screen_ub_first(s, mid, name);
+            if(!m) return 0;
+            if(m == c) {
+                lo = (uint16_t)(mid + 1u);
+            } else {
+                hi = mid;
+            }
+        }
+        if(!cart_screen_ub_split(s, i, lo, out, max, &n)) return 0;
+        i = lo;
+    }
+    return n;
+}
+
+#define CART_SCREEN_UB_PREFIX "UNBOUND_"
+#define CART_SCREEN_UB_SUFFIX ".sav"
+
+bool gen3_cart_screen_ub_backup_ok(const char* name) {
+    const size_t n = strlen(name);
+    const size_t pre = sizeof(CART_SCREEN_UB_PREFIX) - 1u;
+    const size_t suf = sizeof(CART_SCREEN_UB_SUFFIX) - 1u;
+    const size_t dir = sizeof(GEN3_CART_BACKUP_DIR "/") - 1u;
+    return n > pre + suf && dir + n < GEN3_CART_NAME_MAX &&
+           strncmp(name, CART_SCREEN_UB_PREFIX, pre) == 0 &&
+           strcmp(name + n - suf, CART_SCREEN_UB_SUFFIX) == 0 && strchr(name, '/') == NULL;
+}
+
+/* Where the stamp starts (after the last '_'), and its length up to ".sav" */
+static const char* cart_screen_ub_stamp(const char* name, size_t* len) {
+    const char* u = strrchr(name, '_');
+    const char* start = u ? u + 1 : name;
+    const char* dot = strrchr(start, '.');
+    *len = dot ? (size_t)(dot - start) : strlen(start);
+    return start;
+}
+
+void gen3_cart_screen_ub_backup_label(const char* name, char out[GEN3_CART_SCREEN_ROW_SIZE]) {
+    const size_t pre = sizeof(CART_SCREEN_UB_PREFIX) - 1u;
+    const char* mid = strncmp(name, CART_SCREEN_UB_PREFIX, pre) == 0 ? name + pre : name;
+    const char* dot = strrchr(mid, '.');
+    const int mid_len = (int)(dot ? (size_t)(dot - mid) : strlen(mid));
+    const char* u = memchr(mid, '_', (size_t)mid_len);
+    size_t len = 0;
+    const char* stamp = cart_screen_ub_stamp(mid, &len);
+    /* YYYYMMDD-HHMMSS, then "-2" .. if that name was taken */
+    if(u && stamp > u && len >= CART_SCREEN_STAMP_LEN && stamp[8] == '-') {
+        snprintf(
+            out,
+            GEN3_CART_SCREEN_ROW_SIZE,
+            "%.*s %.*s",
+            (int)(len - 4u > 13u ? 13u : len - 4u),
+            stamp + 4,
+            (int)(u - mid > 8 ? 8 : u - mid),
+            mid);
+    } else {
+        snprintf(out, GEN3_CART_SCREEN_ROW_SIZE, "%.*s", mid_len, mid);
+    }
+}
+
+bool gen3_cart_screen_ub_backup_newer(const char* a, const char* b) {
+    size_t la = 0, lb = 0;
+    const char* sa = cart_screen_ub_stamp(a, &la);
+    const char* sb = cart_screen_ub_stamp(b, &lb);
+    const int c = strncmp(sa, sb, la < lb ? la : lb);
+    if(c != 0) return c > 0;
+    if(la != lb) return la > lb;
+    return strcmp(a, b) > 0;
 }

@@ -11,6 +11,8 @@
 #include <src/gen3/gen3_cart_furi.h>
 #include <src/gen3/gen3_cart_screen.h>
 #include <src/gen3/gen3_pkm.h>
+#include <src/gen3/gen3_ub_edit.h>
+#include <src/gen3/gen3_ub_mon.h>
 
 /* The Cartridge app's scenes' shared header (pokemon_gen3_cart*.c): their state, kept from the
  * first Connect until the app exits, and the helpers they share, defined in pokemon_gen3_cart.c
@@ -23,7 +25,10 @@
 /* Custom events of the Cartridge scenes, clear of scene ids and the other Gen III events. A tick
  * still queued when a scene is left reaches the next one, which ignores it. The scenes' own
  * submenu items and events are 0x473305xx too, each file's in a range of its own: the hub
- * 0x11-0x1F, the boxes 0x20-0x2E, the slots 0x40-0x5D, the slot router 0x60-0x6F. */
+ * 0x11-0x1F, the boxes 0x20-0x2E, the slots 0x40-0x5D, the slot router 0x60-0x6F; an Omega's
+ * boxes 0x60-0x78 (never up with the router), slots 0x80-0x9E, editor 0xA0-0xAF, number, text
+ * and pick 0xB0-0xBF, restore list 0xC0-0xDF. The Unbound pick scene's rows are 0x47330600 -
+ * 0x473306FF and 0x47331000 + a list index. */
 #define GEN3_CART_EVENT_TICK 0x47330501u /* the progress view's 250 ms timer */
 #define GEN3_CART_EVENT_BACK 0x47330502u /* Back on the progress view */
 #define GEN3_CART_EVENT_LEFT 0x47330503u /* a dialog's buttons (gen3_cart_ui_dialog) */
@@ -31,6 +36,24 @@
 #define GEN3_CART_EVENT_RIGHT 0x47330505u
 /* The party and box scenes, to themselves: nothing to browse, back to the hub */
 #define GEN3_CART_EVENT_HUB 0x47330506u
+
+/* What the Unbound pick scene (Gen3CartOmegaPick) lists for the editor */
+typedef enum {
+    Gen3CartUbPickSpecies, /* the Pokemon row: a letter, then the species */
+    Gen3CartUbPickNew, /* New Pokemon in a free box slot: its species, then the editor */
+    Gen3CartUbPickItem, /* a letter (or None), then the holdable items */
+    Gen3CartUbPickMove1, /* .. Move4: a letter (or None, but for Move 1), then the moves */
+    Gen3CartUbPickMove2,
+    Gen3CartUbPickMove3,
+    Gen3CartUbPickMove4,
+    Gen3CartUbPickNature,
+    Gen3CartUbPickAbility, /* the species' abilities, by name */
+    Gen3CartUbPickShiny, /* Yes, No */
+    Gen3CartUbPickIvs, /* All 31, All 0 */
+    Gen3CartUbPickEvs, /* the six stats, each to the number scene */
+} Gen3CartUbPick;
+/* ub_page while the pick scene shows its letters (or its one list) */
+#define GEN3_CART_UB_LETTERS 0xFFu
 
 typedef struct Gen3CartUi {
     Gen3CartSession* session;
@@ -66,6 +89,17 @@ typedef struct Gen3CartUi {
     uint32_t rate_done;
     uint32_t rate_tick;
     char result_buf[GEN3_CART_SCREEN_ASK_SIZE]; /* a result text made for it (the ROM's name) */
+    /* Restore on an Omega's WrittenShared result ran Back up again first: its Ok opens the
+     * restore list instead of a result */
+    bool restore_next;
+    /* The Unbound editor (pokemon_gen3_cart_omega_*.c): the Pokemon of the Omega's slot (box,
+     * slot), or one made for that free box slot (ub_new), which Back from the editor puts there:
+     * an edit only if changed, a new one once Put is confirmed */
+    Gen3UbEditor ub_edit;
+    bool ub_new;
+    uint8_t ub_pick; /* the pick scene's list, a Gen3CartUbPick */
+    uint8_t ub_page; /* its page of names, or GEN3_CART_UB_LETTERS */
+    Gen3UbMon ub_mon; /* a record read from the working copy, or the owner of a new one */
 } Gen3CartUi;
 
 /* Allocates on first use the ui, the session (gen3_cart_session_alloc, which starts its worker
@@ -91,7 +125,8 @@ const Gen3CartSessionStatus* gen3_cart_ui_status(PokemonFap* pokemon_fap);
 Gen3Cart* gen3_cart_ui_cart(PokemonFap* pokemon_fap);
 /* The session's Omega state while no job runs, else NULL (as gen3_cart_ui_cart) */
 Gen3Omega* gen3_cart_ui_omega(PokemonFap* pokemon_fap);
-/* Pokemon slots changed and not written; 0 before the session exists, and while a job runs */
+/* Pokemon slots changed and not written, the cart's or the Omega's (status.omega); 0 before the
+ * session exists, and while a job runs */
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap);
 /* The editor takes the save's trainer (gen3_cart_trainer), so a new Pokemon for this cart gets it
  * as OT; nothing without one. Once a job that may leave another save's backup has ended Ok
@@ -99,7 +134,8 @@ uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap);
 void gen3_cart_ui_take_trainer(PokemonFap* pokemon_fap);
 
 /* Opens the confirm scene (pokemon_gen3_cart_confirm.c) as scene: Gen3CartLeave, Gen3CartPut,
- * Gen3CartWriteAsk, Gen3CartDiscardAsk, Gen3CartRestoreAsk, Gen3CartRomAsk or Gen3CartRomStop.
+ * Gen3CartWriteAsk, Gen3CartDiscardAsk, Gen3CartRestoreAsk, Gen3CartRomAsk, Gen3CartRomStop or
+ * Gen3CartOmegaPut.
  * Which one is kept in Gen3CartLeave's scene state, set here before scene_manager_next_scene. */
 void gen3_cart_ui_confirm(PokemonFap* pokemon_fap, uint32_t scene);
 
@@ -110,6 +146,16 @@ void gen3_cart_ui_box_name(PokemonFap* pokemon_fap, uint8_t box, char out[9]);
 /* Sets Gen3CartResult for a Pokemon not opened ("Can't edit") or not put ("Can't put"): the
  * reason's text, no Retry, and OK back to the list (Gen3CartSlots) */
 void gen3_cart_ui_mon_result(PokemonFap* pokemon_fap, bool put, Gen3CartMon m);
+
+/* Shows Gen3CartResult with header and text (static strings), no Retry, and OK back to an Omega's
+ * slots (Gen3CartOmegaSlots): what the Unbound editor's steps say when they can't go on */
+void gen3_cart_ui_omega_notice(PokemonFap* pokemon_fap, const char* header, const char* text);
+/* An Unbound Pokemon not put (gen3_omega_mon_put's m), as gen3_cart_ui_omega_notice */
+void gen3_cart_ui_omega_mon_result(PokemonFap* pokemon_fap, bool put, Gen3CartMon m);
+/* Restore on an Omega's WrittenShared result: the restore list over the hub when there is a
+ * backup to restore onto; else Back up again first, while connected (restore_next); else the
+ * Connect instructions, whose connect backs up, after which the hub offers Restore backup */
+void gen3_cart_ui_omega_restore(PokemonFap* pokemon_fap);
 
 /* From the Put question, which is over the slot router: back to the router, which opens the
  * editor again on the Pokemon made or loaded. Defined in pokemon_gen3_cart_slot.c. */

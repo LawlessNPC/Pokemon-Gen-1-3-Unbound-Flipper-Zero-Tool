@@ -1,4 +1,5 @@
 #include "test.h"
+#include "ub_bulk_file.h"
 #include <stdbool.h>
 #include <stdio.h>
 #include <src/gen3/gen3_cart.h>
@@ -6,7 +7,12 @@
 #include <src/gen3/gen3_cart_screen.h>
 #include <src/gen3/gen3_mb.h>
 #include <src/gen3/gen3_pk3.h>
+#include <src/gen3/gen3_rules.h>
 #include <src/gen3/gen3_save.h>
+#include <src/gen3/gen3_text.h>
+#include <src/gen3/gen3_ub_data.h>
+#include <src/gen3/gen3_ub_edit.h>
+#include <src/gen3/gen3_ub_mon.h>
 
 /* The Cartridge app's screen texts and choices: what the progress screen shows for each job and
  * step, the power-on hint, the hub's items, the results and their Retry, Cart info, the leave
@@ -1531,7 +1537,384 @@ TEST(test_screen_result_omega) {
     ASSERT_STR_EQ(p.title, "Finding the game");
 }
 
+/* ---- The Unbound editor, and writing an Omega's changes ---- */
+
+static void ub_nick(Gen3UbMon* m, const char* s) {
+    uint8_t n[GEN3_UB_MON_NICK];
+    gen3_text_encode(s, n, sizeof(n), sizeof(n));
+    gen3_ub_mon_set_nickname(m, n);
+}
+
+/* The editor's rows, with the names from the committed files/unbound_bulk.bin */
+TEST(test_screen_ub_edit_rows) {
+    ASSERT_TRUE(ub_bulk_file_open());
+    static Gen3UbEditor e;
+    static char rows[GEN3_CART_SCREEN_UB_ROWS][GEN3_CART_SCREEN_ROW_SIZE];
+    static Gen3UbMon m;
+    ASSERT_EQ(GEN3_CART_SCREEN_UB_ROWS, 13);
+
+    /* A party BULBASAUR: PID 0x12345678 is GENTLE (21), ability slot 0, and not shiny for OT 0 */
+    memset(&m, 0, sizeof(m));
+    m.party = true;
+    gen3_ub_mon_set_species(&m, 1);
+    gen3_ub_mon_set_pid(&m, 0x12345678u);
+    gen3_ub_mon_set_exp(&m, gen3_exp_for_level(3, 30));
+    const uint8_t iv31[6] = {31, 31, 31, 31, 31, 31};
+    gen3_ub_mon_set_ivs(&m, iv31);
+    const uint8_t ev[6] = {4, 0, 0, 252, 0, 0};
+    gen3_ub_mon_set_evs(&m, ev);
+    gen3_ub_mon_set_item(&m, 139);
+    const uint16_t mv[4] = {33, 45, 22, 0};
+    gen3_ub_mon_set_moves(&m, mv);
+    ub_nick(&m, "BULBASAUR");
+    gen3_ub_party_restat(&m);
+    gen3_ub_edit_load(&e, &m, NULL);
+    gen3_cart_screen_ub_edit_rows(&e, rows);
+    ASSERT_STR_EQ(rows[0], "Pokemon: BULBASAUR");
+    ASSERT_STR_EQ(rows[1], "Level: 30");
+    ASSERT_STR_EQ(rows[2], "Nickname: BULBASAUR");
+    ASSERT_STR_EQ(rows[3], "Held item: ORAN BERRY");
+    ASSERT_STR_EQ(rows[4], "Move 1: TACKLE");
+    ASSERT_STR_EQ(rows[5], "Move 2: GROWL");
+    ASSERT_STR_EQ(rows[6], "Move 3: VINE WHIP");
+    ASSERT_STR_EQ(rows[7], "Move 4: -");
+    ASSERT_STR_EQ(rows[8], "Nature: GENTLE");
+    ASSERT_STR_EQ(rows[9], "Ability: OVERGROW");
+    ASSERT_STR_EQ(rows[10], "Shiny: No");
+    ASSERT_STR_EQ(rows[11], "IVs: all 31");
+    ASSERT_STR_EQ(rows[12], "EVs: 256");
+
+    /* A box record: its level from exp, no item, one move; PID 0 is HARDY and shiny for OT 0, and
+     * the hidden-ability bit gives CHLOROPHYLL */
+    memset(&m, 0, sizeof(m));
+    gen3_ub_mon_set_species(&m, 1);
+    gen3_ub_mon_set_pid(&m, 0);
+    gen3_ub_mon_set_hidden(&m, true);
+    gen3_ub_mon_set_exp(&m, gen3_exp_for_level(3, 5));
+    const uint16_t mv2[4] = {1, 0, 0, 0};
+    gen3_ub_mon_set_moves(&m, mv2);
+    ub_nick(&m, "Bulby");
+    gen3_ub_edit_load(&e, &m, NULL);
+    gen3_cart_screen_ub_edit_rows(&e, rows);
+    ASSERT_STR_EQ(rows[0], "Pokemon: BULBASAUR");
+    ASSERT_STR_EQ(rows[1], "Level: 5");
+    ASSERT_STR_EQ(rows[2], "Nickname: Bulby");
+    ASSERT_STR_EQ(rows[3], "Held item: None");
+    ASSERT_STR_EQ(rows[4], "Move 1: POUND");
+    ASSERT_STR_EQ(rows[5], "Move 2: -");
+    ASSERT_STR_EQ(rows[6], "Move 3: -");
+    ASSERT_STR_EQ(rows[7], "Move 4: -");
+    ASSERT_STR_EQ(rows[8], "Nature: HARDY");
+    ASSERT_STR_EQ(rows[9], "Ability: CHLOROPHYLL");
+    ASSERT_STR_EQ(rows[10], "Shiny: Yes");
+    ASSERT_STR_EQ(rows[11], "IVs: all 0");
+    ASSERT_STR_EQ(rows[12], "EVs: 0");
+
+    /* IVs neither all 31 nor all 0 read "as loaded"; ability slot 1 of a species with no second
+     * ability is its first, as the game takes it; a long item name is cut to the row */
+    const uint8_t iv_mix[6] = {31, 0, 31, 31, 31, 31};
+    gen3_ub_mon_set_ivs(&m, iv_mix);
+    gen3_ub_mon_set_hidden(&m, false);
+    gen3_ub_mon_set_pid(&m, 1);
+    gen3_ub_mon_set_item(&m, 716);
+    gen3_ub_edit_load(&e, &m, NULL);
+    gen3_cart_screen_ub_edit_rows(&e, rows);
+    ASSERT_STR_EQ(rows[3], "Held item: STRAWBERRY S");
+    ASSERT_STR_EQ(rows[8], "Nature: LONELY");
+    ASSERT_STR_EQ(rows[9], "Ability: OVERGROW");
+    ASSERT_STR_EQ(rows[11], "IVs: as loaded");
+    for(unsigned i = 0; i < GEN3_CART_SCREEN_UB_ROWS; i++) {
+        ASSERT_TRUE(strlen(rows[i]) < GEN3_CART_SCREEN_ROW_SIZE);
+    }
+
+    /* The data file unreadable: the names the readers give then */
+    ub_bulk_file_failing = true;
+    gen3_cart_screen_ub_edit_rows(&e, rows);
+    ASSERT_STR_EQ(rows[0], "Pokemon: #1");
+    ASSERT_STR_EQ(rows[3], "Held item: #716");
+    ASSERT_STR_EQ(rows[4], "Move 1: #1");
+    ASSERT_STR_EQ(rows[9], "Ability: #0");
+    ub_bulk_file_failing = false;
+}
+
+/* Write changes?'s question, and the text once written */
+TEST(test_screen_ub_write_texts) {
+    char t[GEN3_CART_SCREEN_ASK_SIZE];
+    Gen3CartScreenResult res;
+
+    /* the most an Unbound save can have changed: the party and every box slot */
+    gen3_cart_screen_write_ask(GEN3_UB_PARTY_MAX + GEN3_UB_BOXES * GEN3_UB_BOX_SLOTS, t);
+    ASSERT_STR_EQ(t, "726 changes. The save\nis backed up. Keep\nthe GBA on.");
+    ASSERT_TRUE(fits(t, 3, GEN3_CART_SCREEN_LINE_LEN));
+    gen3_cart_screen_write_ask(1, t);
+    ASSERT_STR_EQ(t, "1 change. The save\nis backed up. Keep\nthe GBA on.");
+
+    gen3_cart_screen_omega_result(Gen3CartJobWrite, Gen3CartOk, &res);
+    ASSERT_STR_EQ(res.header, "Written");
+    ASSERT_STR_EQ(res.text, "Written and verified.\nStart Unbound from\nthe Omega menu.");
+    ASSERT_TRUE(fits(res.text, 3, GEN3_CART_SCREEN_LINE_LEN));
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+}
+
+/* An Omega's results: their texts, Restore after WrittenShared, a new Connect after a link failure */
+TEST(test_screen_omega_result) {
+    Gen3CartScreenResult res;
+
+    /* The game loads the new save, whose boxes 20-22 may be wrong: Restore puts them right */
+    gen3_cart_screen_omega_result(Gen3CartJobWrite, Gen3CartWrittenShared, &res);
+    ASSERT_STR_EQ(res.header, "Written");
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartWrittenShared));
+    ASSERT_EQ(res.retry, Gen3CartRetryRestore);
+    gen3_cart_screen_omega_result(Gen3CartJobRestore, Gen3CartWrittenShared, &res);
+    ASSERT_STR_EQ(res.header, "Restored");
+    ASSERT_EQ(res.retry, Gen3CartRetryRestore);
+
+    gen3_cart_screen_omega_result(Gen3CartJobRestore, Gen3CartOk, &res);
+    ASSERT_STR_EQ(res.header, "Restored");
+    ASSERT_STR_EQ(res.text, "Restored, verified.\nStart Unbound from\nthe Omega menu.");
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+    gen3_cart_screen_omega_result(Gen3CartJobWrite, Gen3CartWrittenNoBackup, &res);
+    ASSERT_STR_EQ(res.header, "Written");
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartWrittenNoBackup));
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+
+    /* The rest show their own texts; a link failure ends the connect, so Retry connects again */
+    gen3_cart_screen_omega_result(Gen3CartJobWrite, Gen3CartLinkLost, &res);
+    ASSERT_STR_EQ(res.header, "Write failed");
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartLinkLost));
+    ASSERT_EQ(res.retry, Gen3CartRetryConnect);
+    gen3_cart_screen_omega_result(Gen3CartJobWrite, Gen3CartOmegaSaveFirst, &res);
+    ASSERT_STR_EQ(res.header, "Write failed");
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartOmegaSaveFirst));
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+    gen3_cart_screen_omega_result(Gen3CartJobWrite, Gen3CartChanged, &res);
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartChanged));
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+    gen3_cart_screen_omega_result(Gen3CartJobDiscard, Gen3CartOk, &res);
+    ASSERT_STR_EQ(res.header, "Discarded");
+    ASSERT_STR_EQ(res.text, "Done.");
+    gen3_cart_screen_omega_result(Gen3CartJobRestoreCheck, Gen3CartBadBackup, &res);
+    ASSERT_STR_EQ(res.header, "Can't restore");
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartBadBackup));
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+    gen3_cart_screen_omega_result(Gen3CartJobRestore, Gen3CartBusyTimeout, &res);
+    ASSERT_STR_EQ(res.header, "Restore failed");
+    ASSERT_EQ(res.retry, Gen3CartRetryConnect);
+    gen3_cart_screen_omega_result(Gen3CartJobBackup, Gen3CartCancelled, &res);
+    ASSERT_STR_EQ(res.header, "Backup stopped");
+    ASSERT_EQ(res.retry, Gen3CartRetryNone);
+    /* The connect's results as before */
+    gen3_cart_screen_omega_result(Gen3CartJobConnect, Gen3CartNoGame, &res);
+    ASSERT_STR_EQ(res.header, "Connect failed");
+    ASSERT_STR_EQ(res.text, gen3_cart_result_text(Gen3CartNoGame));
+    ASSERT_EQ(res.retry, Gen3CartRetryConnect);
+
+    /* Every job's every result fits */
+    for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
+        for(int r = Gen3CartOk; r <= Gen3CartOmegaSaveFirst; r++) {
+            gen3_cart_screen_omega_result(all_jobs[j], (Gen3CartResult)r, &res);
+            ASSERT_TRUE(fits(res.header, 1, GEN3_CART_SCREEN_TITLE_LEN));
+            ASSERT_TRUE(fits(res.text, 3, GEN3_CART_SCREEN_LINE_LEN));
+        }
+    }
+}
+
+/* The Omega's hub: browse and Restore with a backup to browse, Write and Discard with changes,
+ * Back up again while connected */
+TEST(test_screen_omega_hub) {
+    static Gen3Omega o;
+    Gen3CartScreenHub h;
+
+    /* A job runs: nothing but Cart info */
+    gen3_cart_screen_omega_hub(NULL, &h);
+    ASSERT_FALSE(h.browse || h.write || h.writing_off || h.discard || h.reconnect || h.backup);
+    ASSERT_FALSE(h.restore || h.rom);
+
+    memset(&o, 0, sizeof(o));
+    o.slots.loaded = -1;
+    gen3_cart_screen_omega_hub(&o, &h);
+    ASSERT_FALSE(h.browse || h.write || h.discard || h.backup || h.restore);
+    o.connected = true;
+    gen3_cart_screen_omega_hub(&o, &h);
+    ASSERT_TRUE(h.backup);
+    ASSERT_FALSE(h.browse || h.write || h.discard || h.restore);
+
+    o.backup_current = true;
+    o.slots.loaded = 1;
+    o.work_ok = true;
+    gen3_cart_screen_omega_hub(&o, &h);
+    ASSERT_TRUE(h.browse && h.restore && h.backup);
+    ASSERT_FALSE(h.write || h.discard);
+
+    o.changed[0] = 0x05; /* party slots 0 and 2 */
+    gen3_cart_screen_omega_hub(&o, &h);
+    ASSERT_TRUE(h.write && h.discard && h.browse && h.restore);
+    /* A cart's own items never show for an Omega */
+    ASSERT_FALSE(h.writing_off || h.reconnect || h.rom);
+
+    /* A save no slot of which loads: no list, nor a restore onto it */
+    o.slots.loaded = -1;
+    gen3_cart_screen_omega_hub(&o, &h);
+    ASSERT_FALSE(h.browse || h.restore);
+}
+
+/* A changed slot's mark, the EV list's rows, the trainer as the restore question takes it, and the
+ * fixed texts */
+TEST(test_screen_ub_small) {
+    char row[GEN3_CART_SCREEN_ROW_SIZE];
+
+    snprintf(row, sizeof(row), "05 BULBASAUR Lv5");
+    gen3_cart_screen_ub_mark(false, row);
+    ASSERT_STR_EQ(row, "05 BULBASAUR Lv5");
+    gen3_cart_screen_ub_mark(true, row);
+    ASSERT_STR_EQ(row, "05 BULBASAUR Lv5*");
+    snprintf(row, sizeof(row), "30 CHARMANDER Lv100");
+    gen3_cart_screen_ub_mark(true, row);
+    ASSERT_STR_EQ(row, "30 CHARMANDER Lv100*");
+
+    gen3_cart_screen_ub_ev_label(0, 252, row);
+    ASSERT_STR_EQ(row, "HP: 252");
+    gen3_cart_screen_ub_ev_label(3, 4, row);
+    ASSERT_STR_EQ(row, "Spe: 4");
+    gen3_cart_screen_ub_ev_label(5, 0, row);
+    ASSERT_STR_EQ(row, "SpD: 0");
+
+    Gen3UbTrainer ut;
+    Gen3SaveTrainer t;
+    memset(&ut, 0, sizeof(ut));
+    memset(&t, 0xAA, sizeof(t));
+    snprintf(ut.name, sizeof(ut.name), "RED");
+    ut.gender = 1;
+    ut.tid = 12345;
+    ut.sid = 54321;
+    gen3_cart_screen_ub_trainer(&ut, &t);
+    ASSERT_STR_EQ(t.name, "RED");
+    ASSERT_EQ(t.gender, 1);
+    ASSERT_EQ(t.tid, 12345);
+    ASSERT_EQ(t.sid, 54321);
+    ASSERT_EQ(t.hours, 0);
+    ASSERT_EQ(t.minutes, 0);
+
+    ASSERT_STR_EQ(GEN3_CART_SCREEN_UB_NO_OWNER, "No Pokemon in the\nparty to copy the\ntrainer from.");
+    ASSERT_TRUE(fits(GEN3_CART_SCREEN_UB_NO_OWNER, 3, GEN3_CART_SCREEN_LINE_LEN));
+    ASSERT_TRUE(fits(GEN3_CART_SCREEN_UB_NO_BACKUPS, 3, GEN3_CART_SCREEN_LINE_LEN));
+}
+
+/* The letter pickers' pages over the sorted lists: each first letter in turn, one with more than
+ * GEN3_CART_SCREEN_UB_PAGE_MAX names in even pages */
+TEST(test_screen_ub_pages) {
+    ASSERT_TRUE(ub_bulk_file_open());
+    static Gen3CartScreenUbPage p[GEN3_CART_SCREEN_UB_PAGES];
+    static const Gen3UbSort sorts[] = {Gen3UbSortSpecies, Gen3UbSortMoves, Gen3UbSortItems};
+    char name[GEN3_CART_SCREEN_UB_NAME_SIZE];
+    uint16_t id = 0;
+    size_t n[3];
+
+    for(size_t s = 0; s < 3; s++) {
+        n[s] = gen3_cart_screen_ub_pages(sorts[s], p, GEN3_CART_SCREEN_UB_PAGES);
+        ASSERT_TRUE(n[s] > 0 && n[s] < GEN3_CART_SCREEN_UB_PAGES);
+        uint16_t next = 0;
+        for(size_t k = 0; k < n[s]; k++) {
+            ASSERT_EQ(p[k].first, next);
+            ASSERT_TRUE(p[k].count >= 1 && p[k].count <= GEN3_CART_SCREEN_UB_PAGE_MAX);
+            ASSERT_TRUE(fits(p[k].label, 1, GEN3_CART_SCREEN_LINE_LEN));
+            for(uint16_t i = p[k].first; i < p[k].first + p[k].count; i++) {
+                ASSERT_TRUE(gen3_cart_screen_ub_sorted_name(sorts[s], i, &id, name));
+                ASSERT_TRUE(id != 0);
+                ASSERT_EQ(name[0], p[k].label[0]);
+            }
+            /* a letter's names are all on its pages: the next page starts another letter, or is
+             * labelled by its first three characters as a page of the same letter */
+            if(k > 0 && p[k].label[0] == p[k - 1].label[0]) {
+                ASSERT_TRUE(strlen(p[k].label) == 7 && strlen(p[k - 1].label) == 7);
+            }
+            next = (uint16_t)(next + p[k].count);
+        }
+        ASSERT_EQ(next, gen3_ub_sorted_count(sorts[s]));
+        if(sorts[s] == Gen3UbSortSpecies) {
+            ASSERT_STR_EQ(p[0].label, "?");
+            ASSERT_EQ(p[0].count, 23);
+            /* S, 164 names, in three pages */
+            size_t k = 0;
+            while(k < n[s] && p[k].label[0] != 'S') k++;
+            ASSERT_STR_EQ(p[k].label, "SAB-SHI");
+            ASSERT_EQ(p[k].first, 897);
+            ASSERT_EQ(p[k].count, 54);
+            ASSERT_STR_EQ(p[k + 1].label, "SHI-SMO");
+            ASSERT_EQ(p[k + 1].count, 55);
+            ASSERT_STR_EQ(p[k + 2].label, "SNE-SYL");
+            ASSERT_EQ(p[k + 2].first, 1006);
+            ASSERT_EQ(p[k + 2].count, 55);
+            ASSERT_STR_EQ(p[k + 3].label, "T");
+        }
+        if(sorts[s] == Gen3UbSortMoves) {
+            ASSERT_STR_EQ(p[0].label, "1");
+            ASSERT_EQ(p[0].count, 2);
+        }
+    }
+    ASSERT_EQ(n[0], 35);
+    ASSERT_EQ(n[1], 30);
+    ASSERT_EQ(n[2], 26);
+    /* Too little room: none */
+    ASSERT_EQ(gen3_cart_screen_ub_pages(Gen3UbSortItems, p, 25), 0);
+
+    /* The data unreadable: none */
+    ub_bulk_file_failing = true;
+    ASSERT_EQ(gen3_cart_screen_ub_pages(Gen3UbSortSpecies, p, GEN3_CART_SCREEN_UB_PAGES), 0);
+    ASSERT_FALSE(gen3_cart_screen_ub_sorted_name(Gen3UbSortMoves, 0, &id, name));
+    ub_bulk_file_failing = false;
+}
+
+/* The Omega's restore list: backups/UNBOUND_*.sav, newest first, by their stamp and trainer id */
+TEST(test_screen_ub_backups) {
+    char row[GEN3_CART_SCREEN_ROW_SIZE];
+    char name[64];
+
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_ok("UNBOUND_12345_20261101-120000.sav"));
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_ok("UNBOUND_nosave_20261101-120000-2.sav"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_ok("AXVE_12345_20261101-120000.sav"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_ok("UNBOUND_12345_20261101-120000.txt"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_ok("UNBOUND_.sav"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_ok("UNBOUND_a/b.sav"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_ok("backup.tmp"));
+    /* "backups/" and the name within GEN3_CART_NAME_MAX, with the terminator: 39 characters */
+    snprintf(name, sizeof(name), "UNBOUND_%.*s.sav", 27, "123456789012345678901234567890");
+    ASSERT_EQ(strlen(name), 39);
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_ok(name));
+    snprintf(name, sizeof(name), "UNBOUND_%.*s.sav", 28, "123456789012345678901234567890");
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_ok(name));
+
+    gen3_cart_screen_ub_backup_label("UNBOUND_12345_20261101-120000.sav", row);
+    ASSERT_STR_EQ(row, "1101-120000 12345");
+    gen3_cart_screen_ub_backup_label("UNBOUND_nosave_20261101-120000-2.sav", row);
+    ASSERT_STR_EQ(row, "1101-120000-2 nosave");
+    gen3_cart_screen_ub_backup_label("UNBOUND_odd.sav", row);
+    ASSERT_STR_EQ(row, "odd");
+
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_newer(
+        "UNBOUND_12345_20261102-000000.sav", "UNBOUND_12345_20261101-235959.sav"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_newer(
+        "UNBOUND_12345_20261101-235959.sav", "UNBOUND_12345_20261102-000000.sav"));
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_newer(
+        "UNBOUND_12345_20261101-120000-2.sav", "UNBOUND_12345_20261101-120000.sav"));
+    /* the stamp first, whatever the trainer */
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_newer(
+        "UNBOUND_nosave_20261101-120000.sav", "UNBOUND_12345_20261031-000000.sav"));
+    /* the same stamp: by name, so the order is the same every time */
+    ASSERT_TRUE(gen3_cart_screen_ub_backup_newer(
+        "UNBOUND_22222_20261101-120000.sav", "UNBOUND_11111_20261101-120000.sav"));
+    ASSERT_FALSE(gen3_cart_screen_ub_backup_newer(
+        "UNBOUND_11111_20261101-120000.sav", "UNBOUND_11111_20261101-120000.sav"));
+}
+
 int main(void) {
+    RUN(test_screen_ub_edit_rows);
+    RUN(test_screen_ub_write_texts);
+    RUN(test_screen_omega_result);
+    RUN(test_screen_omega_hub);
+    RUN(test_screen_ub_small);
+    RUN(test_screen_ub_pages);
+    RUN(test_screen_ub_backups);
     RUN(test_screen_ub_row);
     RUN(test_screen_omega_info);
     RUN(test_screen_result_omega);

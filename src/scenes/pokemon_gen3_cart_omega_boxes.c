@@ -5,9 +5,9 @@
 #include <furi.h>
 #include <src/scenes/include/pokemon_gen3_menu.h>
 
-/* An EZ-Flash Omega's Unbound save, read-only: the party with its count, then the 24 boxes, from
- * the backup (gen3_omega.h). Choosing one lists its slots. The scene state keeps the highlighted
- * row. */
+/* An EZ-Flash Omega's Unbound save: the party with its count, then the 24 boxes (gen3_omega.h).
+ * Choosing one lists its slots, where the Unbound editor opens. The scene state keeps the
+ * highlighted row. */
 
 /* Row k's item: 0 the party, 1..24 the boxes */
 #define GEN3_CART_ITEM_OMEGA_BOXES 0x47330560u
