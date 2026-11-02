@@ -367,6 +367,7 @@ bool gen3_cart_omega_pick_id(PokemonFap* pokemon_fap, uint16_t id) {
             break;
         }
     }
+    gen3_cart_ui_trace(pokemon_fap, "pick %u %s", (unsigned)id, ok ? "ok" : "refused");
     if(ok) {
         scene_manager_search_and_switch_to_previous_scene(
             pokemon_fap->scene_manager, PokemonSceneGen3CartOmegaEdit);

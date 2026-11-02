@@ -113,6 +113,8 @@ Gen3CartUi* gen3_cart_ui_get(PokemonFap* pokemon_fap);
  * Safe if nothing was allocated. Call with another view shown, before gblink_free and
  * view_dispatcher_free. */
 void gen3_cart_ui_end(PokemonFap* pokemon_fap);
+/* A line in the session log ("ui <text>", printf style) when the session exists; app thread only. */
+void gen3_cart_ui_trace(PokemonFap* pokemon_fap, const char* fmt, ...);
 /* Leaves the app: cancels any job, then stops the scene manager and the view dispatcher, so the
  * app frees everything and exits. */
 void gen3_cart_ui_leave(PokemonFap* pokemon_fap);

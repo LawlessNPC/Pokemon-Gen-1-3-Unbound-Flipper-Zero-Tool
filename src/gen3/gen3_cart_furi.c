@@ -1,3 +1,4 @@
+#include <stdarg.h>
 #include <src/gen3/gen3_cart_furi.h>
 
 #include <stdio.h>
@@ -73,6 +74,7 @@ struct Gen3CartSession {
     Storage* storage;
     FuriThread* thread;
     FuriMutex* lock;
+    FuriMutex* log_lock; /* around every write to the log file and the trace line */
 
     /* Under lock. The app thread writes the request only while no job runs or waits for the
      * worker; the worker takes it and is the only writer of the status. */
@@ -100,6 +102,7 @@ struct Gen3CartSession {
     File* log;
     bool log_open;
     char line[GEN3_CART_LOG_LINE];
+    char tline[GEN3_CART_LOG_LINE]; /* gen3_cart_session_vtrace's line: the app thread's only */
 
     /* The frame callback's. core changes only while the driver is stopped, or to switch to the
      * pump once the sender is Done (gen3_hlink_init, a barrier, then core). */
@@ -281,20 +284,38 @@ static void cart_log_open(Gen3CartSession* s) {
     }
 }
 
+/* Both the worker's lines and the app thread's trace lines go through the log mutex. */
+static void cart_log_write(Gen3CartSession* s, const char* buf, size_t n) {
+    furi_check(furi_mutex_acquire(s->log_lock, FuriWaitForever) == FuriStatusOk);
+    if(s->log_open && (storage_file_write(s->log, buf, n) != n || !storage_file_sync(s->log))) {
+        storage_file_close(s->log);
+        s->log_open = false;
+    }
+    furi_check(furi_mutex_release(s->log_lock) == FuriStatusOk);
+}
+
 /* Writes s->line, len bytes as snprintf counted them; a line too long is cut, keeping its newline.
  * Each line goes to the card at once: the log is for the runs that go wrong. After a failed write
  * the log stops. */
 static void cart_log_put(Gen3CartSession* s, int len) {
-    if(!s->log_open || len <= 0) return;
+    if(len <= 0) return;
     size_t n = (size_t)len;
     if(n >= sizeof(s->line)) {
         n = sizeof(s->line) - 1u;
         s->line[n - 1u] = '\n';
     }
-    if(storage_file_write(s->log, s->line, n) != n || !storage_file_sync(s->log)) {
-        storage_file_close(s->log);
-        s->log_open = false;
-    }
+    cart_log_write(s, s->line, n);
+}
+
+void gen3_cart_session_vtrace(Gen3CartSession* s, const char* fmt, va_list args) {
+    if(!s || !s->log_open) return;
+    /* The app thread's own line buffer (only the app thread traces), so the worker's s->line is
+     * never shared; only the write is under the log mutex. */
+    int n = snprintf(s->tline, sizeof(s->tline), "%08lu ui ", (unsigned long)furi_get_tick());
+    n += vsnprintf(s->tline + n, sizeof(s->tline) - (size_t)n, fmt, args);
+    size_t len = (size_t)n + 1u < sizeof(s->tline) ? (size_t)n : sizeof(s->tline) - 2u;
+    s->tline[len++] = '\n';
+    cart_log_write(s, s->tline, len);
 }
 
 /* After a connect that ran to its end: the cart as the helper found it */
@@ -1021,6 +1042,7 @@ Gen3CartSession* gen3_cart_session_alloc(void* gblink_handle) {
     memset(s, 0, sizeof(*s));
     s->hw = mlink_hw_alloc(&pins);
     s->lock = furi_mutex_alloc(FuriMutexTypeNormal);
+    s->log_lock = furi_mutex_alloc(FuriMutexTypeNormal);
     s->store = gen3_store_furi_alloc(); /* makes apps_data/pokemon, the log's folder, too */
     s->storage = furi_record_open(RECORD_STORAGE);
     s->log = storage_file_alloc(s->storage);
@@ -1046,6 +1068,7 @@ void gen3_cart_session_free(Gen3CartSession* s) {
     free(s->img);
     free(s->buf);
     furi_mutex_free(s->lock);
+    furi_mutex_free(s->log_lock);
     free(s);
 }
 

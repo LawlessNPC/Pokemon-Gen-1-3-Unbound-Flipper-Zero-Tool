@@ -160,6 +160,7 @@ bool pokemon_scene_gen3_cart_omega_edit_on_event(void* context, SceneManagerEven
     PokemonFap* pokemon_fap = context;
 
     if(event.type == SceneManagerEventTypeBack) {
+        gen3_cart_ui_trace(pokemon_fap, "back omega_edit put");
         gen3_cart_omega_edit_back(pokemon_fap);
         return true;
     }

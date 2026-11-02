@@ -1,5 +1,6 @@
 #include <src/scenes/include/pokemon_gen3_cart.h>
 
+#include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
 
@@ -46,6 +47,15 @@ static void gen3_cart_back_callback(void* context) {
     view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_CART_EVENT_BACK);
 }
 
+static void gen3_cart_ui_heap(PokemonFap* pokemon_fap, const char* when) {
+    gen3_cart_ui_trace(
+        pokemon_fap,
+        "%s heap %lu block %lu",
+        when,
+        (unsigned long)memmgr_get_free_heap(),
+        (unsigned long)memmgr_heap_get_max_free_block());
+}
+
 Gen3CartUi* gen3_cart_ui_get(PokemonFap* pokemon_fap) {
     if(!pokemon_fap->gen3_cart_ui) {
         Gen3CartUi* ui = malloc(sizeof(Gen3CartUi));
@@ -61,6 +71,7 @@ Gen3CartUi* gen3_cart_ui_get(PokemonFap* pokemon_fap) {
 
         ui->session = gen3_cart_session_alloc(pokemon_fap->gblink_handle);
         pokemon_fap->gen3_cart_ui = ui;
+        gen3_cart_ui_heap(pokemon_fap, "start");
     }
     return pokemon_fap->gen3_cart_ui;
 }
@@ -69,6 +80,7 @@ void gen3_cart_ui_end(PokemonFap* pokemon_fap) {
     Gen3CartUi* ui = pokemon_fap->gen3_cart_ui;
 
     if(ui) {
+        gen3_cart_ui_heap(pokemon_fap, "exit");
         if(ui->session) gen3_cart_session_free(ui->session);
         free(ui);
         pokemon_fap->gen3_cart_ui = NULL;
@@ -82,7 +94,16 @@ void gen3_cart_ui_end(PokemonFap* pokemon_fap) {
     }
 }
 
+void gen3_cart_ui_trace(PokemonFap* pokemon_fap, const char* fmt, ...) {
+    if(!pokemon_fap->gen3_cart_ui) return;
+    va_list args;
+    va_start(args, fmt);
+    gen3_cart_session_vtrace(pokemon_fap->gen3_cart_ui->session, fmt, args);
+    va_end(args);
+}
+
 void gen3_cart_ui_leave(PokemonFap* pokemon_fap) {
+    gen3_cart_ui_trace(pokemon_fap, "leave");
     if(pokemon_fap->gen3_cart_ui) gen3_cart_session_cancel(pokemon_fap->gen3_cart_ui->session);
     scene_manager_stop(pokemon_fap->scene_manager);
     view_dispatcher_stop(pokemon_fap->view_dispatcher);
@@ -580,12 +601,16 @@ bool pokemon_scene_gen3_cart_on_event(void* context, SceneManagerEvent event) {
     } else if(event.type == SceneManagerEventTypeBack) {
         if(gen3_menu_dialog_up()) {
             /* Back on the "Data missing" dialog returns to the hub */
+            gen3_cart_ui_trace(pokemon_fap, "back hub dialog");
             gen3_menu_show_menu(pokemon_fap);
         } else if(!gen3_cart_idle(pokemon_fap)) {
             /* A job runs, whose changes can't be counted now: leaving waits until it has ended */
+            gen3_cart_ui_trace(pokemon_fap, "back hub busy");
         } else if(gen3_cart_ui_changes(pokemon_fap) > 0) {
+            gen3_cart_ui_trace(pokemon_fap, "back hub ask");
             gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartLeave);
         } else {
+            gen3_cart_ui_trace(pokemon_fap, "back hub leave");
             gen3_cart_ui_leave(pokemon_fap);
         }
         consumed = true;
