@@ -59,10 +59,10 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), a 
 ## H. Write test (run this first)
 
 1. Connect as in B.1-3, until the hub (headed `POKEMON UNBOUND`) shows `Party and boxes`, `Back up again`, `Restore backup` and `Cart info`. Write down the backup name in `Cart info`.
-2. `Party and boxes`, then a box that has a Pokemon (not an egg). Write down its slot, species and level. Open it, choose `Level`, enter a different level (for example 5 more, 1-100), press `Back` until the box list: its row shows the new level followed by `*`.
+2. `Party and boxes`, then one of BOX 1 to 19 that has a Pokemon (not an egg). Write down its slot, species and level. Open it, choose `Level`, enter a different level (for example 5 more, 1-100), press `Back` until the box list: its row shows the new level followed by `*`.
 3. Back on the hub, the row reads `Write changes (1)` and `Discard changes` appears, and `Back up again` is gone.
 4. Choose `Write changes (1)`: the question `Write changes?` says `1 change. The save` / `is backed up. Keep` / `the GBA on.`. Choose `Write`.
-5. The Flipper shows `Writing` with a bar for a while, then `Verifying`, `Saving backup`, then `Written` with `Written and verified.` / `Start Unbound from` / `the Omega menu.`. Write down how long `Writing` took. (If it says `Written` with `Written, but boxes 20-22 may be wrong: Restore.` instead, see the table; it means you edited a box in 20-22, which H shouldn't.)
+5. The Flipper shows `Writing` with a bar for a while, then `Verifying`, `Saving backup`, then `Written` with `Written and verified.` / `Start Unbound from` / `the Omega menu.`. Write down how long `Writing` took. (If it says `Written` with `Written, but boxes 20-22 may be wrong: Restore.` instead, see the table; it means you edited a box in 20-22; H must use BOX 1 to 19.)
 6. The log has `omega write changes 1 dirty ...`, then `omega program 1/15` through `omega program 15/15`, then `job write end Ok`. Write down whether all 15 lines are there.
 7. Back on the hub the edit is gone from the list of changes (`Write changes` is gone) and the backup in `Cart info` is a new one (`Backup <MMDD-HHMMSS>`, a later time than step 1).
 8. Switch the GBA off.
@@ -87,7 +87,7 @@ Connect again as in B (the game saved, so the backup needs redoing), then edit o
 
 ## K. New Pokemon
 
-1. Connect again as in B. `Party and boxes`, a box, an empty slot (`-- empty --`): the menu `BOX <n> slot <k>` offers `New Pokemon`.
+1. Connect again as in B. `Party and boxes`, a box, an empty slot (`-- empty --`) in BOX 1 to 19, not 20-22 (those get L's riskier write): the menu `BOX <n> slot <k>` offers `New Pokemon`.
 2. Choose it, pick an original species (Gen 1-3, for example `Charmander`), set its level in the editor, press `Back`, and answer `Put <species> Lv<level>` / `in BOX <n>` / `slot <k>?` with the put button. The row now reads `<species> Lv<level>*`.
 3. In another empty slot, do the same with a newer species (Gen 4 or later, for example `Garchomp`).
 4. Back on the hub, `Write changes (2)`, `Write`, wait for `Written`.
@@ -98,12 +98,12 @@ Connect again as in B (the game saved, so the backup needs redoing), then edit o
 Boxes 20, 21 and 22 are stored in the two sectors (30 and 31) that both save slots share, so they get a different, riskier write. Test them with a box you can lose (take a backup first).
 
 1. Connect again as in B. `Party and boxes`, `BOX 21`: edit one Pokemon's level (or put a new one in an empty slot).
-2. `Write changes (1)`, `Write`. The log has `omega program` lines up to 16/16 (or 17/17 if you edited boxes in both sectors), then `job write end Ok`; the screen says `Written and verified.` If it says `Written, but boxes 20-22 may be wrong: Restore.`, write that down, and use `Restore backup` on the backup of step 1 (R).
+2. `Write changes (1)`, `Write`. The log has `omega program` lines up to 16/16 (or 17/17 if you edited boxes in both sectors), then `job write end Ok`; the screen says `Written and verified.` If it says `Written, but boxes 20-22 may be wrong: Restore.`, write that down, then press `Restore` on that result screen (the Flipper first backs up the card's save, `Backing up save`, then lists the backups) and pick the one from before the write, second from the top. If you left the result screen, press `Back up again` first, then the hub's `Restore backup`.
 3. Switch on normally, start Unbound and check BOX 21: the Pokemon is changed, and the other boxes 20-22 Pokemon are as before.
 
 ## R. Restore
 
-1. Connect as in B. Choose `Restore backup` and pick the very first backup (the oldest, `UNBOUND_<TID>_<date>-<time>.sav` from B). The Flipper shows `Checking file`, then the question `Restore backup?`; choose `Restore`.
+1. Connect as in B. Choose `Restore backup`. The list shows backups newest first as `<MMDD-HHMMSS> <TID>` (at most 20; with more, the oldest isn't listed and you pick the oldest shown). Pick the bottom row, whose time matches B's `Backup` line in Cart info. The Flipper shows `Checking file`, then the question `Restore backup?`; choose `Restore`.
 2. `Writing`, `Verifying`, `Saving backup`, then `Restored` with `Restored, verified.` / `Start Unbound from` / `the Omega menu.`.
 3. Switch on normally and start Unbound: the game loads that older save (the levels from H are back to what they were then).
 
@@ -127,7 +127,7 @@ Boxes 20, 21 and 22 are stored in the two sectors (30 and 31) that both save slo
 | J Species, moves, item, nature, ability, shiny, IVs, EVs correct in the game; stats match level | | |
 | K Two new Pokemon (original, newer) in the game; one withdrawn to the party | | |
 | L Box 21 edit written and correct in the game (screen said ________) | | |
-| R Restore of the first backup: the game loads it | | |
+| R Restore of the bottom (oldest listed) backup, time matching B's `Backup` line: the game loads it | | |
 | M Free heap while backing up: ______ bytes; while writing: ______ bytes | | |
 
 ## If it fails
@@ -144,7 +144,7 @@ Report the step, what the Flipper and the GBA showed, and `apps_data/pokemon/gen
 | `Save once in Unbound first, then connect again.` | an in-game save was interrupted and left the other slot half written | start Unbound normally, save once in the game, switch off, switch on normally once more and let the Omega save, then connect again |
 | Write fails (`Write failed`, a result other than `Ok` in `job write end`), the write test among them | the write test (the first sector, `omega program 1/15`) failed: the card didn't take or give back a block. Nothing was written | report the log; try again, with the card seated (reinsert the microSD in the Omega) |
 | `Write failed` with `The cart changed since the backup. Back up again.` (the log's `job write end Changed`) | you played and saved in the game without connecting again, so the card's save differs from the backup. Nothing was written, and the edits and the backup are dropped | the hub offers `Back up again`; do that, then redo the edits |
-| `Written, but boxes 20-22 may be wrong: Restore.` | the write reached the new slot and the game will load it, but boxes 20-22 (sectors 30/31, shared by both slots) didn't read back as written | choose `Restore backup`, pick the backup the Flipper made before the write (the second newest), `Restore`, then check the boxes in the game |
-| `Written and verified, but no new backup. Back up again first.` | the write is done and checked, but the link dropped before the new backup was saved | `Back up again` (reconnect first if the hub says so) before editing again |
+| `Written, but boxes 20-22 may be wrong: Restore.` | the write reached the new slot and the game will load it, but boxes 20-22 (sectors 30/31, shared by both slots) didn't read back as written | press `Restore` on the result screen (the Flipper backs up the card's save first, then lists backups), pick the one from before the write (second from the top, rows read `<MMDD-HHMMSS> <TID>`), `Restore`, then check the boxes in the game. If you left the result screen: `Back up again`, then the hub's `Restore backup` |
+| `Written and verified, but no new backup. Back up again first.` | the write is done and checked, but the link dropped before the new backup was saved | `Back up again` if the hub shows it; if not, close Cartridge (Back on the hub), reopen it and Connect again, which makes a fresh backup, before editing again |
 | `Link lost.` during the write | the cable or the GBA's power dropped. The game still loads a whole save (the old one unless the write got to its end) | `Retry` (switch the GBA on holding START+SELECT), check the hub and the game, report the log |
 | `Writing off` in `Cart info` | the game file isn't 2.1.1.1, or no current backup | `Back up again`; for a version, see `Version: not 2.1.1.1` |
