@@ -6,6 +6,7 @@
 #include <src/gen3/gen3_hlink.h>
 #include <src/gen3/gen3_save.h>
 #include <src/gen3/gen3_ub_data.h>
+#include <src/gen3/gen3_ub_pic.h>
 
 #define OM_SECTOR GEN3_UB_SECTOR_SIZE
 #define OM_BLOCKS 8u /* 512-byte blocks a 4 KB read takes */
@@ -232,6 +233,9 @@ Gen3CartResult gen3_omega_connect(Gen3Omega* o) {
     o->hashed = o->verified = o->from_cache = false;
     o->backup_current = false;
     om_drop_edits(o);
+    o->pics_checked = o->pics_ok = false;
+    o->pics_off = NULL;
+    o->pic_table = o->pal_table = 0;
     om_step(o, Gen3CartStepOmegaFind, 0, OM_FIND_STEPS);
     uint8_t flag[2];
     Gen3CartResult r = om_link(o, gen3_hcli_rom_read(o->cli, GEN3_OMEGA_FLAG_ADDR, 1, flag));
@@ -1051,5 +1055,179 @@ Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* st
         o->dirty = 0;
         memset(o->changed, 0, sizeof(o->changed));
     }
+    return r;
+}
+
+/* ---- Pictures ---- */
+
+#define OM_PIC_BASE 0x08000000u /* a GBA ROM address, and the end of the ROM's 32 MiB */
+#define OM_PIC_END 0x0A000000u
+#define OM_PIC_ENTRIES (GEN3_OMEGA_PIC_SPECIES + 1u)
+#define OM_PIC_NAME 64u
+#define OM_STAGE 3072u /* o->buf: the ROM block being decoded */
+#define OM_PAL_AT 3584u /* the decoded palette, 32 bytes */
+#define OM_REC_AT 3616u /* the record converted */
+#define OM_PIC_WORK 2048u /* the converter's work */
+
+static uint32_t om_le32(const uint8_t* p) {
+    return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* The file offset of a ROM address whose span bytes lie in the game file; false if not */
+static bool om_rom_off(const Gen3Omega* o, uint32_t addr, uint32_t span, uint32_t* off) {
+    if(addr < OM_PIC_BASE || addr >= OM_PIC_END) return false;
+    *off = addr - OM_PIC_BASE;
+    return *off <= o->rom.size && span <= o->rom.size - *off;
+}
+
+/* The 8-byte entry of a species in the table at file offset table, into e: the block holding it,
+ * or the two if it straddles */
+static Gen3CartResult om_pic_entry(Gen3Omega* o, uint32_t table, uint16_t species, uint8_t e[8]) {
+    const uint32_t at = table + 8u * species;
+    const uint32_t blk = at & ~511u, in = at & 511u;
+    const Gen3CartResult r = om_link(
+        o,
+        gen3_hcli_omega_read(
+            o->cli, GEN3_OMEGA_SLOT_ROM, blk, (uint8_t)(in + 8u > 512u ? 2u : 1u), o->buf));
+    if(r == Gen3CartOk) memcpy(e, o->buf + in, 8);
+    return r;
+}
+
+/* The tables' entries of a species, and their checks: *front and *pal are the streams' file
+ * offsets. NULL if they check out, else why. */
+static const char* om_pic_check(
+    const Gen3Omega* o,
+    uint16_t species,
+    const uint8_t fe[8],
+    const uint8_t pe[8],
+    uint32_t* front,
+    uint32_t* pal) {
+    if(fe[4] != (GEN3_UB_PIC_RAW & 0xFFu) || fe[5] != (GEN3_UB_PIC_RAW >> 8)) return "front size";
+    if(fe[6] != (species & 0xFFu) || fe[7] != (species >> 8)) return "front tag";
+    if(pe[4] != (species & 0xFFu) || pe[5] != (species >> 8)) return "palette tag";
+    /* a stream starts inside the file, with at least its 4-byte header */
+    if(!om_rom_off(o, om_le32(fe), 4u, front)) return "front pointer";
+    if(!om_rom_off(o, om_le32(pe), 4u, pal)) return "palette pointer";
+    return NULL;
+}
+
+Gen3CartResult gen3_omega_pics_find(Gen3Omega* o) {
+    if(!o->connected || !o->verified) return Gen3CartRefused;
+    if(o->pics_checked) return Gen3CartOk;
+    Gen3CartResult r =
+        om_link(o, gen3_hcli_omega_read(o->cli, GEN3_OMEGA_SLOT_ROM, 0, 1, o->buf));
+    if(r != Gen3CartOk) {
+        om_end_link(o, r);
+        return r;
+    }
+    uint32_t front = 0, pal = 0;
+    const char* why = NULL;
+    if(!om_rom_off(o, om_le32(o->buf + 0x128u), 8u * OM_PIC_ENTRIES, &front)) {
+        why = "front table pointer";
+    } else if(!om_rom_off(o, om_le32(o->buf + 0x130u), 8u * OM_PIC_ENTRIES, &pal)) {
+        why = "palette table pointer";
+    }
+    uint8_t fe[8], pe[8];
+    if(!why) {
+        r = om_pic_entry(o, front, 1, fe);
+        if(r == Gen3CartOk) r = om_pic_entry(o, pal, 1, pe);
+        if(r != Gen3CartOk) {
+            om_end_link(o, r);
+            return r;
+        }
+        uint32_t f1, p1;
+        why = om_pic_check(o, 1, fe, pe, &f1, &p1);
+    }
+    o->pics_checked = true;
+    o->pics_ok = why == NULL;
+    o->pics_off = why;
+    o->pic_table = front;
+    o->pal_table = pal;
+    return Gen3CartOk;
+}
+
+/* A compressed stream in the game file, read a 512-byte block at a time into o->buf + OM_STAGE */
+typedef struct {
+    Gen3Omega* o;
+    uint32_t pos; /* the next byte's offset in the file */
+    uint32_t blk; /* the offset of the block staged, if staged */
+    bool staged;
+    Gen3CartResult link; /* the last read's result */
+} OmRomSrc;
+
+/* Up to n bytes from pos, never past the file's end nor the staged block; 0 for a failed read or
+ * a start at or past the end */
+static uint32_t om_rom_src(void* ctx, uint8_t* buf, uint32_t n) {
+    OmRomSrc* s = ctx;
+    Gen3Omega* o = s->o;
+    if(s->pos >= o->rom.size || n == 0) return 0;
+    const uint32_t blk = s->pos & ~511u;
+    if(!s->staged || s->blk != blk) {
+        s->staged = false;
+        s->link = om_link(
+            o, gen3_hcli_omega_read(o->cli, GEN3_OMEGA_SLOT_ROM, blk, 1, o->buf + OM_STAGE));
+        if(s->link != Gen3CartOk) return 0;
+        s->staged = true;
+        s->blk = blk;
+    }
+    uint32_t take = 512u - (s->pos - blk);
+    if(take > n) take = n;
+    if(take > o->rom.size - s->pos) take = o->rom.size - s->pos;
+    memcpy(buf, o->buf + OM_STAGE + (s->pos - blk), take);
+    s->pos += take;
+    return take;
+}
+
+/* The stream at file offset at into o->buf + dst, want bytes; Ok, BadBackup, or a link result */
+static Gen3CartResult om_unpack(Gen3Omega* o, uint32_t at, uint32_t dst, uint32_t want) {
+    OmRomSrc s = {o, at, 0, false, Gen3CartOk};
+    if(gen3_ub_lz77(om_rom_src, &s, o->buf + dst, want)) return Gen3CartOk;
+    return s.link != Gen3CartOk ? s.link : Gen3CartBadBackup;
+}
+
+/* The record in o->buf at OM_REC_AT to <dir>/<species>.fxb through .tmp */
+static Gen3CartResult om_pic_store(Gen3Omega* o, uint16_t species, const char* dir) {
+    char tmp[OM_PIC_NAME + 5u], fin[OM_PIC_NAME];
+    const int n = snprintf(fin, sizeof(fin), "%s/%u.fxb", dir, (unsigned)species);
+    if(n <= 0 || (unsigned)n + 5u >= sizeof(fin)) return Gen3CartBadArg;
+    memcpy(tmp, fin, (size_t)n);
+    memcpy(tmp + n, ".tmp", 5);
+    const Gen3Store* st = &o->store;
+    void* f = st->open(st->ctx, tmp, Gen3StoreCreate);
+    if(!f) return om_sd_fail(o);
+    bool ok = st->write(st->ctx, f, 0, o->buf + OM_REC_AT, GEN3_UB_PIC_RECORD);
+    ok = st->close(st->ctx, f) && ok;
+    if(ok) {
+        st->remove(st->ctx, fin); /* a rename onto a file is refused */
+        ok = st->rename(st->ctx, tmp, fin);
+    }
+    if(ok) return Gen3CartOk;
+    st->remove(st->ctx, tmp);
+    return om_sd_fail(o);
+}
+
+Gen3CartResult gen3_omega_picture(Gen3Omega* o, uint16_t species, const char* cache_dir) {
+    if(species < 1u || species > GEN3_OMEGA_PIC_SPECIES || !cache_dir) return Gen3CartBadArg;
+    if(!o->connected) return Gen3CartLinkLost;
+    if(!o->verified || !o->pics_ok) return Gen3CartRefused;
+    uint8_t fe[8], pe[8];
+    Gen3CartResult r = om_pic_entry(o, o->pic_table, species, fe);
+    if(r == Gen3CartOk) r = om_pic_entry(o, o->pal_table, species, pe);
+    uint32_t front = 0, pal = 0;
+    if(r == Gen3CartOk && om_pic_check(o, species, fe, pe, &front, &pal)) r = Gen3CartBadBackup;
+    /* the palette first, into o->buf + OM_PAL_AT, clear of the ROM block the picture's pass stages */
+    if(r == Gen3CartOk) r = om_unpack(o, pal, OM_PAL_AT, 32u);
+    if(r == Gen3CartOk) r = om_unpack(o, front, 0, GEN3_UB_PIC_RAW);
+    if(r == Gen3CartOk) {
+        uint16_t colours[16];
+        for(uint32_t i = 0; i < 16u; i++) {
+            colours[i] = (uint16_t)(o->buf[OM_PAL_AT + 2u * i] | o->buf[OM_PAL_AT + 2u * i + 1u] << 8);
+        }
+        if(!gen3_ub_pic_convert(o->buf, colours, o->buf + OM_PIC_WORK, o->buf + OM_REC_AT)) {
+            r = Gen3CartBadBackup;
+        }
+    }
+    if(r == Gen3CartOk) r = om_pic_store(o, species, cache_dir);
+    om_end_link(o, r);
     return r;
 }

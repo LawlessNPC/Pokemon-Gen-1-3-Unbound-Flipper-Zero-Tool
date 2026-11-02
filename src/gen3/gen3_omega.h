@@ -29,6 +29,8 @@
 #define GEN3_OMEGA_SLOT_SAVE 0u
 #define GEN3_OMEGA_SLOT_RECENT 1u
 #define GEN3_OMEGA_SLOT_ROM 2u
+#define GEN3_OMEGA_PICS "unbound_pics" /* on the store: <species>.fxb, one picture record each */
+#define GEN3_OMEGA_PIC_SPECIES 1267u /* Unbound's last species; the ROM's tables hold 1268 entries */
 
 /* Unbound 2.1.1.1's ROM, as PUSE verified it (unbound-2.1.1.1.json: rom_sha256) */
 extern const uint8_t gen3_omega_unbound_sha[32];
@@ -72,6 +74,12 @@ typedef struct {
     Gen3UbSector rinfos[2u * GEN3_UB_SLOT_SECTORS];
     Gen3UbSlots rslots;
     char line[160]; /* a cache line being built or compared */
+    /* The pictures of the game file's ROM: gen3_omega_pics_find ran this connect (pics_checked),
+     * and the header's two tables checked out (pics_ok); the tables' offsets in the file; why
+     * not, in the log's words (NULL if they did) */
+    bool pics_checked, pics_ok;
+    uint32_t pic_table, pal_table;
+    const char* pics_off;
 } Gen3Omega;
 
 /* Not connected, no backup. cli was gen3_hcli_init'ed; store and *p are copied (p may be NULL);
@@ -184,6 +192,26 @@ Gen3CartResult gen3_omega_restore_check(Gen3Omega* o, const char* name, Gen3UbTr
  * dropped, also when the restore fails with the card unchanged (the working copy is then the
  * backup again). The results and progress are gen3_omega_write's. */
 Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* stamp);
+
+/* Whether the game file's ROM holds Unbound's picture tables, once per connect (pics_checked).
+ * Refused, with nothing sent, unless connected and verified. Reads the ROM's block 0 (the game
+ * file is still open in its slot from the connect) and checks the two header pointers (at 0x128
+ * the front pictures', at 0x130 the palettes'): each an address in 0x08000000..0x09FFFFFF whose
+ * table of 1268 entries lies in the file; then species 1's two entries: its front entry 0x800
+ * bytes and tagged 1, its palette entry tagged 1, both streams starting in the file. Ok with
+ * pics_ok true, or false and pics_off naming why; a link result ends the connect. */
+Gen3CartResult gen3_omega_pics_find(Gen3Omega* o);
+/* Species' picture (1..GEN3_OMEGA_PIC_SPECIES, else BadArg) read from the ROM and written as
+ * <cache_dir>/<species>.fxb (a GEN3_UB_PIC_RECORD-byte record; cache_dir at most 40 characters),
+ * through <species>.fxb.tmp and a rename, so it is never torn. Nothing but reads is sent, and the
+ * working copy, its edits and the backup are not touched. LinkLost unless connected; Refused
+ * unless pics_ok. BadBackup for an entry or a stream that fails its checks (the entry's tag or
+ * size, a pointer or stream past the end of the file, an LZ77 header other than type 0x10 with the
+ * right length, a picture with no pixels); nothing is written. SdError or SdFull if the record
+ * couldn't be stored; the temporary file is then gone. LinkLost, BusyTimeout and HelperError end
+ * the connect. Uses o->buf alone: the picture at 0, the converter's work at 2048, the ROM block
+ * being decoded at 3072, the palette at 3584 and the record at 3616. */
+Gen3CartResult gen3_omega_picture(Gen3Omega* o, uint16_t species, const char* cache_dir);
 
 #ifdef GEN3_TESTING
 /* Host tests: the hash a game file must have to be verified (NULL: Unbound 2.1.1.1's) */

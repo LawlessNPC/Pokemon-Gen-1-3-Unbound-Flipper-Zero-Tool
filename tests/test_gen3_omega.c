@@ -6,6 +6,7 @@
 #include "fake_ub_save.h"
 #include "helper_cmd.h"
 #include "ub_bulk_file.h"
+#include "ub_pic_vectors.h"
 #include <stdbool.h>
 #include <stdlib.h>
 #include <hp_core.h>
@@ -16,6 +17,7 @@
 #include <src/gen3/gen3_save.h>
 #include <src/gen3/gen3_text.h>
 #include <src/gen3/gen3_ub_mon.h>
+#include <src/gen3/gen3_ub_pic.h>
 
 /* The Omega jobs (gen3_omega.h) against the helper's real core on the fake GBA, with an EZ-Flash
  * Omega's card (fake_fat.h) and a RAM store. The default card: /ROMS/Pokemon - Unbound.gba
@@ -1693,15 +1695,257 @@ TEST(test_omega_write_verify_cut_after_mismatch) {
     ASSERT_TRUE(!om.backup_current);
 }
 
-int main(void) {
-    if(!ub_bulk_file_open()) return 1;
-    rom = malloc(ROM_LEN);
-    uint32_t x = 99u;
-    for(uint32_t i = 0; i < ROM_LEN; i++) rom[i] = (uint8_t)((x = x * 1103515245u + 12345u) >> 16);
+
+/* ---- Pictures ---- */
+
+/* The ROM file's picture data (the Omega's card holds it as Unbound's ROM): the header pointers at
+ * 0x128 and 0x130, the two tables, and the streams of species 1, 440 and 1267 (the last at the
+ * file's very end), the rest of the file noise. build_rom also makes the SHA the bench expects. */
+#define PIC_FRONT 0x100000u
+#define PIC_PAL 0x104000u
+#define PIC_S1 0x110000u /* species 1: the front stream, then the palette's */
+#define PIC_S440 0x112000u
+#define PIC_CACHE GEN3_OMEGA_PICS "/440.fxb"
+
+static void put32(uint32_t off, uint32_t v) {
+    for(uint32_t i = 0; i < 4u; i++) rom[off + i] = (uint8_t)(v >> (8u * i));
+}
+
+static void put16(uint32_t off, uint32_t v) {
+    rom[off] = (uint8_t)v;
+    rom[off + 1u] = (uint8_t)(v >> 8);
+}
+
+/* A palette as an LZ77 stream of literals only: 40 bytes at off */
+static void put_pal_lz(uint32_t off, const uint16_t* pal) {
+    uint32_t at = off;
+    put32(at, 0x10u | 32u << 8);
+    at += 4u;
+    for(uint32_t i = 0; i < 16u; i++) {
+        if(i % 4u == 0) rom[at++] = 0;
+        put16(at, pal[i]);
+        at += 2u;
+    }
+}
+
+static void put_entry(uint32_t species, uint32_t front, uint32_t pal) {
+    put32(PIC_FRONT + 8u * species, 0x08000000u + front);
+    put16(PIC_FRONT + 8u * species + 4u, 0x800);
+    put16(PIC_FRONT + 8u * species + 6u, species);
+    put32(PIC_PAL + 8u * species, 0x08000000u + pal);
+    put16(PIC_PAL + 8u * species + 4u, species);
+    put16(PIC_PAL + 8u * species + 6u, 0);
+}
+
+static void rom_hash(void) {
     HpSha256 s;
     hp_sha256_init(&s);
     hp_sha256_update(&s, rom, ROM_LEN);
     hp_sha256_final(&s, rom_sha);
+}
+
+static void build_rom(void) {
+    uint32_t x = 99u;
+    for(uint32_t i = 0; i < ROM_LEN; i++) rom[i] = (uint8_t)((x = x * 1103515245u + 12345u) >> 16);
+    put32(0x128, 0x08000000u + PIC_FRONT);
+    put32(0x130, 0x08000000u + PIC_PAL);
+    memcpy(rom + PIC_S1, ub_pic_vectors[0].tiles_lz, ub_pic_vectors[0].tiles_lz_size);
+    put_pal_lz(PIC_S1 + 0x800u, ub_pic_vectors[0].palette);
+    put_entry(1, PIC_S1, PIC_S1 + 0x800u);
+    memcpy(rom + PIC_S440, ub_pic_vectors[1].tiles_lz, ub_pic_vectors[1].tiles_lz_size);
+    put_pal_lz(PIC_S440 + 0x800u, ub_pic_vectors[1].palette);
+    put_entry(440, PIC_S440, PIC_S440 + 0x800u);
+    const uint32_t end = ROM_LEN - ub_pic_vectors[2].tiles_lz_size;
+    memcpy(rom + end, ub_pic_vectors[2].tiles_lz, ub_pic_vectors[2].tiles_lz_size);
+    put_pal_lz(end - 0x40u, ub_pic_vectors[2].palette);
+    put_entry(1267, end, end - 0x40u);
+    rom_hash();
+}
+
+/* A connected bench on the ROM as it is now (patched or not) */
+static bool pics_bench(void) {
+    return setup() && gen3_omega_connect(&om) == Gen3CartOk && om.verified;
+}
+
+static bool pic_files_absent(void) {
+    return absent(PIC_CACHE) && absent(PIC_CACHE ".tmp");
+}
+
+TEST(test_omega_pics_find_ok) {
+    build_rom();
+    ASSERT_TRUE(pics_bench());
+    ASSERT_TRUE(!om.pics_checked);
+    const uint32_t reads = hook.calls[GEN3_HCMD_OMEGA_READ];
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_TRUE(om.pics_checked);
+    ASSERT_TRUE(om.pics_ok);
+    ASSERT_EQ(om.pic_table, PIC_FRONT);
+    ASSERT_EQ(om.pal_table, PIC_PAL);
+    ASSERT_TRUE(om.pics_off == NULL);
+    /* block 0, then the front and palette entries of species 1 */
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ] - reads, 3);
+    /* once per connect */
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ] - reads, 3);
+    /* a new connect asks again */
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_TRUE(!om.pics_checked && !om.pics_ok);
+}
+
+TEST(test_omega_pics_bad_header) {
+    /* each of these: pictures off, a reason, and no read past the file */
+    for(uint32_t k = 0; k < 9u; k++) {
+        build_rom();
+        switch(k) {
+        case 0: put32(0x128, 0); break;
+        case 1: put32(0x128, 0x08000000u + ROM_LEN); break;
+        case 2: put32(0x130, 0x08000000u + ROM_LEN - 8u * 1267u); break; /* table cut by the end */
+        case 3: put32(0x130, 0x0A000000u + PIC_PAL); break; /* not ROM */
+        case 4: put16(PIC_FRONT + 8u + 4u, 0x400); break;
+        case 5: put16(PIC_PAL + 8u + 4u, 2); break; /* species 1's tag 2 */
+        case 6: put16(PIC_FRONT + 8u + 6u, 2); break;
+        case 7: put32(PIC_FRONT + 8u, 0x08000000u + ROM_LEN); break; /* data past the end */
+        case 8: put32(0x128, 0xFFFFFFF0u); break;
+        }
+        rom_hash();
+        ASSERT_TRUE(pics_bench());
+        const uint32_t reads = hook.calls[GEN3_HCMD_OMEGA_READ];
+        ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+        ASSERT_TRUE(om.pics_checked);
+        ASSERT_TRUE(!om.pics_ok);
+        ASSERT_TRUE(om.pics_off != NULL && om.pics_off[0]);
+        ASSERT_TRUE(hook.calls[GEN3_HCMD_OMEGA_READ] - reads <= 3u);
+        ASSERT_TRUE(om.connected);
+        /* and a picture is refused, with nothing sent */
+        const uint32_t sent = hook.calls[GEN3_HCMD_OMEGA_READ];
+        ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartRefused);
+        ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ], sent);
+    }
+    build_rom();
+}
+
+TEST(test_omega_pic_ok) {
+    build_rom();
+    ASSERT_TRUE(pics_bench());
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_TRUE(om.pics_ok);
+    ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartOk);
+    uint32_t size = 0;
+    const uint8_t* d = fake_store_file(&store, PIC_CACHE, &size);
+    ASSERT_TRUE(d != NULL);
+    ASSERT_EQ(size, GEN3_UB_PIC_RECORD);
+    ASSERT_TRUE(memcmp(d, ub_pic_vectors[1].record, GEN3_UB_PIC_RECORD) == 0);
+    ASSERT_TRUE(absent(PIC_CACHE ".tmp"));
+    ASSERT_TRUE(om.connected);
+    /* again: the old file replaced */
+    ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartOk);
+    d = fake_store_file(&store, PIC_CACHE, &size);
+    ASSERT_TRUE(d != NULL && size == GEN3_UB_PIC_RECORD);
+    ASSERT_TRUE(memcmp(d, ub_pic_vectors[1].record, GEN3_UB_PIC_RECORD) == 0);
+    /* species 1 too, and the species range */
+    ASSERT_EQ(gen3_omega_picture(&om, 1, GEN3_OMEGA_PICS), Gen3CartOk);
+    d = fake_store_file(&store, GEN3_OMEGA_PICS "/1.fxb", &size);
+    ASSERT_TRUE(d != NULL && memcmp(d, ub_pic_vectors[0].record, GEN3_UB_PIC_RECORD) == 0);
+    ASSERT_EQ(gen3_omega_picture(&om, 0, GEN3_OMEGA_PICS), Gen3CartBadArg);
+    ASSERT_EQ(gen3_omega_picture(&om, 1268, GEN3_OMEGA_PICS), Gen3CartBadArg);
+    /* it touches no edit state, and sends nothing but reads */
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 0);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_ARM], 0);
+}
+
+TEST(test_omega_pic_at_end) {
+    /* species 1267's stream ends at the file's last byte: the decoder's read-ahead is clamped */
+    build_rom();
+    ASSERT_TRUE(pics_bench());
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_picture(&om, 1267, GEN3_OMEGA_PICS), Gen3CartOk);
+    uint32_t size = 0;
+    const uint8_t* d = fake_store_file(&store, GEN3_OMEGA_PICS "/1267.fxb", &size);
+    ASSERT_TRUE(d != NULL && size == GEN3_UB_PIC_RECORD);
+    ASSERT_TRUE(memcmp(d, ub_pic_vectors[2].record, GEN3_UB_PIC_RECORD) == 0);
+}
+
+TEST(test_omega_pic_bad_entry) {
+    for(uint32_t k = 0; k < 9u; k++) {
+        build_rom();
+        switch(k) {
+        case 0: put16(PIC_FRONT + 8u * 440u + 6u, 441); break; /* the tag */
+        case 1: put16(PIC_PAL + 8u * 440u + 4u, 439); break;
+        case 2: put32(PIC_FRONT + 8u * 440u, 0x08000000u + ROM_LEN); break; /* past the end */
+        case 3: put32(PIC_PAL + 8u * 440u, 0x08000000u + ROM_LEN + 0x1000u); break;
+        case 4: rom[PIC_S440] = 0x11; break; /* the stream's type */
+        case 5: rom[PIC_S440 + 0x800u] = 0x11; break; /* the palette's */
+        case 6: put16(PIC_FRONT + 8u * 440u + 4u, 0x400); break;
+        case 7: rom[PIC_S440 + 1u] = 0x01; break; /* 0x801 bytes */
+        case 8: rom[PIC_S440 + 0x800u + 1u] = 0x30; break; /* a palette of 48 bytes */
+        }
+        rom_hash();
+        ASSERT_TRUE(pics_bench());
+        ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+        ASSERT_TRUE(om.pics_ok);
+        ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartBadBackup);
+        ASSERT_TRUE(pic_files_absent());
+        ASSERT_TRUE(om.connected);
+        /* a good species still works, and the bad one is tried again */
+        ASSERT_EQ(gen3_omega_picture(&om, 1, GEN3_OMEGA_PICS), Gen3CartOk);
+        ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartBadBackup);
+    }
+    /* a stream cut by the end of the file: the last 100 bytes of 1267's */
+    build_rom();
+    put32(PIC_FRONT + 8u * 1267u, 0x08000000u + ROM_LEN - 100u);
+    rom_hash();
+    ASSERT_TRUE(pics_bench());
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_picture(&om, 1267, GEN3_OMEGA_PICS), Gen3CartBadBackup);
+    ASSERT_TRUE(absent(GEN3_OMEGA_PICS "/1267.fxb"));
+    build_rom();
+}
+
+TEST(test_omega_pic_link_lost) {
+    for(uint32_t k = 1; k <= 5u; k++) {
+        build_rom();
+        ASSERT_TRUE(backed_up());
+        Gen3UbMon m;
+        ASSERT_TRUE(edit_box3(77, &m));
+        ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+        ASSERT_TRUE(om.pics_ok);
+        const uint16_t changes = gen3_omega_changes(&om);
+        const uint32_t dirty = om.dirty;
+        ASSERT_EQ(changes, 1);
+        hook.unplug_cmd = GEN3_HCMD_OMEGA_READ;
+        hook.unplug_cmd_at = hook.calls[GEN3_HCMD_OMEGA_READ] + k;
+        const Gen3CartResult r = gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS);
+        ASSERT_TRUE(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout);
+        ASSERT_TRUE(!om.connected);
+        ASSERT_TRUE(pic_files_absent());
+        ASSERT_EQ(gen3_omega_changes(&om), changes);
+        ASSERT_EQ(om.dirty, dirty);
+        ASSERT_TRUE(om.work_ok);
+    }
+}
+
+TEST(test_omega_pic_unverified) {
+    build_rom();
+    ASSERT_TRUE(setup());
+    const uint8_t other[32] = {1};
+    gen3_omega_set_expected_sha(other);
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_TRUE(!om.verified);
+    const uint32_t reads = hook.calls[GEN3_HCMD_OMEGA_READ], opens = hook.calls[GEN3_HCMD_OMEGA_OPEN];
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartRefused);
+    ASSERT_TRUE(!om.pics_ok);
+    ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartRefused);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ], reads);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_OPEN], opens);
+    ASSERT_TRUE(pic_files_absent());
+    gen3_omega_set_expected_sha(rom_sha);
+}
+
+int main(void) {
+    if(!ub_bulk_file_open()) return 1;
+    rom = malloc(ROM_LEN);
+    build_rom();
     RUN(test_omega_connect_ok);
     RUN(test_omega_connect_cached);
     RUN(test_omega_hash_mismatch);
@@ -1753,6 +1997,13 @@ int main(void) {
     RUN(test_omega_write_refused_parity);
     RUN(test_omega_write_disarms);
     RUN(test_omega_write_verify_cut_after_mismatch);
+    RUN(test_omega_pics_find_ok);
+    RUN(test_omega_pics_bad_header);
+    RUN(test_omega_pic_ok);
+    RUN(test_omega_pic_at_end);
+    RUN(test_omega_pic_bad_entry);
+    RUN(test_omega_pic_link_lost);
+    RUN(test_omega_pic_unverified);
     fake_fat_free(&card);
     free(rom);
     TEST_EXIT();
