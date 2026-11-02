@@ -1938,27 +1938,33 @@ TEST(test_screen_ub_pages) {
         }
         ASSERT_EQ(next, gen3_ub_sorted_count(sorts[s]));
         if(sorts[s] == Gen3UbSortSpecies) {
-            ASSERT_STR_EQ(p[0].label, "?");
-            ASSERT_EQ(p[0].count, 23);
+            /* no "?" page: CFRU's placeholders aren't in the list; A, 75 names, in two pages */
+            ASSERT_STR_EQ(p[0].label, "ABO-ARC");
+            ASSERT_EQ(p[0].count, 37);
+            ASSERT_STR_EQ(p[1].label, "ARC-AZU");
+            ASSERT_EQ(p[1].count, 38);
+            ASSERT_STR_EQ(p[2].label, "B");
+            ASSERT_EQ(p[2].count, 61);
             /* S, 164 names, in three pages */
             size_t k = 0;
             while(k < n[s] && p[k].label[0] != 'S') k++;
             ASSERT_STR_EQ(p[k].label, "SAB-SHI");
-            ASSERT_EQ(p[k].first, 897);
+            ASSERT_EQ(p[k].first, 871);
             ASSERT_EQ(p[k].count, 54);
             ASSERT_STR_EQ(p[k + 1].label, "SHI-SMO");
             ASSERT_EQ(p[k + 1].count, 55);
             ASSERT_STR_EQ(p[k + 2].label, "SNE-SYL");
-            ASSERT_EQ(p[k + 2].first, 1006);
+            ASSERT_EQ(p[k + 2].first, 980);
             ASSERT_EQ(p[k + 2].count, 55);
             ASSERT_STR_EQ(p[k + 3].label, "T");
+            ASSERT_EQ(p[k + 3].count, 58);
         }
         if(sorts[s] == Gen3UbSortMoves) {
             ASSERT_STR_EQ(p[0].label, "1");
             ASSERT_EQ(p[0].count, 2);
         }
     }
-    ASSERT_EQ(n[0], 35);
+    ASSERT_EQ(n[0], 34);
     ASSERT_EQ(n[1], 30);
     ASSERT_EQ(n[2], 26);
     /* Too little room: none */
@@ -1976,7 +1982,7 @@ TEST(test_screen_pic_page) {
     ASSERT_TRUE(ub_bulk_file_open());
     static Gen3CartScreenUbPage p[GEN3_CART_SCREEN_UB_PAGES];
     const size_t n = gen3_cart_screen_ub_pages(Gen3UbSortSpecies, p, GEN3_CART_SCREEN_UB_PAGES);
-    ASSERT_TRUE(n > 2);
+    ASSERT_TRUE(n > 3); /* p[2], and p[3] below */
     const Gen3CartScreenUbPage* pg = &p[2];
     const uint16_t mid = gen3_ub_sorted(Gen3UbSortSpecies, (uint16_t)(pg->first + pg->count / 2u));
 

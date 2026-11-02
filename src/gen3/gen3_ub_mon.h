@@ -75,5 +75,6 @@ bool gen3_ub_solve_identity(Gen3UbMon* m, uint8_t nature, int shiny, int gender,
 void gen3_ub_party_restat(Gen3UbMon* m);
 
 /* A new box Pokemon with PUSE's defaults. The owner's OT id, OT name, language and flags (without
- * bad egg or egg) come from owner, a party or box record. False for an unknown species. */
+ * bad egg or egg) come from owner, a party or box record. False for an unknown species or one no
+ * Pokemon can be (gen3_ub_species_real). */
 bool gen3_ub_new_box_mon(Gen3UbMon* m, uint16_t species, uint8_t level, const Gen3UbMon* owner);

@@ -55,6 +55,63 @@ TEST(test_ub_shipped) {
     ASSERT_EQ(gen3_ub_shipped_picture(1268), 0);
 }
 
+/* Ids a Pokemon can't be: CFRU's placeholders after Celebi (252 .. 276, PUSE's "Egg",
+ * "MISSINGNO?" and 23 "?") and the egg, 412 ("Bad Egg"). The sorted list holds every other id. */
+TEST(test_ub_species_real) {
+    ASSERT_TRUE(ub_bulk_file_open());
+    ASSERT_TRUE(gen3_ub_species_real(1));
+    ASSERT_TRUE(gen3_ub_species_real(201)); /* Unown */
+    ASSERT_TRUE(gen3_ub_species_real(251)); /* Celebi */
+    for(uint16_t id = 252; id <= 276; id++) ASSERT_TRUE(!gen3_ub_species_real(id));
+    ASSERT_TRUE(gen3_ub_species_real(277)); /* Treecko */
+    ASSERT_TRUE(gen3_ub_species_real(411)); /* Chimecho */
+    ASSERT_TRUE(!gen3_ub_species_real(412));
+    ASSERT_TRUE(gen3_ub_species_real(413)); /* Unown B */
+    ASSERT_TRUE(gen3_ub_species_real(439)); /* Unown ? */
+    ASSERT_TRUE(gen3_ub_species_real(1267));
+    ASSERT_TRUE(!gen3_ub_species_real(0));
+    ASSERT_TRUE(!gen3_ub_species_real(1268));
+    ASSERT_TRUE(!gen3_ub_species_real(0xFFFF));
+    const uint16_t n = gen3_ub_sorted_count(Gen3UbSortSpecies);
+    uint16_t real = 0;
+    for(uint16_t id = 1; id <= GEN3_UB_SPECIES_MAX; id++) real = (uint16_t)(real + gen3_ub_species_real(id));
+    ASSERT_EQ(n, real);
+    for(uint16_t k = 0; k < n; k++) ASSERT_TRUE(gen3_ub_species_real(gen3_ub_sorted(Gen3UbSortSpecies, k)));
+}
+
+/* Names PUSE lost a character of ('?' for it) are spelt out */
+TEST(test_ub_names_spelt) {
+    ASSERT_TRUE(ub_bulk_file_open());
+    static const struct {
+        uint16_t id;
+        const char* name;
+    } want[] = {
+        {29, "NIDORAN F"},
+        {32, "NIDORAN M"},
+        {122, "MR. MIME"},
+        {438, "UNOWN !"},
+        {439, "UNOWN ?"},
+        {492, "MIME JR."},
+        {777, "FLABEBE"},
+        {840, "FLABEBE"},
+        {843, "FLABEBE"},
+        {1158, "MR. RIME"},
+        {1220, "MR. MIME"},
+        {1228, "MIME JR."},
+    };
+    char name[11];
+    for(size_t k = 0; k < sizeof(want) / sizeof(want[0]); k++) {
+        ASSERT_TRUE(gen3_ub_species_name(want[k].id, name));
+        ASSERT_STR_EQ(name, want[k].name);
+    }
+    /* no other real species' name has a '?' */
+    for(uint16_t id = 1; id <= GEN3_UB_SPECIES_MAX; id++) {
+        if(!gen3_ub_species_real(id) || id == 439) continue;
+        ASSERT_TRUE(gen3_ub_species_name(id, name));
+        ASSERT_TRUE(strchr(name, '?') == NULL);
+    }
+}
+
 TEST(test_ub_moves) {
     ASSERT_TRUE(ub_bulk_file_open());
     char name[13];
@@ -147,7 +204,7 @@ static void check_sorted(Gen3UbSort s, uint16_t want_count) {
 
 TEST(test_ub_sorted) {
     ASSERT_TRUE(ub_bulk_file_open());
-    check_sorted(Gen3UbSortSpecies, 1267);
+    check_sorted(Gen3UbSortSpecies, 1241);
     check_sorted(Gen3UbSortMoves, 922);
     /* The held-item pick list is the ball, berry and main pockets that have a name */
     const uint16_t n = gen3_ub_sorted_count(Gen3UbSortItems);
@@ -185,6 +242,8 @@ int main(void) {
     RUN(test_ub_names);
     RUN(test_ub_growth_ndex);
     RUN(test_ub_shipped);
+    RUN(test_ub_species_real);
+    RUN(test_ub_names_spelt);
     RUN(test_ub_moves);
     RUN(test_ub_items);
     RUN(test_ub_abilities);

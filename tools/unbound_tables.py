@@ -23,7 +23,9 @@ Layout (version 3), little-endian:
     12     12 * count table directory: tag (4 ASCII), offset (4), entries (2), entry size (2)
 
 Tables, in this order. Names are uppercase ASCII, NUL-padded, with at least one NUL. Species ids
-run 0 .. 1267 (1268 entries); id 0 is empty or zero in every table.
+run 0 .. 1267 (1268 entries); id 0 is empty or zero in every table. A species name PUSE lost a
+character of (it writes '?' for it) is spelt out: FLABEBE, NIDORAN F and M, MR. MIME and so on
+(SPELT below).
 
     NAME   11 bytes   species name (id 0 all NUL)
     GROW    1 byte    growth rate 0..5, 0xFF unknown
@@ -39,7 +41,8 @@ run 0 .. 1267 (1268 entries); id 0 is empty or zero in every table.
     LVUP    2 bytes   1269 start offsets (in entries, counted from the first move entry, so offset
                       k to offset k+1 is species k's list; a species with no learnset has an empty
                       one), then the level-up move ids of species 0 .. 1267 in the file's order
-    SRTS    2 bytes   species ids 1 .. 1267 sorted by the stored name
+    SRTS    2 bytes   species ids 1 .. 1267 sorted by the stored name, but the ids no Pokemon can
+                      be (NOT_SPECIES below: CFRU's placeholders 252 .. 276 and the egg, 412)
     SRTM    2 bytes   move ids 1 .. 922 sorted by the stored name
     SRTI    2 bytes   ids of the named items in pockets 1 to 3, sorted by the stored name
     SHIP    2 bytes   species ids 0 .. 1267: the National Dex number 1 .. 386 whose shipped picture
@@ -69,6 +72,32 @@ ITEM_SIZE = 18
 ABIL_SIZE = 16
 POCKETS = {"main": 1, "ball": 2, "berry": 3, "tm": 4, "hm": 5, "key": 6}
 
+# Species ids no Pokemon can be, left out of the pick list (SRTS); the app refuses them too
+# (gen3_ub_species_real). 252 .. 276 are CFRU's placeholders between Celebi and Treecko (Gen III's
+# old Unown slots; PUSE names them "Egg", "MISSINGNO?" and 23 "?"), and 412 is SPECIES_EGG, which
+# PUSE names "Bad Egg". In species_constants.json, 252 .. 276 are the only ids 1 .. 1267 with no
+# constant, and 412's is SPECIES_EGG.
+NOT_SPECIES = frozenset(range(252, 277)) | {412}
+
+# Species names in which PUSE's pokemon.txt has '?' for a character it couldn't decode (the e with
+# an acute accent, the female and male signs, '.' and '!'): id -> (PUSE's name, the name stored).
+# The female and male signs have no ASCII, so they become F and M. Unown ? (439) is its real name.
+SPELT = {
+    29: ("Nidoran?", "NIDORAN F"),
+    32: ("Nidoran?", "NIDORAN M"),
+    122: ("Mr? Mime", "MR. MIME"),
+    438: ("Unown ?", "UNOWN !"),
+    492: ("Mime Jr?", "MIME JR."),
+    777: ("Flab?b?", "FLABEBE"),
+    840: ("Flab?b?", "FLABEBE"),
+    841: ("Flab?b?", "FLABEBE"),
+    842: ("Flab?b?", "FLABEBE"),
+    843: ("Flab?b?", "FLABEBE"),
+    1158: ("Mr? Rime", "MR. RIME"),
+    1220: ("Mr? Mime", "MR. MIME"),
+    1228: ("Mime Jr?", "MIME JR."),
+}
+
 
 class GenError(Exception):
     pass
@@ -78,7 +107,7 @@ def fail(message):
     raise GenError(message)
 
 
-def read_names(path, name_max, first):
+def read_names(path, name_max, first, spelt=None):
     names = {}
     with open(path, encoding="utf-8") as f:
         for n, line in enumerate(f, 1):
@@ -88,6 +117,10 @@ def read_names(path, name_max, first):
             key, sep, name = line.partition(":")
             if not sep or not key.isdigit():
                 fail(f"{path}:{n}: not 'id:Name'")
+            if spelt and int(key) in spelt:
+                if name != spelt[int(key)][0]:
+                    fail(f"{path}:{n}: name {name!r} isn't {spelt[int(key)][0]!r}, as SPELT expects")
+                name = spelt[int(key)][1]
             name = name.replace("\u00e9", "E")
             if not name.isascii() or len(name) > name_max:
                 fail(f"{path}:{n}: name {name!r} isn't ASCII of at most {name_max}")
@@ -108,7 +141,10 @@ def build(puse):
     if head.returncode != 0 or head.stdout.strip() != PUSE_COMMIT:
         fail(f"{puse} isn't at PUSE commit {PUSE_COMMIT}")
     data = os.path.join(puse, "backend", "data")
-    names, count = read_names(os.path.join(data, "pokemon.txt"), NAME_MAX, 0)
+    names, count = read_names(os.path.join(data, "pokemon.txt"), NAME_MAX, 0, SPELT)
+    for sid, name in names.items():
+        if sid not in NOT_SPECIES and sid != 439 and "?" in name:
+            fail(f"species {sid}: name {name!r} has a '?' SPELT doesn't spell out")
     growth = read_json(os.path.join(data, "species_growth_rates.json"))
     dex = read_json(os.path.join(data, "pokedex_species_map.json")).get("species_to_dex")
     if not isinstance(dex, dict):
@@ -265,7 +301,8 @@ def more_tables(data, species_names, species_count):
     def pack_ids(ids):
         return b"".join(struct.pack("<H", i) for i in ids)
 
-    srts = sorted_ids(range(1, species_count), lambda i: species_names[i])
+    real = [i for i in range(1, species_count) if i not in NOT_SPECIES]
+    srts = sorted_ids(real, lambda i: species_names[i])
     srtm = sorted_ids(range(1, move_count), lambda i: move_names[i])
     srti = sorted_ids([i for i in range(1, item_count) if itpk_t[i] in (1, 2, 3)], lambda i: item_names[i])
     return [

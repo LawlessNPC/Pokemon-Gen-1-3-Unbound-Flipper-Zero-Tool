@@ -90,6 +90,7 @@ static bool ed_has_slot(uint16_t species, uint8_t slot) {
 bool gen3_ub_edit_set_species(Gen3UbEditor* e, uint16_t species) {
     Gen3UbMon* m = &e->mon;
     char name[GEN3_UB_NAME_LEN + 1u];
+    if(!gen3_ub_species_real(species)) return false;
     int g = gen3_ub_growth(species, NULL);
     if(g < 0 || !gen3_ub_species_name(species, name)) return false;
     uint16_t old = gen3_ub_mon_species(m);

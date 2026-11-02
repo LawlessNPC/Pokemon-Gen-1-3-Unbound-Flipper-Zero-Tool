@@ -17,6 +17,10 @@ typedef bool (*Gen3UbRead)(void* ctx, uint32_t offset, void* buf, uint32_t len);
 bool gen3_ub_data_open(Gen3UbRead read, void* ctx);
 void gen3_ub_data_close(void);
 bool gen3_ub_data_ok(void);
+/* Whether a Pokemon can be the species: an id 1..GEN3_UB_SPECIES_MAX but CFRU's placeholders after
+ * Celebi (252..276) and the egg (412, "BAD EGG"), which tools/unbound_tables.py also leaves out of
+ * the sorted list. Needs no data. */
+bool gen3_ub_species_real(uint16_t species);
 /* The species' name, uppercase; false (out "#<id>") for an id with none, or a read failure */
 bool gen3_ub_species_name(uint16_t species, char out[GEN3_UB_NAME_LEN + 1u]);
 /* The growth rate 0..5, -1 if unknown or unreadable. A Gen3UbGrowthFn (ctx unused). */

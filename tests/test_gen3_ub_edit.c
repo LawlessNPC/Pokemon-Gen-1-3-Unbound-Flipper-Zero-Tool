@@ -67,6 +67,13 @@ TEST(test_ub_edit_species) {
     ASSERT_EQ(hp, (2 * bs[0] + 31) * 30 / 100 + 30 + 10);
     ASSERT_TRUE(!gen3_ub_edit_set_species(&e, 2000));
     ASSERT_EQ(gen3_ub_mon_species(&e.mon), 4);
+    /* not a species: the egg, and CFRU's placeholders */
+    const Gen3UbMon before = e.mon;
+    static const uint16_t not_species[] = {412, 252, 253, 254, 276};
+    for(size_t k = 0; k < sizeof(not_species) / sizeof(not_species[0]); k++) {
+        ASSERT_TRUE(!gen3_ub_edit_set_species(&e, not_species[k]));
+        ASSERT_TRUE(memcmp(&e.mon, &before, sizeof(before)) == 0);
+    }
 
     bulbasaur(&e, true);
     set_nick(&e.mon, "SPROUT");

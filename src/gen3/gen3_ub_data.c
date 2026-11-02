@@ -139,6 +139,11 @@ static bool ub_name_of(UbTableId id, uint16_t index, char* out) {
     return false;
 }
 
+bool gen3_ub_species_real(uint16_t species) {
+    return species >= 1u && species <= GEN3_UB_SPECIES_MAX && (species < 252u || species > 276u) &&
+           species != 412u;
+}
+
 bool gen3_ub_species_name(uint16_t species, char out[GEN3_UB_NAME_LEN + 1u]) {
     char b[UB_DATA_NAME_SIZE];
     if(species > 0 && ub_entry(UbName, species, b) && b[0] != 0) {

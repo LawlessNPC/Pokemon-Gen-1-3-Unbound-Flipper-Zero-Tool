@@ -215,6 +215,11 @@ TEST(test_ub_new_box_mon) {
     gen3_text_decode(&m.raw[8], 10, nick, sizeof(nick));
     ASSERT_STR_EQ(nick, "BULBASAUR");
     ASSERT_TRUE(!gen3_ub_new_box_mon(&m, 2000, 5, &owner));
+    /* not a species: the egg, and CFRU's placeholders */
+    ASSERT_TRUE(!gen3_ub_new_box_mon(&m, 412, 5, &owner));
+    ASSERT_TRUE(!gen3_ub_new_box_mon(&m, 252, 5, &owner));
+    ASSERT_TRUE(!gen3_ub_new_box_mon(&m, 276, 5, &owner));
+    ASSERT_TRUE(gen3_ub_new_box_mon(&m, 277, 5, &owner)); /* Treecko */
 }
 
 int main(void) {

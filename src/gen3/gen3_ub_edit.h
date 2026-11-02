@@ -27,7 +27,8 @@ void gen3_ub_edit_load(Gen3UbEditor* e, const Gen3UbMon* m, const Gen3UbTrainer*
 /* Keeps level, nature, shininess and the ability slot where the species has it (else slot 0). The
  * nickname follows if it was the old species' name (all caps stays all caps, else each word is
  * capitalised); the moves become the first 4 of its level-up list, PP-ups cleared and PP refilled.
- * False, with the record unchanged, for an unknown species. */
+ * False, with the record unchanged, for an unknown species or one no Pokemon can be
+ * (gen3_ub_species_real). */
 bool gen3_ub_edit_set_species(Gen3UbEditor* e, uint16_t species);
 /* 1..100, else ignored. Sets exp for the species' growth rate. */
 void gen3_ub_edit_set_level(Gen3UbEditor* e, uint8_t level);

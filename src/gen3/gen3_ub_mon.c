@@ -318,6 +318,7 @@ void gen3_ub_party_restat(Gen3UbMon* m) {
 
 bool gen3_ub_new_box_mon(Gen3UbMon* m, uint16_t species, uint8_t level, const Gen3UbMon* owner) {
     char name[GEN3_UB_NAME_LEN + 1u];
+    if(!gen3_ub_species_real(species)) return false;
     int g = gen3_ub_growth(species, NULL);
     if(g < 0 || !gen3_ub_species_name(species, name)) return false;
     if(level < 1u) level = 1u;
