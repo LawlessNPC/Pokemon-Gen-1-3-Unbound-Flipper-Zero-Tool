@@ -312,12 +312,14 @@ uint64_t fake_fat_digest_except(const FakeFat* f, uint32_t first_cluster) {
         const uint8_t* fb = f->blk[f->fat + c / 128u];
         c = fb ? get32(fb + (c % 128u) * 4u) & 0x0FFFFFFFu : 0;
     }
+    static const uint8_t zero[BLOCK];
     uint64_t h = 1469598103934665603ull;
     for(uint32_t lba = 0; lba < f->blocks; lba++) {
+        const uint8_t* b = f->blk[lba];
+        /* an all-zero block reads as one never written: it adds nothing */
+        if(!b || memcmp(b, zero, BLOCK) == 0) continue;
         const uint32_t cl = lba >= f->data ? (lba - f->data) / f->spc + 2u : 0;
         if(cl >= 2u && cl - 2u < f->clusters && in_chain[cl]) continue;
-        uint8_t b[BLOCK];
-        fake_fat_block(f, lba, b);
         h = (h ^ lba) * 1099511628211ull;
         for(uint32_t i = 0; i < BLOCK; i += 8u) {
             uint64_t w;

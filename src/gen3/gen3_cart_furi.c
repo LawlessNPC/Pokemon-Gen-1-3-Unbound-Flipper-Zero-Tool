@@ -213,6 +213,7 @@ static const char* cart_result_name(Gen3CartResult r) {
         [Gen3CartLinkBusy] = "LinkBusy",
         [Gen3CartOmegaPending] = "OmegaPending",
         [Gen3CartNoGame] = "NoGame",
+        [Gen3CartWrittenShared] = "WrittenShared",
     };
     return (size_t)r < COUNT_OF(names) ? names[r] : "?";
 }

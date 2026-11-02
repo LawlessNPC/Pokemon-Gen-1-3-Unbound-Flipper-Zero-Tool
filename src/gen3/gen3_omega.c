@@ -338,14 +338,19 @@ static Gen3CartResult om_backup_verify(Gen3Omega* o) {
     return r;
 }
 
-/* Section id of the backup file's loaded slot into buf */
-static bool om_section(Gen3Omega* o, const char* name, uint8_t id) {
+/* Physical sector s of the file name (a backup or the working copy) into buf */
+static bool om_file_sector(Gen3Omega* o, const char* name, uint32_t s) {
     const Gen3Store* st = &o->store;
     void* f = st->open(st->ctx, name, Gen3StoreRead);
     if(!f) return false;
-    const bool ok = st->read(st->ctx, f, o->slots.phys[id] * OM_SECTOR, o->buf, OM_SECTOR);
+    const bool ok = st->read(st->ctx, f, s * OM_SECTOR, o->buf, OM_SECTOR);
     st->close(st->ctx, f);
     return ok;
+}
+
+/* Section id of the file's loaded slot into buf */
+static bool om_section(Gen3Omega* o, const char* name, uint8_t id) {
+    return om_file_sector(o, name, o->slots.phys[id]);
 }
 
 /* GEN3_OMEGA_WORK made from the backup, 4 KB at a time through buf; removed if it fails */
@@ -633,4 +638,211 @@ bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out) {
     out->party = true;
     memcpy(out->raw, o->buf + GEN3_UB_PARTY_OFF(pick), GEN3_UB_PARTY_MON);
     return true;
+}
+
+/* ---- Writing the card ---- */
+
+#define OM_PREP_STEPS (GEN3_UB_SECTORS + 2u) /* the OPEN, a CRC a sector, the ARM */
+#define OM_POST_STEPS (3u * GEN3_UB_SECTORS + 1u) /* the backup's reads, its two checks, Analyze */
+#define OM_SHARED 30u /* the first of the two sectors both slots share */
+
+/* A lost link, or a helper whose state is in doubt, ends the connect: a new Connect first */
+static void om_end_link(Gen3Omega* o, Gen3CartResult r) {
+    if(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout || r == Gen3CartHelperError) {
+        o->connected = false;
+    }
+}
+
+/* OMEGA_CRC32 of the save's sector s */
+static Gen3CartResult om_crc(Gen3Omega* o, uint32_t s, uint32_t* crc) {
+    return om_link(
+        o, gen3_hcli_omega_crc32(o->cli, GEN3_OMEGA_SLOT_SAVE, s * OM_SECTOR, OM_SECTOR, crc));
+}
+
+/* The card still holds the backup's save: slot 0 opened again on its path, with the size and
+ * first cluster the connect found, and each sector's OMEGA_CRC32 the backup's; then armed for that
+ * file. Changed, the backup and the edits dropped, if not. */
+static Gen3CartResult om_write_check(Gen3Omega* o) {
+    om_step(o, Gen3CartStepPrepare, 0, OM_PREP_STEPS);
+    Gen3HOmegaFile f;
+    Gen3CartResult r =
+        om_link(o, gen3_hcli_omega_open(o->cli, GEN3_OMEGA_SLOT_SAVE, o->save_path, &f));
+    if(r == Gen3CartNoGame ||
+       (r == Gen3CartOk &&
+        (f.size != o->save.size || f.first_cluster != o->save.first_cluster))) {
+        r = Gen3CartChanged;
+    }
+    if(r == Gen3CartOk) om_step(o, Gen3CartStepPrepare, 1, OM_PREP_STEPS);
+    for(uint32_t s = 0; s < GEN3_UB_SECTORS && r == Gen3CartOk; s++) {
+        uint32_t crc = 0;
+        r = om_crc(o, s, &crc);
+        if(r == Gen3CartOk && crc != o->crc[s]) r = Gen3CartChanged;
+        if(r == Gen3CartOk) om_step(o, Gen3CartStepPrepare, s + 2u, OM_PREP_STEPS);
+    }
+    if(r == Gen3CartOk) {
+        r = om_link(o, gen3_hcli_omega_arm(o->cli, o->save.size, o->save.first_cluster));
+    }
+    if(r == Gen3CartChanged) {
+        o->backup_current = false;
+        om_drop_edits(o);
+    }
+    if(r == Gen3CartOk) om_step(o, Gen3CartStepPrepare, OM_PREP_STEPS, OM_PREP_STEPS);
+    return r;
+}
+
+/* buf written as sector s of the armed file: Ok only once the helper's read-back CRC is the
+ * image's. Any other answer leaves the sector's state unknown. */
+static Gen3CartResult om_put_sector(Gen3Omega* o, uint8_t s) {
+    const uint32_t want = gen3_crc32(o->buf, OM_SECTOR);
+    o->want_crc[s] = want;
+    uint32_t got = 0;
+    switch(gen3_hcli_omega_write_sector(o->cli, s, o->buf, &got)) {
+    case Gen3HcliOk:
+        return got == want ? Gen3CartOk : Gen3CartVerifyFailed;
+    case Gen3HcliLinkLost:
+        return Gen3CartLinkLost;
+    case Gen3HcliBusyTimeout:
+        return Gen3CartBusyTimeout;
+    case Gen3HcliStatusError:
+        return o->cli->last_status == GEN3_HST_VERIFY_FAIL ? Gen3CartVerifyFailed :
+                                                              Gen3CartFlashError;
+    case Gen3HcliBadResponse:
+        break;
+    }
+    /* An answer the client couldn't take: the helper's state is in doubt */
+    o->connected = false;
+    return Gen3CartFlashError;
+}
+
+/* Section id of the new slot into buf: the working copy's data from the loaded slot's sector with
+ * that id, and its footer remade with the id, the checksum over the section's length (section 4's
+ * copied, as PUSE never recomputes it), that sector's signature and the new slot's counter. A
+ * sector with no edit must still be the backup's; SdError if it isn't, or can't be read. */
+static Gen3CartResult om_slot_image(Gen3Omega* o, uint8_t id, uint32_t counter) {
+    const uint8_t src = o->slots.phys[id];
+    if(!om_file_sector(o, GEN3_OMEGA_WORK, src)) return Gen3CartSdError;
+    if(!((o->dirty >> src) & 1u) && gen3_crc32(o->buf, OM_SECTOR) != o->crc[src]) {
+        return Gen3CartSdError;
+    }
+    const Gen3UbSector* old = &o->infos[src];
+    const Gen3UbSector f = {
+        .id = id,
+        .checksum = id == GEN3_UB_OPAQUE_ID ? old->checksum : gen3_ub_section_sum(o->buf, id),
+        .signature = old->signature,
+        .counter = counter,
+    };
+    gen3_ub_set_footer(o->buf, &f);
+    return Gen3CartOk;
+}
+
+/* The write test, then the slot the game doesn't load, a sector at a time: Program 1 .. 15 of
+ * total */
+static Gen3CartResult om_write_slot(Gen3Omega* o, uint32_t total) {
+    const uint32_t loaded = (uint32_t)o->slots.loaded;
+    const uint8_t first = (uint8_t)((1u - loaded) * GEN3_UB_SLOT_SECTORS);
+    /* The write test: the new slot's first sector, with the bytes the card holds there */
+    if(!om_file_sector(o, o->backup_name, first) ||
+       gen3_crc32(o->buf, OM_SECTOR) != o->crc[first]) {
+        return Gen3CartSdError;
+    }
+    Gen3CartResult r = om_put_sector(o, first);
+    if(r != Gen3CartOk) return r;
+    om_step(o, Gen3CartStepProgram, 1, total);
+    /* Section 0 one sector further on than in the loaded slot, as the game's own save puts it */
+    const uint32_t r_loaded = o->slots.phys[0] - loaded * GEN3_UB_SLOT_SECTORS;
+    const uint32_t rot = (r_loaded + 1u) % GEN3_UB_SLOT_SECTORS;
+    const uint32_t counter = o->slots.counter[loaded] + 1u;
+    for(uint32_t k = 0; k < GEN3_UB_SLOT_SECTORS && r == Gen3CartOk; k++) {
+        const uint8_t id = (uint8_t)((k + GEN3_UB_SLOT_SECTORS - rot) % GEN3_UB_SLOT_SECTORS);
+        r = om_slot_image(o, id, counter);
+        if(r == Gen3CartOk) r = om_put_sector(o, (uint8_t)(first + k));
+        if(r == Gen3CartOk) om_step(o, Gen3CartStepProgram, k + 2u, total);
+    }
+    return r;
+}
+
+/* Sectors 30 and 31, those an edit changed, from the working copy */
+static Gen3CartResult om_write_shared(Gen3Omega* o, uint32_t total) {
+    uint32_t done = 1u + GEN3_UB_SLOT_SECTORS;
+    for(uint8_t s = OM_SHARED; s < GEN3_UB_SECTORS; s++) {
+        if(!((o->dirty >> s) & 1u)) continue;
+        const Gen3CartResult r =
+            om_file_sector(o, GEN3_OMEGA_WORK, s) ? om_put_sector(o, s) : Gen3CartSdError;
+        if(r != Gen3CartOk) return r;
+        om_step(o, Gen3CartStepProgram, ++done, total);
+    }
+    return Gen3CartOk;
+}
+
+/* Each sector's OMEGA_CRC32 against want_crc: VerifyFailed, or WrittenShared if only sectors 30
+ * and 31 differ */
+static Gen3CartResult om_write_verify(Gen3Omega* o) {
+    bool bad = false, shared = false;
+    for(uint32_t s = 0; s < GEN3_UB_SECTORS; s++) {
+        uint32_t crc = 0;
+        const Gen3CartResult r = om_crc(o, s, &crc);
+        if(r != Gen3CartOk) return r;
+        if(crc != o->want_crc[s]) {
+            if(s >= OM_SHARED) {
+                shared = true;
+            } else {
+                bad = true;
+            }
+        }
+        om_step(o, Gen3CartStepVerify, s + 1u, GEN3_UB_SECTORS);
+    }
+    return bad ? Gen3CartVerifyFailed : shared ? Gen3CartWrittenShared : Gen3CartOk;
+}
+
+/* The new backup's steps as PostBackup 0 .. OM_POST_STEPS; ctx is the write's own progress */
+static void om_post_step(void* ctx, Gen3CartStep step, uint32_t done, uint32_t total) {
+    (void)total;
+    const Gen3CartProgress* p = ctx;
+    if(step == Gen3CartStepBackupVerify) done += GEN3_UB_SECTORS;
+    if(step == Gen3CartStepAnalyze) done += 3u * GEN3_UB_SECTORS;
+    if(p->cb) p->cb(p->ctx, Gen3CartStepPostBackup, done, OM_POST_STEPS);
+}
+
+/* The new backup, shown as PostBackup and not to be cancelled */
+static Gen3CartResult om_write_backup(Gen3Omega* o, const char* stamp) {
+    Gen3CartProgress outer = o->progress;
+    om_step(o, Gen3CartStepPostBackup, 0, OM_POST_STEPS);
+    o->progress = (Gen3CartProgress){.cb = om_post_step, .ctx = &outer, .cancel = NULL};
+    const Gen3CartResult r = gen3_omega_backup(o, stamp);
+    o->progress = outer;
+    return r;
+}
+
+Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp) {
+    if(gen3_omega_changes(o) == 0) return Gen3CartNothing;
+    if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+    if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
+    if(!o->connected) return Gen3CartLinkLost;
+    const Gen3Store* st = &o->store;
+    if(st->free_bytes(st->ctx) < GEN3_UB_SAVE_SIZE + OM_SECTOR) return Gen3CartSdFull;
+    memcpy(o->want_crc, o->crc, sizeof(o->want_crc));
+    const uint32_t shared = ((o->dirty >> OM_SHARED) & 1u) + (o->dirty >> (OM_SHARED + 1u));
+    const uint32_t total = 1u + GEN3_UB_SLOT_SECTORS + shared;
+    Gen3CartResult r = om_write_check(o);
+    if(r == Gen3CartOk) r = om_write_slot(o, total);
+    if(r == Gen3CartOk) {
+        /* The new slot is whole: the game loads it now */
+        r = om_write_shared(o, total);
+        if(r != Gen3CartOk) {
+            om_end_link(o, r);
+            r = Gen3CartWrittenShared;
+        } else {
+            r = om_write_verify(o);
+        }
+        if(r != Gen3CartOk) {
+            /* The backup holds the save before this one, and the edits are on the card */
+            o->backup_current = false;
+            om_drop_edits(o);
+        }
+    }
+    if(r != Gen3CartOk) {
+        om_end_link(o, r);
+        return r;
+    }
+    return om_write_backup(o, stamp) == Gen3CartOk ? Gen3CartOk : Gen3CartWrittenNoBackup;
 }

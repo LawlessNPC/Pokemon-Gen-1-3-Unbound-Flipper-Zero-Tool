@@ -247,6 +247,50 @@ TEST(test_ub_trainer) {
     ASSERT_EQ(gen3_ub_party_count(img + slots.phys[1] * 4096u), 6);
 }
 
+TEST(test_ub_footer_write) {
+    /* the section checksum over each id's length: the one the fake save has */
+    fake_ub_erase(img);
+    fake_ub_build(img, 0, 20, 3);
+    analyze();
+    for(uint8_t id = 0; id < 14u; id++) {
+        const uint8_t* s = img + slots.phys[id] * 4096u;
+        ASSERT_EQ(gen3_ub_section_sum(s, id), infos[slots.phys[id]].checksum);
+    }
+    ASSERT_EQ(gen3_ub_section_sum(img, 14), 0);
+    /* a byte past section 13's length (0x450) doesn't count */
+    uint8_t* s13 = img + slots.phys[13] * 4096u;
+    const uint16_t sum13 = gen3_ub_section_sum(s13, 13);
+    s13[0x460] ^= 0x01;
+    ASSERT_EQ(gen3_ub_section_sum(s13, 13), sum13);
+    s13[0x440] ^= 0x01;
+    ASSERT_TRUE(gen3_ub_section_sum(s13, 13) != sum13);
+    /* a footer written, and read back; nothing else changes */
+    static uint8_t sec[4096], was[4096];
+    for(uint32_t i = 0; i < 4096u; i++) sec[i] = (uint8_t)(i * 7u);
+    memcpy(was, sec, sizeof(sec));
+    const Gen3UbSector f = {
+        .id = 9, .checksum = 0xBEEF, .signature = GEN3_UB_SIG_B, .counter = 0x12345678u};
+    gen3_ub_set_footer(sec, &f);
+    Gen3UbSector g;
+    gen3_ub_sector_info(sec, &g);
+    ASSERT_EQ(g.id, 9);
+    ASSERT_EQ(g.checksum, 0xBEEF);
+    ASSERT_EQ(g.signature, GEN3_UB_SIG_B);
+    ASSERT_EQ(g.counter, 0x12345678u);
+    ASSERT_TRUE(g.sig_ok);
+    ASSERT_MEM_EQ(sec, was, 0xFF4);
+    /* with its checksum put right, the sector is sound */
+    const Gen3UbSector h = {
+        .id = 9,
+        .checksum = gen3_ub_section_sum(sec, 9),
+        .signature = GEN3_UB_SIG_A,
+        .counter = 1,
+    };
+    gen3_ub_set_footer(sec, &h);
+    gen3_ub_sector_info(sec, &g);
+    ASSERT_TRUE(g.sum_ok);
+}
+
 int main(void) {
     RUN(test_ub_slots_single);
     RUN(test_ub_slots_newer);
@@ -257,5 +301,6 @@ int main(void) {
     RUN(test_ub_pieces_match_fake);
     RUN(test_ub_summary);
     RUN(test_ub_trainer);
+    RUN(test_ub_footer_write);
     TEST_EXIT();
 }

@@ -9,7 +9,8 @@
  * container of 32 sectors of 4 KB, two slots of 14 sections each, with the signatures 0x01121999
  * and 0x01121998; the party in section 1; 24 boxes of 30 records of 58 bytes, unencrypted, in a PC
  * stream gathered from several regions, two of them in the sectors 30 and 31 that both slots share.
- * Pure C, no heap, read-only. */
+ * Pure C, no heap. It reads saves; the one thing it writes is a sector's footer, for the write job
+ * (gen3_omega.h). */
 
 #define GEN3_UB_SECTORS 32u
 #define GEN3_UB_SLOT_SECTORS 14u
@@ -22,6 +23,7 @@
 #define GEN3_UB_PARTY_MAX 6u
 #define GEN3_UB_SIG_A 0x01121999u
 #define GEN3_UB_SIG_B 0x01121998u
+#define GEN3_UB_OPAQUE_ID 4u /* PUSE never recomputes this section's checksum, nor checks it */
 
 typedef struct {
     uint16_t id, checksum;
@@ -32,6 +34,12 @@ typedef struct {
 
 /* The footer of a 4 KB sector, and its checksum checked */
 void gen3_ub_sector_info(const uint8_t sector[GEN3_UB_SECTOR_SIZE], Gen3UbSector* out);
+/* The checksum of section id's data, over that section's length (the 32-bit words summed, then
+ * the two halves); 0 for an id past 13 */
+uint16_t gen3_ub_section_sum(const uint8_t sector[GEN3_UB_SECTOR_SIZE], uint16_t id);
+/* Writes f's id, checksum, signature and counter into the sector's footer (0xFF4..0xFFF); the rest
+ * of the sector is left as it is */
+void gen3_ub_set_footer(uint8_t sector[GEN3_UB_SECTOR_SIZE], const Gen3UbSector* f);
 
 typedef struct {
     bool valid[2];

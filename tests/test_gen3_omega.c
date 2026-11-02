@@ -50,6 +50,9 @@ static volatile bool cancel;
 typedef struct {
     uint32_t calls[256];
     uint32_t unplug_sha_at; /* the cable out for good at this SHA256 call (1 = the first) */
+    uint32_t unplug_write_at; /* ... or once this OMEGA_WRITE_SECTOR has run */
+    uint32_t poke_write_at; /* once this OMEGA_WRITE_SECTOR has run, byte poke_off of the save */
+    uint32_t poke_off; /* on the card is changed, as a write that landed there too would */
 } Hook;
 
 static Hook hook;
@@ -60,6 +63,17 @@ static void hook_cb(void* ctx, uint8_t code, uint16_t arg0) {
     k->calls[code]++;
     if(k->unplug_sha_at && code == GEN3_HCMD_OMEGA_SHA256 && k->calls[code] == k->unplug_sha_at) {
         fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), FOREVER);
+    }
+    if(code != GEN3_HCMD_OMEGA_WRITE_SECTOR) return;
+    if(k->unplug_write_at && k->calls[code] == k->unplug_write_at) {
+        fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), FOREVER);
+    }
+    if(k->poke_write_at && k->calls[code] == k->poke_write_at) {
+        const uint32_t lba = fake_fat_file_lba(&card, om.save.first_cluster, k->poke_off);
+        uint8_t b[512];
+        fake_fat_block(&card, lba, b);
+        b[k->poke_off % 512u] ^= 0x10u;
+        fake_fat_poke(&card, lba, k->poke_off % 512u, &b[k->poke_off % 512u], 1);
     }
 }
 
@@ -82,20 +96,25 @@ static void prog_cb(void* ctx, Gen3CartStep step, uint32_t done, uint32_t total)
 
 /* ---- Fixtures ---- */
 
-static void make_save(void) {
+/* The default save in slot `slot` (the other one erased), with that counter and rotation */
+static void make_save_at(uint8_t slot, uint32_t counter, uint8_t rotate) {
     uint8_t nick[10], name[8], rec[100], box[58];
     fake_ub_erase(save_img);
-    fake_ub_build(save_img, 0, 20, 0);
+    fake_ub_build(save_img, slot, counter, rotate);
     gen3_text_encode("RED", name, 8, 7);
-    fake_ub_put_trainer(save_img, 0, name, 0, 12345, 54321);
+    fake_ub_put_trainer(save_img, slot, name, 0, 12345, 54321);
     gen3_text_encode("SPROUT", nick, 10, 10);
     fake_ub_party_rec(rec, 1, 12, nick, 0);
-    fake_ub_put_party(save_img, 0, 0, rec);
+    fake_ub_put_party(save_img, slot, 0, rec);
     fake_ub_party_rec(rec, 1000, 45, nick, 0);
-    fake_ub_put_party(save_img, 0, 1, rec);
-    fake_ub_set_party_count(save_img, 0, 2);
+    fake_ub_put_party(save_img, slot, 1, rec);
+    fake_ub_set_party_count(save_img, slot, 2);
     fake_ub_box_rec(box, 1265, gen3_exp_for_level(0, 30), nick, 0);
-    fake_ub_put_box(save_img, 0, 3, 5, box);
+    fake_ub_put_box(save_img, slot, 3, 5, box);
+}
+
+static void make_save(void) {
+    make_save_at(0, 20, 0);
 }
 
 /* A card with the ROM at rom_name in /ROMS, the save at save_name in /SAVER (save_len bytes), and
@@ -688,6 +707,508 @@ TEST(test_omega_edits_dropped_on_reconnect) {
     ASSERT_TRUE(!om.work_ok);
 }
 
+/* ---- The write ---- */
+
+#define STAMP2 "20261101-130000"
+#define BACKUP2 "backups/UNBOUND_12345_" STAMP2 ".sav"
+#define SEC 4096u
+#define WRITE_BLOCKS 120u /* the write test's 8, then the new slot's 14 sectors of 8 */
+
+static uint8_t card_before[FAKE_UB_LEN], card_after[FAKE_UB_LEN], work_before[FAKE_UB_LEN];
+
+/* The save file as the card holds it */
+static void card_save(uint8_t* out) {
+    for(uint32_t off = 0; off < FAKE_UB_LEN; off += 512u) {
+        fake_fat_block(&card, fake_fat_file_lba(&card, om.save.first_cluster, off), out + off);
+    }
+}
+
+/* The slots of a save image, as the game picks them */
+static void image_slots(const uint8_t* img, Gen3UbSlots* s) {
+    static Gen3UbSector infos[28];
+    for(uint32_t k = 0; k < 28u; k++) gen3_ub_sector_info(img + k * SEC, &infos[k]);
+    gen3_ub_slots(infos, s);
+}
+
+/* Box record (box, slot) of the image's loaded slot */
+static bool
+    image_box(const uint8_t* img, const Gen3UbSlots* s, uint8_t box, uint8_t slot, uint8_t* rec) {
+    Gen3UbPieces pc;
+    if(!gen3_ub_box_pieces(s, box, slot, &pc)) return false;
+    uint32_t at = 0;
+    for(uint8_t k = 0; k < pc.n; k++) {
+        memcpy(rec + at, img + pc.sector[k] * SEC + pc.off[k], pc.len[k]);
+        at += pc.len[k];
+    }
+    return true;
+}
+
+static uint16_t le16(const uint8_t* p) {
+    return (uint16_t)(p[0] | p[1] << 8);
+}
+
+static uint32_t le32(const uint8_t* p) {
+    return (uint32_t)le16(p) | (uint32_t)le16(p + 2) << 16;
+}
+
+/* Box 3 slot 5's friendship set to f in the working copy; *m gets the record put */
+static bool edit_box3(uint8_t f, Gen3UbMon* m) {
+    if(gen3_omega_mon_get(&om, 3, 5, m) != Gen3CartMonOk) return false;
+    gen3_ub_mon_set_friendship(m, f);
+    return gen3_omega_mon_put(&om, 3, 5, m, false) == Gen3CartMonOk;
+}
+
+/* A new Pokemon into the open box slot (box, slot); *m gets the record put */
+static bool put_new(uint8_t box, uint8_t slot, Gen3UbMon* m) {
+    Gen3UbMon owner;
+    return gen3_omega_owner(&om, &owner) && gen3_ub_new_box_mon(m, 1, 5, &owner) &&
+           gen3_omega_mon_put(&om, box, slot, m, true) == Gen3CartMonOk;
+}
+
+/* A box slot whose record lies across sectors 30 and 31 */
+static bool straddle_30_31(uint8_t* box, uint8_t* slot) {
+    for(uint8_t b = 0; b < GEN3_UB_BOXES; b++) {
+        for(uint8_t k = 0; k < GEN3_UB_BOX_SLOTS; k++) {
+            Gen3UbPieces pc;
+            if(gen3_ub_box_pieces(&om.slots, b, k, &pc) && pc.n == 2 && pc.sector[0] == 30 &&
+               pc.sector[1] == 31) {
+                *box = b;
+                *slot = k;
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+TEST(test_omega_write_ok) {
+    /* Both signatures in the loaded slot, and a section 4 checksum that isn't the sum of its data
+     * (the game doesn't check it as the others; PUSE never recomputes it): each new sector takes
+     * its signature from the loaded one, and section 4 its checksum */
+    fake_store_init(&store, 64u * MIB);
+    api = fake_store_api(&store);
+    make_save();
+    for(uint8_t id = 2; id < 14u; id += 5u) {
+        save_img[fake_ub_phys(save_img, 0, id) * SEC + 0xFF8] = 0x98;
+    }
+    save_img[fake_ub_phys(save_img, 0, 4) * SEC + 0xFF6] ^= 0x55;
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    ASSERT_EQ(om.slots.loaded, 0);
+    ASSERT_EQ(om.infos[om.slots.phys[7]].signature, GEN3_UB_SIG_B);
+    Gen3UbMon bx, pt;
+    ASSERT_TRUE(edit_box3(77, &bx));
+    ASSERT_EQ(gen3_omega_mon_get(&om, GEN3_SAVE_PARTY, 0, &pt), Gen3CartMonOk);
+    gen3_ub_mon_set_level(&pt, 13);
+    ASSERT_EQ(gen3_omega_mon_put(&om, GEN3_SAVE_PARTY, 0, &pt, false), Gen3CartMonOk);
+    ASSERT_EQ(gen3_omega_changes(&om), 2);
+    uint32_t size = 0;
+    memcpy(work_before, fake_store_file(&store, GEN3_OMEGA_WORK, &size), FAKE_UB_LEN);
+    const Gen3UbSlots old = om.slots;
+    card_save(card_before);
+    const uint64_t digest = fake_fat_digest_except(&card, om.save.first_cluster);
+    /* a write is never cancelled */
+    cancel = true;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
+
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 1);
+    ASSERT_EQ(s.counter[1], 21);
+    ASSERT_TRUE(s.valid[0]);
+    ASSERT_EQ(s.counter[0], 20);
+    /* slot N, and the sectors 28..31, as they were */
+    ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+    ASSERT_MEM_EQ(card_after + 28u * SEC, card_before + 28u * SEC, 4u * SEC);
+    /* each section of the new slot: the working copy's data, its footer N + 1 */
+    for(uint8_t id = 0; id < 14u; id++) {
+        const uint8_t* n = card_after + s.phys[id] * SEC;
+        const uint8_t* w = work_before + old.phys[id] * SEC;
+        ASSERT_MEM_EQ(n, w, 0xFF4u);
+        ASSERT_EQ(le16(n + 0xFF4), id);
+        ASSERT_EQ(le32(n + 0xFF8), le32(w + 0xFF8));
+        ASSERT_EQ(le32(n + 0xFFC), 21);
+    }
+    /* section 4's checksum: the loaded slot's, as it was; the others' the sum over their length */
+    const uint8_t* n4 = card_after + s.phys[4] * SEC;
+    ASSERT_EQ(le16(n4 + 0xFF6), le16(card_before + old.phys[4] * SEC + 0xFF6));
+    ASSERT_TRUE(le16(n4 + 0xFF6) != gen3_ub_section_sum(n4, 4));
+    ASSERT_EQ(le32(card_after + s.phys[7] * SEC + 0xFF8), GEN3_UB_SIG_B);
+    ASSERT_EQ(le32(card_after + s.phys[8] * SEC + 0xFF8), GEN3_UB_SIG_A);
+    /* the edits, read back from the card */
+    uint8_t rec[58];
+    ASSERT_TRUE(image_box(card_after, &s, 3, 5, rec));
+    ASSERT_MEM_EQ(rec, bx.raw, 58);
+    ASSERT_MEM_EQ(card_after + s.phys[1] * SEC + GEN3_UB_PARTY_OFF(0), pt.raw, 100);
+    ASSERT_EQ(card_after[s.phys[1] * SEC + GEN3_UB_PARTY_OFF(0) + 84u], 13);
+    /* nothing outside the save's own blocks */
+    ASSERT_EQ(fake_fat_digest_except(&card, om.save.first_cluster), digest);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 15);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_ARM], 1);
+    ASSERT_EQ(gba.omega_writes, WRITE_BLOCKS);
+
+    /* the new backup: the card as written; the old one kept */
+    const uint8_t* b = fake_store_file(&store, BACKUP2, &size);
+    ASSERT_TRUE(b != NULL);
+    ASSERT_MEM_EQ(b, card_after, FAKE_UB_LEN);
+    ASSERT_MEM_EQ(fake_store_file(&store, BACKUP, &size), card_before, FAKE_UB_LEN);
+    ASSERT_STR_EQ(om.backup_name, BACKUP2);
+    ASSERT_TRUE(gen3_omega_browsable(&om));
+    ASSERT_EQ(om.slots.loaded, 1);
+    ASSERT_EQ(om.slots.counter[1], 21);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_EQ(om.dirty, 0);
+    ASSERT_TRUE(om.work_ok);
+    ASSERT_MEM_EQ(fake_store_file(&store, GEN3_OMEGA_WORK, &size), card_after, FAKE_UB_LEN);
+    ASSERT_TRUE(om.connected);
+    ASSERT_TRUE(absent(GEN3_CART_BACKUP_TMP));
+
+    /* progress: Prepare, Program and Verify per sector, then the new backup as PostBackup */
+    ASSERT_TRUE(prog.calls[Gen3CartStepPrepare] > 0);
+    ASSERT_EQ(prog.calls[Gen3CartStepProgram], 15);
+    ASSERT_EQ(prog.last_done[Gen3CartStepProgram], 15);
+    ASSERT_EQ(prog.last_done[Gen3CartStepVerify], 32);
+    ASSERT_TRUE(prog.calls[Gen3CartStepPostBackup] > 0);
+    ASSERT_EQ(prog.last_done[Gen3CartStepPostBackup], 3u * 32u + 1u);
+    ASSERT_EQ(prog.calls[Gen3CartStepBackupRead], 32); /* the first backup's only */
+
+    /* a second write, from the new backup */
+    ASSERT_TRUE(edit_box3(78, &bx));
+    ASSERT_EQ(gen3_omega_write(&om, "20261101-140000"), Gen3CartOk);
+    card_save(card_after);
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 0);
+    ASSERT_EQ(s.counter[0], 22);
+    ASSERT_TRUE(image_box(card_after, &s, 3, 5, rec));
+    ASSERT_MEM_EQ(rec, bx.raw, 58);
+}
+
+TEST(test_omega_write_rotation) {
+    /* (the loaded slot, its rotation): id 0 of the new slot at index (r_loaded + 1) % 14 */
+    static const uint8_t cases[][2] = {{0, 5}, {0, 1}, {1, 13}, {1, 0}};
+    for(uint32_t i = 0; i < 4u; i++) {
+        const uint8_t slot = cases[i][0], rotate = cases[i][1];
+        fake_store_init(&store, 64u * MIB);
+        api = fake_store_api(&store);
+        make_save_at(slot, 20, rotate);
+        ASSERT_TRUE(default_bench());
+        ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+        ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+        ASSERT_EQ(om.slots.loaded, slot);
+        Gen3UbMon m;
+        ASSERT_TRUE(edit_box3(77, &m));
+        card_save(card_before);
+        ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
+        card_save(card_after);
+        Gen3UbSlots s;
+        image_slots(card_after, &s);
+        const uint8_t nw = (uint8_t)(1u - slot);
+        ASSERT_EQ(s.loaded, nw);
+        ASSERT_EQ(s.counter[nw], 21);
+        const uint32_t r_loaded = (14u - rotate) % 14u;
+        const uint32_t r = (r_loaded + 1u) % 14u;
+        ASSERT_EQ(s.phys[0], nw * 14u + r);
+        for(uint32_t k = 0; k < 14u; k++) {
+            ASSERT_EQ(le16(card_after + (nw * 14u + k) * SEC + 0xFF4), (k + 14u - r) % 14u);
+        }
+        ASSERT_MEM_EQ(card_after + slot * 14u * SEC, card_before + slot * 14u * SEC, 14u * SEC);
+        uint8_t rec[58];
+        ASSERT_TRUE(image_box(card_after, &s, 3, 5, rec));
+        ASSERT_MEM_EQ(rec, m.raw, 58);
+    }
+}
+
+TEST(test_omega_write_changed) {
+    /* the game saved after the backup: a byte of the save's sector 20 */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    const uint32_t off = 20u * SEC + 600u;
+    const uint8_t x = 0x00;
+    fake_fat_poke(&card, fake_fat_file_lba(&card, om.save.first_cluster, off), off % 512u, &x, 1);
+    card_save(card_before);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartChanged);
+    ASSERT_EQ(gba.omega_writes, 0);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_ARM], 0);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 0);
+    ASSERT_TRUE(!om.backup_current);
+    ASSERT_TRUE(!gen3_omega_browsable(&om));
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    card_save(card_after);
+    ASSERT_MEM_EQ(card_after, card_before, FAKE_UB_LEN);
+    /* the file isn't the one the connect found: another first cluster. Changed before any CRC. */
+    ASSERT_TRUE(backed_up());
+    ASSERT_TRUE(edit_box3(77, &m));
+    om.save.first_cluster++;
+    const uint32_t crcs = hook.calls[GEN3_HCMD_OMEGA_CRC32];
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartChanged);
+    ASSERT_TRUE(hook.calls[GEN3_HCMD_OMEGA_OPEN] > 0);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_CRC32], crcs);
+    ASSERT_EQ(gba.omega_writes, 0);
+    ASSERT_TRUE(!om.backup_current);
+}
+
+TEST(test_omega_write_refused_unverified) {
+    ASSERT_TRUE(backed_up());
+    const uint32_t t0 = fake_helper_transfers(&fh);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartNothing);
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    om.verified = false;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartRefused);
+    om.verified = true;
+    om.work_ok = false;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartRefused);
+    om.work_ok = true;
+    om.backup_current = false;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartRefused);
+    om.backup_current = true;
+    om.connected = false;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartLinkLost);
+    om.connected = true;
+    ASSERT_EQ(gen3_omega_write(&om, NULL), Gen3CartBadArg);
+    ASSERT_EQ(gen3_omega_write(&om, "20261101-120000-12345"), Gen3CartBadArg); /* 21 characters */
+    fake_store_report_free(&store, FAKE_UB_LEN);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartSdFull);
+    /* none of them sent anything */
+    ASSERT_EQ(fake_helper_transfers(&fh), t0);
+    ASSERT_EQ(gba.omega_writes, 0);
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
+}
+
+TEST(test_omega_write_cut_sweep) {
+    /* Each bench starts from a store that has the game file's cache line: no hash */
+    static FakeStore warm;
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    fake_store_copy(&warm, &store);
+    for(uint32_t k = 0; k <= WRITE_BLOCKS; k++) {
+        fake_store_copy(&store, &warm);
+        ASSERT_TRUE(default_bench());
+        ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+        ASSERT_TRUE(om.from_cache);
+        ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+        Gen3UbMon m;
+        ASSERT_TRUE(edit_box3(77, &m));
+        ASSERT_EQ(om.dirty >> 28, 0); /* the new slot is all a write puts on the card */
+        card_save(card_before);
+        const uint64_t digest = fake_fat_digest_except(&card, om.save.first_cluster);
+        fake_gba_omega_cut_after(&gba, k);
+        const Gen3CartResult r = gen3_omega_write(&om, STAMP2);
+        card_save(card_after);
+        Gen3UbSlots s;
+        image_slots(card_after, &s);
+        ASSERT_EQ(fake_fat_digest_except(&card, om.save.first_cluster), digest);
+        ASSERT_MEM_EQ(card_after + 28u * SEC, card_before + 28u * SEC, 4u * SEC);
+        if(k < WRITE_BLOCKS) {
+            ASSERT_EQ(r, Gen3CartFlashError);
+            /* it stopped at the sector the cut came in */
+            ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], k / 8u + 1u);
+            ASSERT_EQ(s.loaded, 0);
+            ASSERT_TRUE(!s.valid[1]);
+            ASSERT_EQ(s.counter[0], 20);
+            ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+            /* the edits stay */
+            ASSERT_EQ(gen3_omega_changes(&om), 1);
+            ASSERT_TRUE(om.connected);
+        } else {
+            ASSERT_EQ(r, Gen3CartOk);
+            ASSERT_EQ(s.loaded, 1);
+            ASSERT_EQ(s.counter[1], 21);
+            ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+        }
+    }
+    fake_store_init(&warm, 0);
+}
+
+TEST(test_omega_write_link_lost) {
+    /* the cable out once the new slot's 4th sector is written: its answer never comes */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    card_save(card_before);
+    hook.unplug_write_at = 5;
+    const Gen3CartResult r = gen3_omega_write(&om, STAMP2);
+    ASSERT_TRUE(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout);
+    ASSERT_TRUE(!om.connected);
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 0);
+    ASSERT_TRUE(!s.valid[1]);
+    ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+    /* the edits stay until the next Connect; nothing more is sent before one */
+    ASSERT_TRUE(gen3_omega_browsable(&om));
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+    const uint32_t t0 = fake_helper_transfers(&fh);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartLinkLost);
+    ASSERT_EQ(fake_helper_transfers(&fh), t0);
+}
+
+TEST(test_omega_write_shared) {
+    /* box 21 lies in shared sector 31 only */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon n;
+    ASSERT_TRUE(put_new(21, 0, &n));
+    ASSERT_EQ(om.dirty, 1u << 31);
+    card_save(card_before);
+    const uint64_t digest = fake_fat_digest_except(&card, om.save.first_cluster);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 1);
+    ASSERT_EQ(s.counter[1], 21);
+    uint8_t rec[58];
+    ASSERT_TRUE(image_box(card_after, &s, 21, 0, rec));
+    ASSERT_MEM_EQ(rec, n.raw, 58);
+    ASSERT_MEM_EQ(card_after + 30u * SEC, card_before + 30u * SEC, SEC);
+    uint32_t diff = 0;
+    for(uint32_t i = 31u * SEC; i < 32u * SEC; i++) diff += card_after[i] != card_before[i];
+    ASSERT_TRUE(diff > 0 && diff <= 58u);
+    ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 16);
+    ASSERT_EQ(gba.omega_writes, WRITE_BLOCKS + 8u);
+    ASSERT_EQ(prog.last_done[Gen3CartStepProgram], 16);
+    ASSERT_EQ(fake_fat_digest_except(&card, om.save.first_cluster), digest);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+
+    /* a record across sectors 30 and 31: both written */
+    ASSERT_TRUE(backed_up());
+    uint8_t box = 0, slot = 0;
+    ASSERT_TRUE(straddle_30_31(&box, &slot));
+    ASSERT_TRUE(put_new(box, slot, &n));
+    ASSERT_EQ(om.dirty, 3u << 30);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
+    card_save(card_after);
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 1);
+    ASSERT_TRUE(image_box(card_after, &s, box, slot, rec));
+    ASSERT_MEM_EQ(rec, n.raw, 58);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 17);
+}
+
+TEST(test_omega_write_cut_shared) {
+    static const char want[] = "Written, but boxes\n20-23 may be\nwrong: Restore.";
+    ASSERT_STR_EQ(gen3_cart_result_text(Gen3CartWrittenShared), want);
+    /* a cut during sector 31: the new slot loads */
+    for(uint32_t flip = 0; flip < 2u; flip++) {
+        ASSERT_TRUE(backed_up());
+        Gen3UbMon n;
+        ASSERT_TRUE(put_new(21, 0, &n));
+        card_save(card_before);
+        if(flip) {
+            /* a bit flipped in sector 31's third block: its read-back differs */
+            fake_gba_omega_flip_after(&gba, WRITE_BLOCKS + 2u);
+        } else {
+            fake_gba_omega_cut_after(&gba, WRITE_BLOCKS + 3u);
+        }
+        ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartWrittenShared);
+        card_save(card_after);
+        Gen3UbSlots s;
+        image_slots(card_after, &s);
+        ASSERT_EQ(s.loaded, 1);
+        ASSERT_TRUE(s.valid[1]);
+        ASSERT_EQ(s.counter[1], 21);
+        ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+        ASSERT_MEM_EQ(card_after + 30u * SEC, card_before + 30u * SEC, SEC);
+        /* the backup no longer holds the save the game loads: a new one first */
+        ASSERT_TRUE(!om.backup_current);
+        ASSERT_EQ(gen3_omega_changes(&om), 0);
+        ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 16);
+    }
+}
+
+TEST(test_omega_write_verify_fail) {
+    /* a bit flipped in the first block of the new slot's 4th sector */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    card_save(card_before);
+    fake_gba_omega_flip_after(&gba, 8u + 3u * 8u);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartVerifyFailed);
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 5);
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 0);
+    ASSERT_EQ(s.counter[0], 20);
+    ASSERT_TRUE(!s.valid[1]);
+    ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+    ASSERT_TRUE(om.connected);
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+}
+
+TEST(test_omega_write_work_corrupt) {
+    /* the working copy reads back wrong in a section with no edit (7): nothing of it is written */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    ASSERT_TRUE(((om.dirty >> om.slots.phys[7]) & 1u) == 0);
+    card_save(card_before);
+    fake_store_corrupt_read(&store, GEN3_OMEGA_WORK, om.slots.phys[7] * SEC + 9u);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartSdError);
+    fake_store_corrupt_read(&store, NULL, 0);
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 0);
+    ASSERT_TRUE(!s.valid[1]);
+    ASSERT_MEM_EQ(card_after, card_before, 14u * SEC);
+    /* section 7 is at the new slot's index 8 (r = 1): the write test and indices 0..7 went out */
+    ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_WRITE_SECTOR], 9);
+    ASSERT_TRUE(om.connected);
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+}
+
+TEST(test_omega_write_no_backup) {
+    /* the card is written and verified, but the new backup can't be stored */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    fake_store_fail_write_after(&store, 0);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartWrittenNoBackup);
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 1);
+    ASSERT_EQ(s.counter[1], 21);
+    uint8_t rec[58];
+    ASSERT_TRUE(image_box(card_after, &s, 3, 5, rec));
+    ASSERT_MEM_EQ(rec, m.raw, 58);
+    ASSERT_TRUE(!om.backup_current);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_EQ(prog.last_done[Gen3CartStepVerify], 32);
+    ASSERT_TRUE(absent(BACKUP2));
+    ASSERT_TRUE(absent(GEN3_CART_BACKUP_TMP));
+}
+
+TEST(test_omega_write_verify_misplaced) {
+    /* the last WRITE_SECTOR also changed a byte of the loaded slot (sector 5): the Verify step
+     * finds it */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_TRUE(edit_box3(77, &m));
+    hook.poke_write_at = 15;
+    hook.poke_off = 5u * SEC + 100u;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartVerifyFailed);
+    ASSERT_EQ(prog.calls[Gen3CartStepPostBackup], 0);
+    ASSERT_TRUE(!om.backup_current);
+    ASSERT_STR_EQ(om.backup_name, BACKUP);
+    ASSERT_TRUE(absent(BACKUP2));
+    /* sector 30 changed, when only 31 was written: WrittenShared */
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon n;
+    ASSERT_TRUE(put_new(21, 0, &n));
+    hook.poke_write_at = 16;
+    hook.poke_off = 30u * SEC + 100u;
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartWrittenShared);
+    ASSERT_TRUE(!om.backup_current);
+}
+
 int main(void) {
     if(!ub_bulk_file_open()) return 1;
     rom = malloc(ROM_LEN);
@@ -725,6 +1246,18 @@ int main(void) {
     RUN(test_omega_owner);
     RUN(test_omega_discard);
     RUN(test_omega_edits_dropped_on_reconnect);
+    RUN(test_omega_write_ok);
+    RUN(test_omega_write_rotation);
+    RUN(test_omega_write_changed);
+    RUN(test_omega_write_refused_unverified);
+    RUN(test_omega_write_cut_sweep);
+    RUN(test_omega_write_link_lost);
+    RUN(test_omega_write_shared);
+    RUN(test_omega_write_cut_shared);
+    RUN(test_omega_write_verify_fail);
+    RUN(test_omega_write_work_corrupt);
+    RUN(test_omega_write_no_backup);
+    RUN(test_omega_write_verify_misplaced);
     fake_fat_free(&card);
     free(rom);
     TEST_EXIT();

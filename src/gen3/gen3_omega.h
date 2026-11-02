@@ -10,11 +10,13 @@
 /* The jobs for Pokemon Unbound on an EZ-Flash Omega Definitive Edition (multiboot-and-save.md §8):
  * after HELLO and CART_INFO found the Omega's kernel, find the game the Omega started last and its
  * save on the Omega's microSD, check the game file is Unbound 2.1.1.1, back the save up, and read
- * its party and boxes from the backup. Reads only: nothing is written to the card. Edits go into a
- * working copy of the backup on the Flipper's store (GEN3_OMEGA_WORK), never into the backup; the
- * copy is made at the end of each backup (if it can't be, the backup still succeeds, work_ok stays
- * false and nothing can be edited). Pure C, no heap;
- * the worker-thread rules of gen3_cart.h hold (no job keeps more than 256 B of locals). */
+ * its party and boxes from the backup. Edits go into a working copy of the backup on the
+ * Flipper's store (GEN3_OMEGA_WORK), never into the backup; the copy is made at the end of each
+ * backup (if it can't be, the backup still succeeds, work_ok stays false and nothing can be
+ * edited). gen3_omega_write is the one job that writes to the card: the save file's own 4 KB
+ * sectors, in place, as the game saves (the slot it doesn't load, then the shared sectors an edit
+ * changed), and only while the card still holds the backup's save. Pure C, no heap; the
+ * worker-thread rules of gen3_cart.h hold (no job keeps more than 256 B of locals). */
 
 #define GEN3_OMEGA_FLAG_ADDR 0x08790000u /* the DE kernel's pending-save flag (Read_sav_info(0)) */
 #define GEN3_OMEGA_FLAG_PENDING 0x0011u
@@ -59,6 +61,8 @@ typedef struct {
     bool work_ok; /* it exists and matches the backup, edits aside */
     uint32_t dirty; /* bit k: physical sector k of the save was edited */
     uint8_t changed[GEN3_OMEGA_CHANGED_BYTES]; /* party slot i: bit i; box b slot s: 6 + b * 30 + s */
+    /* The last gen3_omega_write's: each sector's CRC-32 as its writes should have left the card */
+    uint32_t want_crc[GEN3_UB_SECTORS];
     char line[160]; /* a cache line being built or compared */
 } Gen3Omega;
 
@@ -116,6 +120,34 @@ Gen3CartResult gen3_omega_discard(Gen3Omega* o);
 /* The record new Pokemon take their OT from: the first party Pokemon that is no egg and whose OT id
  * is the trainer's (TID | SID << 16), else the first that is no egg; false if there is none. */
 bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
+
+/* The working copy's edits written to the card's save, as the game saves: the slot the game
+ * doesn't load gets all 14 sections with counter N + 1, so that until its last sector is whole the
+ * game still loads the old one. In order:
+ * - Nothing without changes; Refused unless verified, browsable and the working copy there; BadArg
+ *   without a stamp (at most GEN3_CART_STAMP_MAX characters); LinkLost unless connected; SdFull
+ *   unless 131072 + 4096 bytes are free. None of these sends anything.
+ * - Prepare: slot 0 opened again on the save's path, with the connect's size and first cluster,
+ *   and each sector's OMEGA_CRC32 the backup's; else Changed, the backup and the edits dropped.
+ *   Then OMEGA_ARM for that file.
+ * - Program, a sector at a time, each to come back with its image's CRC-32: the write test (the
+ *   new slot's first sector, with the backup's bytes, which the card holds); the new slot, its
+ *   sector k holding section (k + 14 - r) % 14, r one past the loaded slot's rotation, each
+ *   section the working copy's with its footer remade (the id, the checksum, the loaded sector's
+ *   signature, N + 1); then sectors 30 and 31, if an edit changed them.
+ * - Verify: each sector's OMEGA_CRC32 against what the writes should have left (a write that
+ *   landed in another sector of the file shows here).
+ * - PostBackup: a new backup (gen3_omega_backup with stamp), which rebuilds the working copy.
+ * Ok: written, verified and backed up. Until the new slot is whole the game loads the old one:
+ * FlashError (a write the helper failed), VerifyFailed (a read-back that differs), LinkLost or
+ * BusyTimeout; the backup and the edits stay, though a Write again finds the card Changed once
+ * any of the new slot's bytes did change. After it, the backup and the edits are dropped:
+ * WrittenShared (a write or a check of sector 30 or 31 failed), VerifyFailed (the Verify step),
+ * LinkLost or BusyTimeout; and WrittenNoBackup if only the new backup failed. LinkLost,
+ * BusyTimeout and HelperError, or an answer to a write the client couldn't take, end the connect:
+ * nothing more is sent before a new Connect. Progress Prepare, Program per sector, Verify per
+ * sector, then PostBackup for the new backup's steps; never cancelled. */
+Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp);
 
 #ifdef GEN3_TESTING
 /* Host tests: the hash a game file must have to be verified (NULL: Unbound 2.1.1.1's) */

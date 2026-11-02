@@ -7,7 +7,6 @@
 #define UB_FOOTER_SUM 0xFF6u
 #define UB_FOOTER_SIG 0xFF8u
 #define UB_FOOTER_COUNTER 0xFFCu
-#define UB_OPAQUE_ID 4u /* PUSE never recomputes section 4's checksum */
 #define UB_REGIONS 13u
 #define UB_PHYS 30u /* a region id from here on is a physical sector */
 
@@ -40,6 +39,23 @@ static uint32_t ub_le32(const uint8_t* p) {
     return (uint32_t)ub_le16(p) | (uint32_t)ub_le16(p + 2) << 16;
 }
 
+static void ub_put16(uint8_t* p, uint16_t v) {
+    p[0] = (uint8_t)v;
+    p[1] = (uint8_t)(v >> 8);
+}
+
+static void ub_put32(uint8_t* p, uint32_t v) {
+    ub_put16(p, (uint16_t)v);
+    ub_put16(p + 2, (uint16_t)(v >> 16));
+}
+
+uint16_t gen3_ub_section_sum(const uint8_t sector[GEN3_UB_SECTOR_SIZE], uint16_t id) {
+    if(id >= GEN3_UB_SLOT_SECTORS) return 0;
+    uint32_t sum = 0;
+    for(uint32_t i = 0; i < ub_sum_len[id]; i += 4u) sum += ub_le32(sector + i);
+    return (uint16_t)((sum & 0xFFFFu) + (sum >> 16));
+}
+
 void gen3_ub_sector_info(const uint8_t sector[GEN3_UB_SECTOR_SIZE], Gen3UbSector* out) {
     out->id = ub_le16(sector + UB_FOOTER_ID);
     out->checksum = ub_le16(sector + UB_FOOTER_SUM);
@@ -48,13 +64,18 @@ void gen3_ub_sector_info(const uint8_t sector[GEN3_UB_SECTOR_SIZE], Gen3UbSector
     out->sig_ok = out->signature == GEN3_UB_SIG_A || out->signature == GEN3_UB_SIG_B;
     out->sum_ok = false;
     if(out->id >= GEN3_UB_SLOT_SECTORS) return;
-    if(out->id == UB_OPAQUE_ID) {
+    if(out->id == GEN3_UB_OPAQUE_ID) {
         out->sum_ok = true;
         return;
     }
-    uint32_t sum = 0;
-    for(uint32_t i = 0; i < ub_sum_len[out->id]; i += 4u) sum += ub_le32(sector + i);
-    out->sum_ok = (uint16_t)((sum & 0xFFFFu) + (sum >> 16)) == out->checksum;
+    out->sum_ok = gen3_ub_section_sum(sector, out->id) == out->checksum;
+}
+
+void gen3_ub_set_footer(uint8_t sector[GEN3_UB_SECTOR_SIZE], const Gen3UbSector* f) {
+    ub_put16(sector + UB_FOOTER_ID, f->id);
+    ub_put16(sector + UB_FOOTER_SUM, f->checksum);
+    ub_put32(sector + UB_FOOTER_SIG, f->signature);
+    ub_put32(sector + UB_FOOTER_COUNTER, f->counter);
 }
 
 /* Slot k (0 or 1) of infos: valid, its counter, and its id -> sector map */

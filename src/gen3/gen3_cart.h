@@ -123,6 +123,9 @@ typedef enum {
     Gen3CartLinkBusy,
     Gen3CartOmegaPending, /* an Omega DE still holds the game's save to copy to its card */
     Gen3CartNoGame, /* the Omega's last game, or its save, isn't on the card as expected */
+    /* An Omega write: the new slot is written, but writing or checking a shared PC sector (30 or
+     * 31, which hold boxes 20-22 as shown) failed */
+    Gen3CartWrittenShared,
 } Gen3CartResult;
 
 /* At most 3 lines of at most 21 characters, broken with '\n'; "" for a value outside the enum */
