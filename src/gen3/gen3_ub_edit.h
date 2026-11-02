@@ -42,7 +42,10 @@ bool gen3_ub_edit_set_shiny(Gen3UbEditor* e, bool shiny);
 bool gen3_ub_edit_set_ability(Gen3UbEditor* e, uint8_t slot);
 typedef enum { Gen3UbIvsAll31, Gen3UbIvsAll0 } Gen3UbIvs;
 void gen3_ub_edit_set_ivs(Gen3UbEditor* e, Gen3UbIvs p);
-/* Each is cut to 252, then the total to 510 by reducing from the last stat backwards */
+#define GEN3_UB_EV_STAT_MAX 252u
+#define GEN3_UB_EV_TOTAL_MAX 510u
+/* Each is cut to 252, then the total to 510 by reducing from the last stat backwards (a backstop:
+ * the number scene refuses an EV that would take the total over 510) */
 void gen3_ub_edit_set_evs(Gen3UbEditor* e, const uint8_t evs[6]);
 /* 1..10 characters the game can store */
 bool gen3_ub_edit_set_nickname(Gen3UbEditor* e, const char* ascii);

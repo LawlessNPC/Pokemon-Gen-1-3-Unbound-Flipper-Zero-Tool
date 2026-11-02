@@ -7,8 +7,6 @@
 /* The editor rules are ported from PUSE (github.com/Zannael/PUSE, MIT, commit
  * 2c624440fb24940480a3430fa17214942d4ba04a): backend/modules/party.py and pc.py. */
 
-#define EV_STAT_MAX 252u
-#define EV_TOTAL_MAX 510u
 #define LEVEL_MAX 100u
 #define MOVE_MAX 922u
 #define NATURE_COUNT 25u
@@ -188,11 +186,11 @@ void gen3_ub_edit_set_evs(Gen3UbEditor* e, const uint8_t evs[6]) {
     unsigned total = 0;
     Gen3UbMon before = e->mon;
     for(int i = 0; i < 6; i++) {
-        ev[i] = evs[i] > EV_STAT_MAX ? (uint8_t)EV_STAT_MAX : evs[i];
+        ev[i] = evs[i] > GEN3_UB_EV_STAT_MAX ? (uint8_t)GEN3_UB_EV_STAT_MAX : evs[i];
         total += ev[i];
     }
-    for(int i = 5; i >= 0 && total > EV_TOTAL_MAX; i--) {
-        unsigned cut = total - EV_TOTAL_MAX;
+    for(int i = 5; i >= 0 && total > GEN3_UB_EV_TOTAL_MAX; i--) {
+        unsigned cut = total - GEN3_UB_EV_TOTAL_MAX;
         if(cut > ev[i]) cut = ev[i];
         ev[i] = (uint8_t)(ev[i] - cut);
         total -= cut;

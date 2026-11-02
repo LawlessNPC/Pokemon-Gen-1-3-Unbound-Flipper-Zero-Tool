@@ -909,6 +909,41 @@ void gen3_cart_screen_ub_ev_label(uint8_t stat, uint8_t value, char out[GEN3_CAR
         out, GEN3_CART_SCREEN_ROW_SIZE, "%.3s: %u", stat < 6u ? names[stat] : "?", (unsigned)value);
 }
 
+const char* gen3_cart_screen_ub_number(
+    const char* text,
+    uint32_t which,
+    const Gen3UbMon* m,
+    uint8_t* out) {
+    const bool level = which == 0;
+    const uint32_t min = level ? 1u : 0u;
+    const uint32_t max = level ? 100u : GEN3_UB_EV_STAT_MAX;
+    uint32_t number = 0;
+    bool ok = text[0] != '\0';
+    /* Digits only, at most 3 (the keyboard's buffer holds 3), so this can't overflow */
+    for(size_t i = 0; ok && text[i] != '\0'; i++) {
+        if(i >= 3u || text[i] < '0' || text[i] > '9') {
+            ok = false;
+        } else {
+            number = number * 10u + (uint32_t)(text[i] - '0');
+        }
+    }
+    if(!ok || number < min || number > max) {
+        return level ? "Level must\nbe 1-100!" : "EV must\nbe 0-252!";
+    }
+    if(!level && which <= 6u) {
+        /* The five others as they are, and this one as entered */
+        uint8_t evs[6];
+        gen3_ub_mon_evs(m, evs);
+        uint32_t total = number;
+        for(uint32_t i = 0; i < 6u; i++) {
+            if(i != which - 1u) total += evs[i];
+        }
+        if(total > GEN3_UB_EV_TOTAL_MAX) return GEN3_CART_SCREEN_UB_EV_TOTAL;
+    }
+    *out = (uint8_t)number;
+    return NULL;
+}
+
 void gen3_cart_screen_ub_trainer(const Gen3UbTrainer* in, Gen3SaveTrainer* out) {
     memset(out, 0, sizeof(*out));
     memcpy(out->name, in->name, sizeof(out->name));

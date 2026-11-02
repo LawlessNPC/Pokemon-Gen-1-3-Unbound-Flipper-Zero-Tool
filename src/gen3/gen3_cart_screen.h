@@ -364,6 +364,17 @@ void gen3_cart_screen_ub_mark(bool changed, char row[GEN3_CART_SCREEN_ROW_SIZE])
 /* The EV list's row for stat 0..5 (HP, Atk, Def, Spe, SpA, SpD): "HP: 252" */
 void gen3_cart_screen_ub_ev_label(uint8_t stat, uint8_t value, char out[GEN3_CART_SCREEN_ROW_SIZE]);
 
+/* The editor's number scene: which 0 is the level (1-100), 1 + a stat (0..5, as
+ * gen3_cart_screen_ub_ev_label's) that stat's EV of m (0-252). NULL, with *out the number, if text
+ * is one it takes; else the error the keyboard shows: "Level must\nbe 1-100!", "EV must\nbe
+ * 0-252!", or GEN3_CART_SCREEN_UB_EV_TOTAL for an EV that would take the six over 510. */
+#define GEN3_CART_SCREEN_UB_EV_TOTAL "EVs total\nover 510"
+const char* gen3_cart_screen_ub_number(
+    const char* text,
+    uint32_t which,
+    const Gen3UbMon* m,
+    uint8_t* out);
+
 /* The trainer as the restore question takes it (gen3_cart_screen_restore_ask): name, gender and
  * ids; no play time */
 void gen3_cart_screen_ub_trainer(const Gen3UbTrainer* in, Gen3SaveTrainer* out);

@@ -12,7 +12,8 @@
  * save on the Omega's microSD, check the game file is Unbound 2.1.1.1, back the save up, and read
  * its party and boxes from the backup. Edits go into a working copy of the backup on the
  * Flipper's store (GEN3_OMEGA_WORK), never into the backup; the copy is made at the end of each
- * backup (if it can't be, the backup still succeeds, work_ok stays false and nothing can be
+ * backup and read back against the backup's CRCs (if it can't be made, or reads back other than
+ * the backup, it is removed, the backup still succeeds, work_ok stays false and nothing can be
  * edited). gen3_omega_write is the one job that writes to the card: the save file's own 4 KB
  * sectors, in place, as the game saves (the slot it doesn't load, then the shared sectors an edit
  * changed), and only while the card still holds the backup's save. Pure C, no heap; the
@@ -63,6 +64,10 @@ typedef struct {
     uint8_t changed[GEN3_OMEGA_CHANGED_BYTES]; /* party slot i: bit i; box b slot s: 6 + b * 30 + s */
     /* The last gen3_omega_write's: each sector's CRC-32 as its writes should have left the card */
     uint32_t want_crc[GEN3_UB_SECTORS];
+    /* The last gen3_omega_write's or gen3_omega_restore's, for the log: why it was Refused (NULL if
+     * it wasn't), and the result of the DISARM it ended with (Nothing if it sent none) */
+    const char* refused;
+    Gen3CartResult disarm;
     /* The backup file a restore reads: its footers and its slots */
     Gen3UbSector rinfos[2u * GEN3_UB_SLOT_SECTORS];
     Gen3UbSlots rslots;
@@ -118,7 +123,8 @@ Gen3CartMon gen3_omega_mon_put(
     bool new_mon);
 bool gen3_omega_mon_changed(const Gen3Omega* o, uint8_t box, uint8_t slot);
 uint16_t gen3_omega_changes(const Gen3Omega* o); /* slots changed */
-/* The working copy rebuilt from the backup: no edits. BadArg without a current backup. */
+/* The working copy rebuilt from the backup and read back: no edits. BadArg without a current
+ * backup; SdError (and no working copy) if it can't be made or reads back other than the backup. */
 Gen3CartResult gen3_omega_discard(Gen3Omega* o);
 /* The record new Pokemon take their OT from: the first party Pokemon that is no egg and whose OT id
  * is the trainer's (TID | SID << 16), else the first that is no egg; false if there is none. */
@@ -129,7 +135,9 @@ bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
  * game still loads the old one. That holds while the slot it writes holds no part of a newer save:
  * a save of the game's own cut short there (its index 13 sound, its counter not older than N)
  * could be completed by a cut of this write into a slot of both, so that is refused. In order:
- * - Nothing without changes; Refused unless verified, browsable and the working copy there;
+ * - Nothing without changes; Refused unless verified, browsable, the working copy there and the
+ *   loaded slot's counter of its own parity (slot A's even, slot B's odd, as the game's own saves
+ *   are: it reads the slot gSaveCounter % 2), with refused naming why for the log;
  *   OmegaSaveFirst for that cut save (a save in the game replaces it); BadArg without a stamp (at
  *   most GEN3_CART_STAMP_MAX characters); LinkLost unless connected; SdFull unless 131072 + 4096
  *   bytes are free. None of these sends anything.
@@ -144,14 +152,17 @@ bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
  * - Verify: each sector's OMEGA_CRC32 against what the writes should have left (a write that
  *   landed in another sector of the file shows here).
  * - PostBackup: a new backup (gen3_omega_backup with stamp), which rebuilds the working copy.
+ * - Once it armed, DISARM at its end, whatever the outcome, unless the link went (a command whose
+ *   answer never came); its result is in disarm, for the log, and changes nothing else.
  * Ok: written, verified and backed up. Until the new slot is whole the game loads the old one:
  * FlashError (a write the helper failed), VerifyFailed (a read-back that differs), LinkLost or
  * BusyTimeout; the backup and the edits stay, though a Write again finds the card Changed once
  * any of the new slot's bytes did change. After it the game loads the new save, and the backup
  * and the edits are dropped: WrittenShared (a write or a check of sector 30 or 31 failed, the
- * link included), VerifyFailed (the Verify step found a sector other than it should be), and
- * WrittenNoBackup when the Verify step or the new backup couldn't finish (a lost link, a helper
- * error) or the new backup failed. LinkLost, BusyTimeout and HelperError, wherever they come, or
+ * link included), VerifyFailed (the Verify step found a sector other than it should be, even if
+ * the link then went before it finished), and WrittenNoBackup when the Verify step or the new
+ * backup couldn't finish (a lost link, a helper error) with nothing found wrong, or the new backup
+ * failed. LinkLost, BusyTimeout and HelperError, wherever they come, or
  * an answer to a write the client couldn't take, end the connect: nothing more is sent before a
  * new Connect. Progress Prepare, Program per sector, Verify per sector, then PostBackup for the
  * new backup's steps; never cancelled. */
@@ -165,11 +176,13 @@ Gen3CartResult gen3_omega_restore_check(Gen3Omega* o, const char* name, Gen3UbTr
 /* An earlier Unbound backup written onto the card. The checks are gen3_omega_write's (Refused,
  * OmegaSaveFirst, BadArg for a stamp, LinkLost, SdFull, then Prepare's Changed) and gen3_omega_restore_check's
  * (BadArg, BadBackup, SdError). The file's loaded-slot sectors replace the working copy's at the
- * current backup's loaded-slot positions, its sectors 30 and 31 replace those, every section and both
- * shared sectors are marked dirty, and the write runs as gen3_omega_write: the card ends loading
- * the file's save at counter N + 1, N the counter now loaded. Edits not written are dropped, also
- * when the restore fails with the card unchanged (the working copy is then the backup again).
- * The results and progress are gen3_omega_write's. */
+ * current backup's loaded-slot positions, its sectors 30 and 31 replace those, every section is
+ * marked dirty and each shared sector whose CRC-32 isn't the card's, and the write runs as
+ * gen3_omega_write: the card ends loading the file's save at counter N + 1, N the counter now
+ * loaded. A section that reads back from the working copy as other than the file's whole section
+ * (its id, signature or own checksum) is BadBackup, with nothing sent. Edits not written are
+ * dropped, also when the restore fails with the card unchanged (the working copy is then the
+ * backup again). The results and progress are gen3_omega_write's. */
 Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* stamp);
 
 #ifdef GEN3_TESTING

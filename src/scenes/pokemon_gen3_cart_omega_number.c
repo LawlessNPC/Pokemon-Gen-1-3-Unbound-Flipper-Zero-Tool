@@ -6,14 +6,13 @@
 #include <gui/modules/text_input.h>
 
 /* The Unbound editor's numbers: the level (1-100) and each EV (0-252). The scene state says which:
- * 0 the level, 1 + a stat (HP, Atk, Def, Spe, SpA, SpD) an EV, set before entering. A number
- * accepted goes into the editor's Pokemon (gen3_ub_edit_set_level, gen3_ub_edit_set_evs, which
- * keeps the total at most 510), and the scene returns to the one below: the editor, or the EV
- * list. */
+ * 0 the level, 1 + a stat (HP, Atk, Def, Spe, SpA, SpD) an EV, set before entering. The keyboard
+ * refuses a number gen3_cart_screen_ub_number doesn't take, an EV that would take the six over 510
+ * among them, so that no other EV is lowered behind the user's back. A number accepted goes into
+ * the editor's Pokemon (gen3_ub_edit_set_level, gen3_ub_edit_set_evs), and the scene returns to
+ * the one below: the editor, or the EV list. */
 
 #define GEN3_CART_OMEGA_NUMBER_DONE 0x473305B0u
-#define GEN3_CART_OMEGA_LEVEL_MAX 100u
-#define GEN3_CART_OMEGA_EV_MAX 252u
 
 static char gen3_cart_omega_number_buf[4]; /* "252" */
 static char gen3_cart_omega_number_header[24];
@@ -27,30 +26,19 @@ static bool gen3_cart_omega_number_validator(const char* text, FuriString* error
     PokemonFap* pokemon_fap = context;
     Gen3UbEditor* e = &gen3_cart_ui_get(pokemon_fap)->ub_edit;
     const uint32_t which = gen3_cart_omega_number_which(pokemon_fap);
-    const bool level = which == 0;
-    const uint32_t min = level ? 1u : 0u;
-    const uint32_t max = level ? GEN3_CART_OMEGA_LEVEL_MAX : GEN3_CART_OMEGA_EV_MAX;
-    uint32_t number = 0;
-    bool ok = text[0] != '\0';
+    uint8_t number = 0;
+    const char* why = gen3_cart_screen_ub_number(text, which, &e->mon, &number);
 
-    /* Digits only; the buffer holds 3, so this can't overflow */
-    for(size_t i = 0; ok && text[i] != '\0'; i++) {
-        if(text[i] < '0' || text[i] > '9') {
-            ok = false;
-        } else {
-            number = number * 10u + (uint32_t)(text[i] - '0');
-        }
-    }
-    if(!ok || number < min || number > max) {
-        furi_string_set(error, level ? "Level must\nbe 1-100!" : "EV must\nbe 0-252!");
+    if(why) {
+        furi_string_set(error, why);
         return false;
     }
-    if(level) {
-        gen3_ub_edit_set_level(e, (uint8_t)number);
+    if(which == 0) {
+        gen3_ub_edit_set_level(e, number);
     } else if(which <= 6u) {
         uint8_t evs[6];
         gen3_ub_mon_evs(&e->mon, evs);
-        evs[which - 1u] = (uint8_t)number;
+        evs[which - 1u] = number;
         gen3_ub_edit_set_evs(e, evs);
     }
     return true;

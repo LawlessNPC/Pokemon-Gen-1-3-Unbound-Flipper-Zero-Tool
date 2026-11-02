@@ -1807,6 +1807,63 @@ TEST(test_screen_ub_small) {
     ASSERT_TRUE(fits(GEN3_CART_SCREEN_UB_NO_BACKUPS, 3, GEN3_CART_SCREEN_LINE_LEN));
 }
 
+/* gen3_cart_screen_ub_number's error, or "ok" when it takes the number */
+static const char* ub_number(const char* text, uint32_t which, const Gen3UbMon* m, uint8_t* n) {
+    const char* why = gen3_cart_screen_ub_number(text, which, m, n);
+    return why ? why : "ok";
+}
+
+/* The editor's number scene: the level, an EV, and an EV that would take the six over 510, which
+ * is refused rather than lowering another behind the user's back */
+TEST(test_screen_ub_number) {
+    Gen3UbMon m;
+    memset(&m, 0, sizeof(m));
+    m.party = true;
+    const uint8_t evs[6] = {0, 252, 0, 0, 0, 252}; /* Atk and SpD maxed: 504 */
+    gen3_ub_mon_set_evs(&m, evs);
+    uint8_t n = 0xEE;
+    static const char level_err[] = "Level must\nbe 1-100!";
+    static const char ev_err[] = "EV must\nbe 0-252!";
+
+    ASSERT_STR_EQ(ub_number("50", 0, &m, &n), "ok");
+    ASSERT_EQ(n, 50);
+    ASSERT_STR_EQ(ub_number("100", 0, &m, &n), "ok");
+    ASSERT_EQ(n, 100);
+    ASSERT_STR_EQ(ub_number("0", 0, &m, &n), level_err);
+    ASSERT_STR_EQ(ub_number("101", 0, &m, &n), level_err);
+    ASSERT_STR_EQ(ub_number("", 0, &m, &n), level_err);
+    ASSERT_STR_EQ(ub_number("5a", 0, &m, &n), level_err);
+    ASSERT_STR_EQ(ub_number("1000", 0, &m, &n), level_err);
+    /* the level takes no account of the EVs */
+    ASSERT_STR_EQ(ub_number("7", 0, &m, &n), "ok");
+
+    /* HP (which 1): up to 6 fits beside 504 */
+    n = 0xEE;
+    ASSERT_STR_EQ(ub_number("6", 1, &m, &n), "ok");
+    ASSERT_EQ(n, 6);
+    ASSERT_STR_EQ(ub_number("0", 1, &m, &n), "ok");
+    ASSERT_EQ(n, 0);
+    n = 0xEE;
+    ASSERT_STR_EQ(ub_number("7", 1, &m, &n), GEN3_CART_SCREEN_UB_EV_TOTAL);
+    ASSERT_STR_EQ(ub_number("100", 1, &m, &n), GEN3_CART_SCREEN_UB_EV_TOTAL);
+    ASSERT_EQ(n, 0xEE);
+    ASSERT_STR_EQ(ub_number("253", 1, &m, &n), ev_err);
+    ASSERT_STR_EQ(ub_number("", 1, &m, &n), ev_err);
+    /* a stat's own value is replaced, not added: SpD (which 6) 252 again, or lower; Def (which 3)
+     * 252 would make 756, 6 makes 510 */
+    ASSERT_STR_EQ(ub_number("252", 6, &m, &n), "ok");
+    ASSERT_EQ(n, 252);
+    ASSERT_STR_EQ(ub_number("10", 6, &m, &n), "ok");
+    ASSERT_STR_EQ(ub_number("252", 3, &m, &n), GEN3_CART_SCREEN_UB_EV_TOTAL);
+    ASSERT_STR_EQ(ub_number("6", 3, &m, &n), "ok");
+
+    ASSERT_STR_EQ(GEN3_CART_SCREEN_UB_EV_TOTAL, "EVs total\nover 510");
+    /* the keyboard's message box: two short lines, as its other messages */
+    ASSERT_TRUE(fits(GEN3_CART_SCREEN_UB_EV_TOTAL, 2, 10));
+    ASSERT_TRUE(fits(level_err, 2, 10));
+    ASSERT_TRUE(fits(ev_err, 2, 10));
+}
+
 /* The letter pickers' pages over the sorted lists: each first letter in turn, one with more than
  * GEN3_CART_SCREEN_UB_PAGE_MAX names in even pages */
 TEST(test_screen_ub_pages) {
@@ -1920,6 +1977,7 @@ int main(void) {
     RUN(test_screen_omega_result);
     RUN(test_screen_omega_hub);
     RUN(test_screen_ub_small);
+    RUN(test_screen_ub_number);
     RUN(test_screen_ub_pages);
     RUN(test_screen_ub_backups);
     RUN(test_screen_ub_row);

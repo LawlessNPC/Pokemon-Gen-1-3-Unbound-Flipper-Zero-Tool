@@ -742,6 +742,14 @@ static Gen3CartResult cart_job_omega_restore_check(Gen3CartSession* s, const cha
     return r;
 }
 
+/* After a write or a restore: why it was refused, if it was, and the DISARM it ended with, if it
+ * sent one */
+static void cart_log_omega_job(Gen3CartSession* s) {
+    const Gen3Omega* o = &s->omega;
+    if(o->refused) CART_LOG(s, "omega refused %s", o->refused);
+    if(o->disarm != Gen3CartNothing) CART_LOG(s, "omega disarm %s", cart_result_name(o->disarm));
+}
+
 /* An Omega's jobs (gen3_omega.h), with the stamp the backups take; a write and a restore end with
  * a new backup, which the log shows as a connect's does */
 static Gen3CartResult cart_job_omega(Gen3CartSession* s, Gen3CartJob job, const char* arg) {
@@ -759,6 +767,7 @@ static Gen3CartResult cart_job_omega(Gen3CartSession* s, Gen3CartJob job, const 
             (unsigned)gen3_omega_changes(o),
             (unsigned long)o->dirty);
         r = gen3_omega_write(o, s->stamp);
+        cart_log_omega_job(s);
         cart_log_omega_backup(s);
         break;
     case Gen3CartJobDiscard:
@@ -770,6 +779,7 @@ static Gen3CartResult cart_job_omega(Gen3CartSession* s, Gen3CartJob job, const 
     case Gen3CartJobRestore:
         CART_LOG(s, "omega restore %s", arg ? arg : "-");
         r = gen3_omega_restore(o, arg, s->stamp);
+        cart_log_omega_job(s);
         cart_log_omega_backup(s);
         break;
     case Gen3CartJobConnect:

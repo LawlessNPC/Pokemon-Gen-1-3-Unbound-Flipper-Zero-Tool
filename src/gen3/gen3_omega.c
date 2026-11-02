@@ -353,7 +353,25 @@ static bool om_section(Gen3Omega* o, const char* name, uint8_t id) {
     return om_file_sector(o, name, o->slots.phys[id]);
 }
 
-/* GEN3_OMEGA_WORK made from the backup, 4 KB at a time through buf; removed if it fails */
+/* The working copy read back, through buf: each sector's CRC-32 the backup's (o->crc). SdError if
+ * any isn't, or it can't be read. */
+static Gen3CartResult om_work_check(Gen3Omega* o) {
+    const Gen3Store* st = &o->store;
+    void* f = st->open(st->ctx, GEN3_OMEGA_WORK, Gen3StoreRead);
+    if(!f) return Gen3CartSdError;
+    Gen3CartResult r = Gen3CartOk;
+    for(uint32_t s = 0; s < GEN3_UB_SECTORS && r == Gen3CartOk; s++) {
+        if(!st->read(st->ctx, f, s * OM_SECTOR, o->buf, OM_SECTOR) ||
+           gen3_crc32(o->buf, OM_SECTOR) != o->crc[s]) {
+            r = Gen3CartSdError;
+        }
+    }
+    st->close(st->ctx, f);
+    return r;
+}
+
+/* GEN3_OMEGA_WORK made from the backup, 4 KB at a time through buf, then read back and checked
+ * against the backup's CRCs; removed if any of it fails */
 static Gen3CartResult om_work_make(Gen3Omega* o) {
     const Gen3Store* st = &o->store;
     void* src = st->open(st->ctx, o->backup_name, Gen3StoreRead);
@@ -373,6 +391,7 @@ static Gen3CartResult om_work_make(Gen3Omega* o) {
     }
     st->close(st->ctx, src);
     if(!st->close(st->ctx, dst) && r == Gen3CartOk) r = Gen3CartSdError;
+    if(r == Gen3CartOk) r = om_work_check(o);
     if(r != Gen3CartOk) st->remove(st->ctx, GEN3_OMEGA_WORK);
     return r;
 }
@@ -653,6 +672,27 @@ static void om_end_link(Gen3Omega* o, Gen3CartResult r) {
     }
 }
 
+/* A command whose answer never came: the link is down, and nothing more is sent on it */
+static bool om_lost(Gen3CartResult r) {
+    return r == Gen3CartLinkLost || r == Gen3CartBusyTimeout;
+}
+
+/* Why a write or a restore is Refused, before anything is sent, in the log's words; NULL if it
+ * isn't. The game file must be verified, the backup current with a slot the game loads, the
+ * working copy there, and the loaded slot's counter of its own parity: the game reads the slot
+ * gSaveCounter % 2 (pokefirered: src/save.c: ReadSaveSectorChunks, HandleWriteSector), so each
+ * save it makes has slot A's counter even and slot B's odd, and a write of N + 1 into the other
+ * slot keeps that only if the loaded one has it. A save that doesn't isn't laid out as the game's
+ * own. */
+static const char* om_refusal(const Gen3Omega* o) {
+    if(!o->verified) return "not verified";
+    if(!gen3_omega_browsable(o)) return "no backup";
+    if(!o->work_ok) return "no working copy";
+    const uint32_t loaded = (uint32_t)o->slots.loaded;
+    if(o->slots.counter[loaded] % 2u != loaded) return "slot parity";
+    return NULL;
+}
+
 /* The slot the game doesn't load ends (index 13) in a sound sector no older than the loaded slot:
  * what a save of the game's own leaves when cut short. The game writes a slot from index r
  * (r_loaded + 1, as this write's rotation) up to 13, then 0 .. r - 1; this write goes from index
@@ -791,15 +831,19 @@ static Gen3CartResult om_write_shared(Gen3Omega* o, uint32_t total) {
 
 /* Each sector's OMEGA_CRC32 against want_crc: VerifyFailed, or WrittenShared if only sectors 30
  * and 31 differ. Every write is done by now, so the game loads the new save: a check the link cut
- * short is WrittenNoBackup. */
-static Gen3CartResult om_write_verify(Gen3Omega* o) {
+ * short is WrittenNoBackup, unless a sector it checked already differed (VerifyFailed, or
+ * WrittenShared for 30 or 31). *lost: the link went. */
+static Gen3CartResult om_write_verify(Gen3Omega* o, bool* lost) {
     bool bad = false, shared = false;
     for(uint32_t s = 0; s < GEN3_UB_SECTORS; s++) {
         uint32_t crc = 0;
         const Gen3CartResult r = om_crc(o, s, &crc);
         if(r != Gen3CartOk) {
             om_end_link(o, r);
-            return Gen3CartWrittenNoBackup;
+            *lost = om_lost(r);
+            return bad    ? Gen3CartVerifyFailed :
+                   shared ? Gen3CartWrittenShared :
+                            Gen3CartWrittenNoBackup;
         }
         if(crc != o->want_crc[s]) {
             if(s >= OM_SHARED) {
@@ -832,7 +876,9 @@ static Gen3CartResult om_write_backup(Gen3Omega* o, const char* stamp) {
     return r;
 }
 
-/* The write, from the checks on: the working copy's dirty sectors onto the card */
+/* The write, from the checks on: the working copy's dirty sectors onto the card. Once it armed the
+ * helper it ends with DISARM, whatever the outcome, unless the link went (a command whose answer
+ * never came): its result goes to o->disarm for the log, and the write's result stays as it is. */
 static Gen3CartResult om_write_job(Gen3Omega* o, const char* stamp) {
     if(om_other_slot_cut(o)) return Gen3CartOmegaSaveFirst;
     if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
@@ -843,15 +889,18 @@ static Gen3CartResult om_write_job(Gen3Omega* o, const char* stamp) {
     const uint32_t shared = ((o->dirty >> OM_SHARED) & 1u) + (o->dirty >> (OM_SHARED + 1u));
     const uint32_t total = 1u + GEN3_UB_SLOT_SECTORS + shared;
     Gen3CartResult r = om_write_check(o);
+    const bool armed = r == Gen3CartOk;
     if(r == Gen3CartOk) r = om_write_slot(o, total);
+    bool lost = om_lost(r);
     if(r == Gen3CartOk) {
         /* The new slot is whole: the game loads it now */
         r = om_write_shared(o, total);
         if(r != Gen3CartOk) {
+            lost = om_lost(r);
             om_end_link(o, r);
             r = Gen3CartWrittenShared;
         } else {
-            r = om_write_verify(o);
+            r = om_write_verify(o, &lost);
         }
         if(r != Gen3CartOk) {
             /* The backup holds the save before this one, and the edits are on the card */
@@ -861,14 +910,29 @@ static Gen3CartResult om_write_job(Gen3Omega* o, const char* stamp) {
     }
     if(r != Gen3CartOk) {
         om_end_link(o, r);
-        return r;
+    } else {
+        const Gen3CartResult b = om_write_backup(o, stamp);
+        lost = om_lost(b);
+        if(b != Gen3CartOk) r = Gen3CartWrittenNoBackup;
     }
-    return om_write_backup(o, stamp) == Gen3CartOk ? Gen3CartOk : Gen3CartWrittenNoBackup;
+    if(armed && !lost) {
+        o->disarm = om_link(o, gen3_hcli_disarm(o->cli));
+        om_end_link(o, o->disarm);
+    }
+    return r;
+}
+
+/* What the log tells of a write or a restore starts afresh with each */
+static void om_job_start(Gen3Omega* o) {
+    o->refused = NULL;
+    o->disarm = Gen3CartNothing;
 }
 
 Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp) {
+    om_job_start(o);
     if(gen3_omega_changes(o) == 0) return Gen3CartNothing;
-    if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+    o->refused = om_refusal(o);
+    if(o->refused) return Gen3CartRefused;
     return om_write_job(o, stamp);
 }
 
@@ -916,15 +980,21 @@ Gen3CartResult gen3_omega_restore_check(Gen3Omega* o, const char* name, Gen3UbTr
     return Gen3CartOk;
 }
 
-/* The file's sector from into the working copy's sector to, through buf */
+/* The file's sector from into the working copy's sector to, through buf, which then holds what
+ * the working copy reads back there */
 static bool om_restore_copy(Gen3Omega* o, void* src, void* dst, uint32_t from, uint32_t to) {
     const Gen3Store* st = &o->store;
     return st->read(st->ctx, src, from * OM_SECTOR, o->buf, OM_SECTOR) &&
-           st->write(st->ctx, dst, to * OM_SECTOR, o->buf, OM_SECTOR);
+           st->write(st->ctx, dst, to * OM_SECTOR, o->buf, OM_SECTOR) &&
+           st->read(st->ctx, dst, to * OM_SECTOR, o->buf, OM_SECTOR);
 }
 
 /* The working copy made the file's save: each section of its loaded slot where the current
- * backup's section sits, and sectors 30 and 31; all of them dirty */
+ * backup's section sits, all of them dirty, and sectors 30 and 31, dirty where they aren't what
+ * the card holds. Each section, as the working copy reads it back, must still be the file's whole
+ * section (its id, an Unbound signature, its own checksum, section 4's not checked): the write
+ * remakes the footer's checksum over whatever data it finds, so a section that came out wrong is
+ * BadBackup here, before anything is sent. */
 static Gen3CartResult om_restore_work(Gen3Omega* o, const char* name) {
     const Gen3Store* st = &o->store;
     void* src = st->open(st->ctx, name, Gen3StoreRead);
@@ -934,25 +1004,33 @@ static Gen3CartResult om_restore_work(Gen3Omega* o, const char* name) {
         st->close(st->ctx, src);
         return Gen3CartSdError;
     }
-    bool ok = true;
+    bool ok = true, whole = true;
     uint32_t dirty = 0;
-    for(uint8_t id = 0; id < GEN3_UB_SLOT_SECTORS && ok; id++) {
+    for(uint8_t id = 0; id < GEN3_UB_SLOT_SECTORS && ok && whole; id++) {
         ok = om_restore_copy(o, src, dst, o->rslots.phys[id], o->slots.phys[id]);
+        if(ok) {
+            Gen3UbSector f;
+            gen3_ub_sector_info(o->buf, &f);
+            whole = f.id == id && f.sig_ok && f.sum_ok;
+        }
         dirty |= 1u << o->slots.phys[id];
     }
-    for(uint32_t s = OM_SHARED; s < GEN3_UB_SECTORS && ok; s++) {
+    for(uint32_t s = OM_SHARED; s < GEN3_UB_SECTORS && ok && whole; s++) {
         ok = om_restore_copy(o, src, dst, s, s);
-        dirty |= 1u << s;
+        if(ok && gen3_crc32(o->buf, OM_SECTOR) != o->crc[s]) dirty |= 1u << s;
     }
     st->close(st->ctx, src);
     if(!st->close(st->ctx, dst)) ok = false;
     if(!ok) return om_sd_fail(o);
+    if(!whole) return Gen3CartBadBackup;
     o->dirty = dirty;
     return Gen3CartOk;
 }
 
 Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* stamp) {
-    if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+    om_job_start(o);
+    o->refused = om_refusal(o);
+    if(o->refused) return Gen3CartRefused;
     if(!om_restore_name(name)) return Gen3CartBadArg;
     if(om_other_slot_cut(o)) return Gen3CartOmegaSaveFirst;
     if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
