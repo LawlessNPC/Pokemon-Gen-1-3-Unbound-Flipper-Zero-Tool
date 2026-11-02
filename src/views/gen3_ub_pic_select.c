@@ -9,12 +9,10 @@
 
 #include <src/views/gen3_species_select.h>
 
-#define GEN3_UB_PIC_TICK_MS 100
 #define GEN3_UB_PIC_DIM 56
 
 typedef struct {
     View* view;
-    FuriTimer* timer;
     Gen3UbPicSelectCallback cb;
     void* ctx;
 } Gen3UbPicSelect;
@@ -72,30 +70,6 @@ static bool gen3_ub_pic_select_input(InputEvent* event, void* context) {
     return true;
 }
 
-/* Timer thread */
-static void gen3_ub_pic_select_timer(void* context) {
-    Gen3UbPicSelect* ps = context;
-
-    if(ps->cb) ps->cb(ps->ctx, GEN3_UB_PIC_TICK);
-}
-
-static void gen3_ub_pic_select_enter(void* context) {
-    Gen3UbPicSelect* ps = context;
-
-    ps->timer = furi_timer_alloc(gen3_ub_pic_select_timer, FuriTimerTypePeriodic, ps);
-    furi_timer_start(ps->timer, furi_ms_to_ticks(GEN3_UB_PIC_TICK_MS));
-}
-
-static void gen3_ub_pic_select_exit(void* context) {
-    Gen3UbPicSelect* ps = context;
-
-    if(ps->timer) {
-        furi_timer_stop(ps->timer);
-        furi_timer_free(ps->timer);
-        ps->timer = NULL;
-    }
-}
-
 void* gen3_ub_pic_select_alloc(ViewDispatcher* vd, uint32_t view_id) {
     Gen3UbPicSelect* ps = malloc(sizeof(Gen3UbPicSelect));
 
@@ -105,8 +79,6 @@ void* gen3_ub_pic_select_alloc(ViewDispatcher* vd, uint32_t view_id) {
     view_allocate_model(ps->view, ViewModelTypeLocking, sizeof(Gen3UbPicSelectModel));
     view_set_draw_callback(ps->view, gen3_ub_pic_select_draw);
     view_set_input_callback(ps->view, gen3_ub_pic_select_input);
-    view_set_enter_callback(ps->view, gen3_ub_pic_select_enter);
-    view_set_exit_callback(ps->view, gen3_ub_pic_select_exit);
     view_dispatcher_add_view(vd, view_id, ps->view);
     return ps;
 }
@@ -115,7 +87,6 @@ void gen3_ub_pic_select_free(ViewDispatcher* vd, uint32_t view_id, void* p) {
     Gen3UbPicSelect* ps = p;
 
     view_dispatcher_remove_view(vd, view_id);
-    gen3_ub_pic_select_exit(ps); /* if the view was still shown */
     view_free(ps->view);
     free(ps);
 }

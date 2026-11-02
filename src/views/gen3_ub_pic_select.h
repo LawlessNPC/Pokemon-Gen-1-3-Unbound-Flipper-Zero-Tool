@@ -5,13 +5,11 @@
 #include <gui/view_dispatcher.h>
 
 /* The Unbound species picture browser's view: a 56x56 picture (or a "?" frame), the name, "n/m"
- * and OK. Left, Right and OK call the callback with the GEN3_UB_PIC_* below, and while it is shown
- * a 100 ms timer calls it with GEN3_UB_PIC_TICK. The callback runs in the GUI thread (the keys) or
- * the timer thread (the tick): do no more than post an event. */
+ * and OK. Left, Right and OK call the callback with the GEN3_UB_PIC_* below, in the GUI thread: do
+ * no more than post an event. It has no timer: its scene polls on the app's tick. */
 #define GEN3_UB_PIC_LEFT 0x47330530u
 #define GEN3_UB_PIC_RIGHT 0x47330531u
 #define GEN3_UB_PIC_OK 0x47330532u
-#define GEN3_UB_PIC_TICK 0x47330533u
 
 typedef void (*Gen3UbPicSelectCallback)(void* ctx, uint32_t what);
 

@@ -16,11 +16,11 @@
  *
  * A picture is, in turn: the shipped one (all_sprites.fxbm, gen3_ub_shipped_picture), the cached
  * one (unbound_pics/<species>.fxb, exactly one 404-byte record), else "?" and a background fetch
- * from the Omega's ROM (gen3_cart_ui_picture_want) while it can be had. The view's 100 ms timer
- * posts GEN3_CART_EVENT_PICTURE; this thread then takes the finished job
- * (gen3_cart_ui_picture_ended) and reloads the picture if it was the shown species'. A species
- * whose fetch failed is not asked for again until it has been stepped away from. The request queue
- * is only touched here, and dropped on leaving. */
+ * from the Omega's ROM (gen3_cart_ui_picture_want) while it can be had. On the app's 100 ms tick
+ * (a SceneManagerEventTypeTick, on this thread) it takes the finished job
+ * (gen3_cart_ui_picture_ended), reloads the picture if it was the shown species', and starts the
+ * waiting one. A species whose fetch failed is not asked for again until it has been stepped away
+ * from. The request queue is only touched here, and dropped on leaving. */
 
 #define GEN3_CART_PIC_FILE_SIZE 404u
 
@@ -32,8 +32,7 @@ static bool gen3_cart_pics_notice; /* gen3_menu_show_notice is up */
 static void gen3_cart_pics_callback(void* context, uint32_t what) {
     PokemonFap* pokemon_fap = context;
 
-    view_dispatcher_send_custom_event(
-        pokemon_fap->view_dispatcher, what == GEN3_UB_PIC_TICK ? GEN3_CART_EVENT_PICTURE : what);
+    view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, what);
 }
 
 static uint16_t gen3_cart_pics_species(void) {
@@ -103,11 +102,27 @@ static void gen3_cart_pics_pick(PokemonFap* pokemon_fap) {
     }
 }
 
-bool pokemon_scene_gen3_cart_omega_pics_on_event(void* context, SceneManagerEvent event) {
-    PokemonFap* pokemon_fap = context;
+/* The tick: a finished job's picture, if it is the shown species', then the waiting request */
+static void gen3_cart_pics_tick(PokemonFap* pokemon_fap) {
     uint16_t species;
     Gen3CartResult r;
 
+    if(!gen3_cart_pics_view || gen3_cart_pics_notice) return;
+    if(gen3_cart_ui_picture_ended(pokemon_fap, &species, &r) &&
+       species == gen3_cart_pics_species()) {
+        gen3_cart_pics_failed = species;
+        gen3_cart_pics_show(pokemon_fap, false);
+    }
+    gen3_cart_ui_picture_pump(pokemon_fap);
+}
+
+bool pokemon_scene_gen3_cart_omega_pics_on_event(void* context, SceneManagerEvent event) {
+    PokemonFap* pokemon_fap = context;
+
+    if(event.type == SceneManagerEventTypeTick) {
+        gen3_cart_pics_tick(pokemon_fap);
+        return true;
+    }
     if(event.type != SceneManagerEventTypeCustom) return false;
     if(gen3_cart_pics_notice) {
         if(event.event == GEN3_EVENT_NOTICE_OK) {
@@ -128,14 +143,6 @@ bool pokemon_scene_gen3_cart_omega_pics_on_event(void* context, SceneManagerEven
         break;
     case GEN3_UB_PIC_OK:
         gen3_cart_pics_pick(pokemon_fap);
-        break;
-    case GEN3_CART_EVENT_PICTURE:
-        if(gen3_cart_ui_picture_ended(pokemon_fap, &species, &r) &&
-           species == gen3_cart_pics_species()) {
-            gen3_cart_pics_failed = species;
-            gen3_cart_pics_show(pokemon_fap, false);
-        }
-        gen3_cart_ui_picture_pump(pokemon_fap);
         break;
     default:
         return false;

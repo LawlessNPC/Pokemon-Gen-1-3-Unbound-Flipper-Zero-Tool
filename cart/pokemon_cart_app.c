@@ -37,6 +37,16 @@ static bool pokemon_cart_back_event_callback(void* context) {
     return scene_manager_handle_back_event(pokemon_fap->scene_manager);
 }
 
+/* Every 100 ms, on the app thread: a Tick to the current scene, which the picture browser
+ * (Gen3CartOmegaPics) polls its background job with and every other scene ignores. The view
+ * dispatcher makes it in its own loop, so it never waits on a queue or the timer thread. */
+static void pokemon_cart_tick_event_callback(void* context) {
+    furi_assert(context);
+    PokemonFap* pokemon_fap = context;
+
+    scene_manager_handle_tick_event(pokemon_fap->scene_manager);
+}
+
 /* Each pin file of the pokemon app's data folder, copied into this app's; one the pokemon app
  * doesn't have is removed here too, so both apps always use the same pins. */
 static void pokemon_cart_copy_pins(void) {
@@ -66,13 +76,15 @@ static PokemonFap* pokemon_cart_alloc(void) {
     PokemonFap* pokemon_fap = malloc(sizeof(PokemonFap));
     memset(pokemon_fap, 0, sizeof(*pokemon_fap));
 
-    // View dispatcher: no tick, as nothing here trades
+    // View dispatcher, with the scenes' 100 ms tick
     ViewDispatcher* view_dispatcher = view_dispatcher_alloc();
     pokemon_fap->view_dispatcher = view_dispatcher;
     view_dispatcher_set_event_callback_context(view_dispatcher, pokemon_fap);
     view_dispatcher_set_custom_event_callback(view_dispatcher, pokemon_cart_custom_event_callback);
     view_dispatcher_set_navigation_event_callback(
         view_dispatcher, pokemon_cart_back_event_callback);
+    view_dispatcher_set_tick_event_callback(
+        view_dispatcher, pokemon_cart_tick_event_callback, furi_ms_to_ticks(100));
     view_dispatcher_attach_to_gui(
         view_dispatcher, (Gui*)furi_record_open(RECORD_GUI), ViewDispatcherTypeFullscreen);
 

@@ -36,8 +36,6 @@
 #define GEN3_CART_EVENT_RIGHT 0x47330505u
 /* The party and box scenes, to themselves: nothing to browse, back to the hub */
 #define GEN3_CART_EVENT_HUB 0x47330506u
-/* A background picture job ended (gen3_cart_ui_picture_ended): sent by the picker's view timer */
-#define GEN3_CART_EVENT_PICTURE 0x47330507u
 
 /* What the Unbound pick scene (Gen3CartOmegaPick) lists for the editor */
 typedef enum {
@@ -196,8 +194,8 @@ void gen3_cart_ui_set_result(
  * if the editor refuses, which changes nothing. Also for the picture browser (Gen3CartOmegaPics). */
 bool gen3_cart_omega_pick_id(PokemonFap* pokemon_fap, uint16_t id);
 
-/* ---- Background pictures (Gen3CartJobPicture). The picker's scene asks; its view timer polls
- * gen3_cart_ui_picture_ended and sends GEN3_CART_EVENT_PICTURE. App thread only. ---- */
+/* ---- Background pictures (Gen3CartJobPicture). The picker's scene asks, and polls
+ * gen3_cart_ui_picture_ended on the app's tick (SceneManagerEventTypeTick). App thread only. ---- */
 
 /* An Omega's pictures can be asked for: the last Connect found an Omega, it is connected and
  * verified, and its pictures were not found off. While a picture job runs: true. */
