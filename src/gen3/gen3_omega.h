@@ -63,6 +63,9 @@ typedef struct {
     uint8_t changed[GEN3_OMEGA_CHANGED_BYTES]; /* party slot i: bit i; box b slot s: 6 + b * 30 + s */
     /* The last gen3_omega_write's: each sector's CRC-32 as its writes should have left the card */
     uint32_t want_crc[GEN3_UB_SECTORS];
+    /* The backup file a restore reads: its footers and its slots */
+    Gen3UbSector rinfos[2u * GEN3_UB_SLOT_SECTORS];
+    Gen3UbSlots rslots;
     char line[160]; /* a cache line being built or compared */
 } Gen3Omega;
 
@@ -153,6 +156,21 @@ bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
  * new Connect. Progress Prepare, Program per sector, Verify per sector, then PostBackup for the
  * new backup's steps; never cancelled. */
 Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp);
+
+/* Whether the store's file name can be restored, and whose it is. name must be a store path
+ * backups/UNBOUND_*.sav (BadArg, before anything is opened); the file must be 131072 bytes (else
+ * BadBackup) with a slot the game loads (else BadBackup); SdError if it can't be read. *has is
+ * true, and *t filled from the file's section 0, once it checks out. Needs no link or backup. */
+Gen3CartResult gen3_omega_restore_check(Gen3Omega* o, const char* name, Gen3UbTrainer* t, bool* has);
+/* An earlier Unbound backup written onto the card. The checks are gen3_omega_write's (Refused,
+ * OmegaSaveFirst, BadArg for a stamp, LinkLost, SdFull, then Prepare's Changed) and gen3_omega_restore_check's
+ * (BadArg, BadBackup, SdError). The file's loaded-slot sectors replace the working copy's at the
+ * current backup's loaded-slot positions, its sectors 30 and 31 replace those, every section and both
+ * shared sectors are marked dirty, and the write runs as gen3_omega_write: the card ends loading
+ * the file's save at counter N + 1, N the counter now loaded. Edits not written are dropped, also
+ * when the restore fails with the card unchanged (the working copy is then the backup again).
+ * The results and progress are gen3_omega_write's. */
+Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* stamp);
 
 #ifdef GEN3_TESTING
 /* Host tests: the hash a game file must have to be verified (NULL: Unbound 2.1.1.1's) */

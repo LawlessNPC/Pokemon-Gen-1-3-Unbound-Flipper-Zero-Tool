@@ -921,6 +921,117 @@ TEST(test_omega_write_ok) {
     ASSERT_MEM_EQ(rec, bx.raw, 58);
 }
 
+/* A store file of len bytes from img (the Omega's own store) */
+static bool put_file(const char* name, const uint8_t* img, uint32_t len) {
+    void* f = api.open(api.ctx, name, Gen3StoreCreate);
+    if(!f) return false;
+    const bool ok = api.write(api.ctx, f, 0, img, len);
+    return api.close(api.ctx, f) && ok;
+}
+
+TEST(test_omega_restore_ok) {
+    fake_store_init(&store, 64u * MIB);
+    api = fake_store_api(&store);
+    make_save();
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    uint32_t size = 0;
+    memcpy(card_before, fake_store_file(&store, BACKUP, &size), FAKE_UB_LEN);
+    Gen3UbSlots first;
+    image_slots(card_before, &first);
+    uint8_t rec_first[58];
+    ASSERT_TRUE(image_box(card_before, &first, 3, 5, rec_first));
+    Gen3UbMon bx;
+    ASSERT_TRUE(edit_box3(77, &bx));
+    ASSERT_TRUE(bx.raw[0] != 0 || rec_first[0] != 0);
+    ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
+    card_save(card_after);
+    Gen3UbSlots s;
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.counter[s.loaded], 21);
+    uint8_t rec[58];
+    ASSERT_TRUE(image_box(card_after, &s, 3, 5, rec));
+    ASSERT_TRUE(memcmp(rec, rec_first, 58) != 0);
+
+    /* the check: the trainer of the file's section 0 */
+    Gen3UbTrainer t;
+    bool has = false;
+    ASSERT_EQ(gen3_omega_restore_check(&om, BACKUP, &t, &has), Gen3CartOk);
+    ASSERT_TRUE(has);
+    ASSERT_EQ(t.tid, 12345);
+    ASSERT_EQ(t.sid, 54321);
+
+    const uint64_t digest = fake_fat_digest_except(&card, om.save.first_cluster);
+    const uint32_t writes = gba.omega_writes;
+    ASSERT_EQ(gen3_omega_restore(&om, BACKUP, "20261101-150000"), Gen3CartOk);
+    ASSERT_TRUE(gba.omega_writes > writes);
+    card_save(card_after);
+    image_slots(card_after, &s);
+    ASSERT_EQ(s.loaded, 0); /* the other slot than the edit's, at N + 2 */
+    ASSERT_EQ(s.counter[0], 22);
+    ASSERT_TRUE(image_box(card_after, &s, 3, 5, rec));
+    ASSERT_MEM_EQ(rec, rec_first, 58);
+    for(uint8_t id = 0; id < 14u; id++) {
+        ASSERT_MEM_EQ(card_after + s.phys[id] * SEC, card_before + first.phys[id] * SEC, 0xFF4u);
+        ASSERT_EQ(le32(card_after + s.phys[id] * SEC + 0xFFC), 22);
+    }
+    ASSERT_MEM_EQ(card_after + 30u * SEC, card_before + 30u * SEC, 2u * SEC);
+    ASSERT_EQ(fake_fat_digest_except(&card, om.save.first_cluster), digest);
+    /* the new backup holds the card; the edits are gone */
+    ASSERT_TRUE(gen3_omega_browsable(&om));
+    ASSERT_EQ(om.slots.counter[0], 22);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_TRUE(om.work_ok);
+    ASSERT_MEM_EQ(fake_store_file(&store, om.backup_name, &size), card_after, FAKE_UB_LEN);
+    ASSERT_MEM_EQ(fake_store_file(&store, GEN3_OMEGA_WORK, &size), card_after, FAKE_UB_LEN);
+    ASSERT_TRUE(om.connected);
+}
+
+TEST(test_omega_restore_bad) {
+    fake_store_init(&store, 64u * MIB);
+    api = fake_store_api(&store);
+    make_save();
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    static uint8_t junk[FAKE_UB_LEN];
+    Gen3UbTrainer t;
+    bool has = true;
+    /* a half-size file */
+    ASSERT_TRUE(put_file("backups/UNBOUND_1_half.sav", save_img, 65536));
+    ASSERT_EQ(gen3_omega_restore_check(&om, "backups/UNBOUND_1_half.sav", &t, &has), Gen3CartBadBackup);
+    ASSERT_TRUE(!has);
+    /* no slot the game loads */
+    memset(junk, 0xFF, sizeof(junk));
+    ASSERT_TRUE(put_file("backups/UNBOUND_1_none.sav", junk, FAKE_UB_LEN));
+    ASSERT_EQ(gen3_omega_restore_check(&om, "backups/UNBOUND_1_none.sav", &t, &has), Gen3CartBadBackup);
+    /* names that are no Unbound backup */
+    ASSERT_TRUE(put_file("backups/POKEMON_1.sav", save_img, FAKE_UB_LEN));
+    ASSERT_EQ(gen3_omega_restore_check(&om, "backups/POKEMON_1.sav", &t, &has), Gen3CartBadArg);
+    ASSERT_EQ(gen3_omega_restore_check(&om, "UNBOUND_1.sav", &t, &has), Gen3CartBadArg);
+    ASSERT_EQ(gen3_omega_restore_check(&om, "backups/UNBOUND_1.bin", &t, &has), Gen3CartBadArg);
+    ASSERT_EQ(gen3_omega_restore_check(&om, NULL, &t, &has), Gen3CartBadArg);
+    ASSERT_EQ(gen3_omega_restore_check(&om, "backups/UNBOUND_9_absent.sav", &t, &has), Gen3CartSdError);
+
+    Gen3UbMon bx;
+    ASSERT_TRUE(edit_box3(77, &bx));
+    const char* bad[] = {
+        "backups/UNBOUND_1_half.sav", "backups/UNBOUND_1_none.sav", "backups/POKEMON_1.sav",
+        "backups/UNBOUND_1.bin"};
+    const Gen3CartResult want[] = {
+        Gen3CartBadBackup, Gen3CartBadBackup, Gen3CartBadArg, Gen3CartBadArg};
+    for(uint32_t k = 0; k < 4u; k++) {
+        ASSERT_EQ(gen3_omega_restore(&om, bad[k], STAMP2), want[k]);
+        ASSERT_EQ(gba.omega_writes, 0);
+        ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_ARM], 0);
+        /* the edit is still there */
+        ASSERT_EQ(gen3_omega_changes(&om), 1);
+    }
+    ASSERT_EQ(gen3_omega_restore(&om, BACKUP, NULL), Gen3CartBadArg);
+    ASSERT_EQ(gba.omega_writes, 0);
+}
+
 TEST(test_omega_write_rotation) {
     /* (the loaded slot, its rotation): id 0 of the new slot at index (r_loaded + 1) % 14 */
     static const uint8_t cases[][2] = {{0, 5}, {0, 1}, {1, 13}, {1, 0}};
@@ -1430,6 +1541,8 @@ int main(void) {
     RUN(test_omega_write_work_corrupt);
     RUN(test_omega_write_no_backup);
     RUN(test_omega_write_verify_misplaced);
+    RUN(test_omega_restore_ok);
+    RUN(test_omega_restore_bad);
     fake_fat_free(&card);
     free(rom);
     TEST_EXIT();

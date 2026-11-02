@@ -729,7 +729,8 @@ static Gen3CartResult om_put_sector(Gen3Omega* o, uint8_t s) {
 
 /* Section id of the new slot into buf: the working copy's data from the loaded slot's sector with
  * that id, and its footer remade with the id, the checksum over the section's length (section 4's
- * copied, as PUSE never recomputes it), that sector's signature and the new slot's counter. A
+ * copied, as PUSE never recomputes it), the signature the working copy's sector carries (the
+ * card's own, or a restored file's) and the new slot's counter. A
  * sector with no edit must still be the backup's; SdError if it isn't, or can't be read. */
 static Gen3CartResult om_slot_image(Gen3Omega* o, uint8_t id, uint32_t counter) {
     const uint8_t src = o->slots.phys[id];
@@ -737,11 +738,12 @@ static Gen3CartResult om_slot_image(Gen3Omega* o, uint8_t id, uint32_t counter) 
     if(!((o->dirty >> src) & 1u) && gen3_crc32(o->buf, OM_SECTOR) != o->crc[src]) {
         return Gen3CartSdError;
     }
-    const Gen3UbSector* old = &o->infos[src];
+    Gen3UbSector old;
+    gen3_ub_sector_info(o->buf, &old);
     const Gen3UbSector f = {
         .id = id,
-        .checksum = id == GEN3_UB_OPAQUE_ID ? old->checksum : gen3_ub_section_sum(o->buf, id),
-        .signature = old->signature,
+        .checksum = id == GEN3_UB_OPAQUE_ID ? old.checksum : gen3_ub_section_sum(o->buf, id),
+        .signature = old.signature,
         .counter = counter,
     };
     gen3_ub_set_footer(o->buf, &f);
@@ -830,9 +832,8 @@ static Gen3CartResult om_write_backup(Gen3Omega* o, const char* stamp) {
     return r;
 }
 
-Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp) {
-    if(gen3_omega_changes(o) == 0) return Gen3CartNothing;
-    if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+/* The write, from the checks on: the working copy's dirty sectors onto the card */
+static Gen3CartResult om_write_job(Gen3Omega* o, const char* stamp) {
     if(om_other_slot_cut(o)) return Gen3CartOmegaSaveFirst;
     if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
     if(!o->connected) return Gen3CartLinkLost;
@@ -863,4 +864,114 @@ Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp) {
         return r;
     }
     return om_write_backup(o, stamp) == Gen3CartOk ? Gen3CartOk : Gen3CartWrittenNoBackup;
+}
+
+Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp) {
+    if(gen3_omega_changes(o) == 0) return Gen3CartNothing;
+    if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+    return om_write_job(o, stamp);
+}
+
+/* ---- Restoring a backup ---- */
+
+/* A store path backups/UNBOUND_*.sav, as gen3_omega_backup names its files */
+static bool om_restore_name(const char* name) {
+    static const char pre[] = GEN3_CART_BACKUP_DIR "/UNBOUND_";
+    if(!name) return false;
+    const size_t n = strlen(name), p = sizeof(pre) - 1u;
+    return n < GEN3_CART_NAME_MAX && n > p + 4u && memcmp(name, pre, p) == 0 &&
+           strcmp(name + n - 4u, ".sav") == 0;
+}
+
+/* The file's 28 footers into rinfos and rslots; its section 0 in buf if the slot loads */
+static Gen3CartResult om_restore_read(Gen3Omega* o, const char* name) {
+    const Gen3Store* st = &o->store;
+    uint32_t size = 0;
+    if(!st->size(st->ctx, name, &size)) return Gen3CartSdError;
+    if(size != GEN3_UB_SAVE_SIZE) return Gen3CartBadBackup;
+    void* f = st->open(st->ctx, name, Gen3StoreRead);
+    if(!f) return Gen3CartSdError;
+    Gen3CartResult r = Gen3CartOk;
+    for(uint32_t s = 0; s < 2u * GEN3_UB_SLOT_SECTORS && r == Gen3CartOk; s++) {
+        if(st->read(st->ctx, f, s * OM_SECTOR, o->buf, OM_SECTOR)) {
+            gen3_ub_sector_info(o->buf, &o->rinfos[s]);
+        } else {
+            r = Gen3CartSdError;
+        }
+    }
+    st->close(st->ctx, f);
+    if(r != Gen3CartOk) return r;
+    gen3_ub_slots(o->rinfos, &o->rslots);
+    return o->rslots.loaded >= 0 ? Gen3CartOk : Gen3CartBadBackup;
+}
+
+Gen3CartResult gen3_omega_restore_check(Gen3Omega* o, const char* name, Gen3UbTrainer* t, bool* has) {
+    *has = false;
+    if(!om_restore_name(name)) return Gen3CartBadArg;
+    Gen3CartResult r = om_restore_read(o, name);
+    if(r != Gen3CartOk) return r;
+    if(!om_file_sector(o, name, o->rslots.phys[0])) return Gen3CartSdError;
+    gen3_ub_trainer(o->buf, t);
+    *has = true;
+    return Gen3CartOk;
+}
+
+/* The file's sector from into the working copy's sector to, through buf */
+static bool om_restore_copy(Gen3Omega* o, void* src, void* dst, uint32_t from, uint32_t to) {
+    const Gen3Store* st = &o->store;
+    return st->read(st->ctx, src, from * OM_SECTOR, o->buf, OM_SECTOR) &&
+           st->write(st->ctx, dst, to * OM_SECTOR, o->buf, OM_SECTOR);
+}
+
+/* The working copy made the file's save: each section of its loaded slot where the current
+ * backup's section sits, and sectors 30 and 31; all of them dirty */
+static Gen3CartResult om_restore_work(Gen3Omega* o, const char* name) {
+    const Gen3Store* st = &o->store;
+    void* src = st->open(st->ctx, name, Gen3StoreRead);
+    if(!src) return Gen3CartSdError;
+    void* dst = st->open(st->ctx, GEN3_OMEGA_WORK, Gen3StoreUpdate);
+    if(!dst) {
+        st->close(st->ctx, src);
+        return Gen3CartSdError;
+    }
+    bool ok = true;
+    uint32_t dirty = 0;
+    for(uint8_t id = 0; id < GEN3_UB_SLOT_SECTORS && ok; id++) {
+        ok = om_restore_copy(o, src, dst, o->rslots.phys[id], o->slots.phys[id]);
+        dirty |= 1u << o->slots.phys[id];
+    }
+    for(uint32_t s = OM_SHARED; s < GEN3_UB_SECTORS && ok; s++) {
+        ok = om_restore_copy(o, src, dst, s, s);
+        dirty |= 1u << s;
+    }
+    st->close(st->ctx, src);
+    if(!st->close(st->ctx, dst)) ok = false;
+    if(!ok) return om_sd_fail(o);
+    o->dirty = dirty;
+    return Gen3CartOk;
+}
+
+Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* stamp) {
+    if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+    if(!om_restore_name(name)) return Gen3CartBadArg;
+    if(om_other_slot_cut(o)) return Gen3CartOmegaSaveFirst;
+    if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
+    Gen3CartResult r = om_restore_read(o, name);
+    if(r != Gen3CartOk) return r;
+    if(!o->connected) return Gen3CartLinkLost;
+    const Gen3Store* st = &o->store;
+    if(st->free_bytes(st->ctx) < GEN3_UB_SAVE_SIZE + OM_SECTOR) return Gen3CartSdFull;
+    om_drop_edits(o);
+    r = om_restore_work(o, name);
+    if(r == Gen3CartOk) {
+        o->work_ok = true;
+        r = om_write_job(o, stamp);
+    }
+    if(r != Gen3CartOk && o->backup_current) {
+        /* The card is as the backup says: the working copy is the backup again */
+        o->work_ok = om_work_make(o) == Gen3CartOk;
+        o->dirty = 0;
+        memset(o->changed, 0, sizeof(o->changed));
+    }
+    return r;
 }
