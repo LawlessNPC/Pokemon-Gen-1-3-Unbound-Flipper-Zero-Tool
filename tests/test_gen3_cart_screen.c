@@ -1490,16 +1490,21 @@ TEST(test_screen_omega_info) {
     gen3_cart_screen_omega_info(&o, header, text);
     ASSERT_STR_EQ(header, "EZ-Flash Omega");
     ASSERT_STR_EQ(
-        text, "Unbound 2.1.1.1: yes\nSave: B #21\nRED 12345\nRead-only for now\nBackup 1101-120000");
+        text, "Unbound 2.1.1.1: yes\nSave: B #21\nRED 12345\nWriting on\nBackup 1101-120000");
     o.verified = false;
     o.slots.loaded = -1;
     o.has_trainer = false;
     o.backup_current = false;
     gen3_cart_screen_omega_info(&o, header, text);
-    ASSERT_STR_EQ(text, "Version: not 2.1.1.1\nSave: none\nNo trainer\nRead-only for now\nNo backup");
+    ASSERT_STR_EQ(text, "Version: not 2.1.1.1\nSave: none\nNo trainer\nWriting off\nNo backup");
     o.hashed = false;
     gen3_cart_screen_omega_info(&o, header, text);
-    ASSERT_STR_EQ(text, "Version: unknown\nSave: none\nNo trainer\nRead-only for now\nNo backup");
+    ASSERT_STR_EQ(text, "Version: unknown\nSave: none\nNo trainer\nWriting off\nNo backup");
+    /* 2.1.1.1 with no backup to write against: off too */
+    o.hashed = true;
+    o.verified = true;
+    gen3_cart_screen_omega_info(&o, header, text);
+    ASSERT_STR_EQ(text, "Unbound 2.1.1.1: yes\nSave: none\nNo trainer\nWriting off\nNo backup");
 }
 
 TEST(test_screen_result_omega) {
@@ -1749,6 +1754,8 @@ TEST(test_screen_omega_hub) {
     o.changed[0] = 0x05; /* party slots 0 and 2 */
     gen3_cart_screen_omega_hub(&o, &h);
     ASSERT_TRUE(h.write && h.discard && h.browse && h.restore);
+    /* A new backup drops the edits (gen3_omega_backup): not while there are any */
+    ASSERT_FALSE(h.backup);
     /* A cart's own items never show for an Omega */
     ASSERT_FALSE(h.writing_off || h.reconnect || h.rom);
 

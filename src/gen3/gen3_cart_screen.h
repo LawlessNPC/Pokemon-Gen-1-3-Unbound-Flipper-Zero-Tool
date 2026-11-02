@@ -177,8 +177,8 @@ void gen3_cart_screen_info(
 Gen3CartRetry gen3_cart_screen_omega_retry(Gen3CartJob job, Gen3CartResult r);
 
 /* An EZ-Flash Omega's Cart info: header "EZ-Flash Omega"; text: whether the game file is Unbound
- * 2.1.1.1, the save the game loads, the trainer, that this version only reads, and the backup's
- * stamp (MMDD-HHMMSS) */
+ * 2.1.1.1, the save the game loads, the trainer, "Writing on" (2.1.1.1 and a backup that can be
+ * browsed) or "Writing off", and the backup's stamp (MMDD-HHMMSS) */
 void gen3_cart_screen_omega_info(
     const Gen3Omega* o,
     char header[GEN3_CART_SCREEN_HEADER_SIZE],
@@ -337,8 +337,8 @@ void gen3_cart_screen_time_left(
 
 /* The Omega's hub items beyond Cart info (o NULL: a job runs, none): "Party and boxes" and
  * "Restore backup" while browsable (gen3_omega_browsable), "Write changes (<n>)" and "Discard
- * changes" while gen3_omega_changes is over 0, "Back up again" while connected. A cart's own items
- * (writing_off, reconnect, rom) never. */
+ * changes" while gen3_omega_changes is over 0, "Back up again" while connected and without
+ * changes (a backup drops them). A cart's own items (writing_off, reconnect, rom) never. */
 void gen3_cart_screen_omega_hub(const Gen3Omega* o, Gen3CartScreenHub* out);
 
 /* An Omega's result screen after job ended with r: the header and text a cart's have (as

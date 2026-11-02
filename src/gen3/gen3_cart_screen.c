@@ -460,7 +460,9 @@ void gen3_cart_screen_omega_info(
         snprintf(line, sizeof(line), "No trainer");
     }
     pos = cart_screen_line(text, pos, line, false);
-    pos = cart_screen_line(text, pos, "Read-only for now", false);
+    /* What the hub's Write changes needs: the game file 2.1.1.1, and a backup to write against */
+    pos = cart_screen_line(
+        text, pos, o->verified && gen3_omega_browsable(o) ? "Writing on" : "Writing off", false);
     const Gen3CartScreenInfo in = {
         .backup_current = o->backup_current,
         .backup_name = o->backup_name,
@@ -806,7 +808,8 @@ void gen3_cart_screen_omega_hub(const Gen3Omega* o, Gen3CartScreenHub* out) {
     out->browse = gen3_omega_browsable(o);
     out->write = changes;
     out->discard = changes;
-    out->backup = o->connected;
+    /* a new backup drops the edits (gen3_omega_backup), so not while there are any */
+    out->backup = o->connected && !changes;
     out->restore = gen3_omega_browsable(o);
 }
 
