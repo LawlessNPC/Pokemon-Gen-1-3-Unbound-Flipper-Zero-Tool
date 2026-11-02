@@ -129,7 +129,12 @@ typedef enum {
     /* An Omega write refused: the slot the game doesn't load holds a save of the game's own that
      * was cut short, which a cut of this write could complete with half of each */
     Gen3CartOmegaSaveFirst,
+    /* The Flipper's heap can't hold the helper image: close the app and open it again */
+    Gen3CartNoMemory,
 } Gen3CartResult;
+
+/* A short name for the step, for the log: "?" for a value outside the enum */
+const char* gen3_cart_step_name(Gen3CartStep step);
 
 /* At most 3 lines of at most 21 characters, broken with '\n'; "" for a value outside the enum */
 const char* gen3_cart_result_text(Gen3CartResult r);

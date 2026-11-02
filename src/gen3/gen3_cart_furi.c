@@ -33,6 +33,9 @@
 #define GEN3_CART_FLAG_JOB (1u << 0)
 #define GEN3_CART_FLAG_EXIT (1u << 1)
 
+/* The heap's largest free block must hold the helper image and this much more */
+#define GEN3_CART_IMG_MARGIN 512u
+
 /* Connect: how often the worker reads the multiboot sender's progress */
 #define GEN3_CART_MB_POLL_MS 20u
 /* Connect: polls in a row that must find SI high, while the sender waits for the GBA, before the
@@ -85,8 +88,9 @@ struct Gen3CartSession {
 
     /* The worker's (and the GUI thread's, through gen3_cart_session_cart, while no job runs) */
     bool pump_on; /* the driver runs the pump: the transport may use it */
-    uint8_t* buf; /* the helper image, then the jobs' sector buffer */
-    uint32_t buf_len;
+    uint8_t* buf; /* the jobs' sector buffer: GEN3_CART_BUF_SIZE bytes, kept once set up */
+    uint8_t* img; /* the helper image: only from its load until the multiboot send has ended */
+    Gen3CartStep log_step; /* the step the log last named */
     char stamp[16]; /* YYYYMMDD-HHMMSS */
     Gen3Hcli cli;
     Gen3Cart cart;
@@ -154,8 +158,31 @@ static void cart_unlock(Gen3CartSession* s) {
 
 static void cart_log_put(Gen3CartSession* s, int len);
 
+#define CART_LOG(s, fmt, ...)               \
+    cart_log_put(                           \
+        (s),                                \
+        snprintf(                           \
+            (s)->line,                      \
+            sizeof((s)->line),              \
+            "%08lu " fmt "\n",              \
+            (unsigned long)furi_get_tick(), \
+            __VA_ARGS__))
+
 static void cart_progress(void* ctx, Gen3CartStep step, uint32_t done, uint32_t total) {
     Gen3CartSession* s = ctx;
+    /* One line when the step changes and every 8th part of a long one, with the memory left: a
+     * freeze's log shows where it stopped */
+    if(step != s->log_step || (total >= 16u && done && done % 8u == 0)) {
+        s->log_step = step;
+        CART_LOG(
+            s,
+            "step %s %lu/%lu heap %lu block %lu",
+            gen3_cart_step_name(step),
+            (unsigned long)done,
+            (unsigned long)total,
+            (unsigned long)memmgr_get_free_heap(),
+            (unsigned long)memmgr_heap_get_max_free_block());
+    }
     /* An Omega's sector writes, one line each: the write test, the new slot's 14, then 30 and 31
      * if an edit changed them */
     if(s->status.omega && step == Gen3CartStepProgram) {
@@ -232,6 +259,7 @@ static const char* cart_result_name(Gen3CartResult r) {
         [Gen3CartNoGame] = "NoGame",
         [Gen3CartWrittenShared] = "WrittenShared",
         [Gen3CartOmegaSaveFirst] = "OmegaSaveFirst",
+        [Gen3CartNoMemory] = "NoMemory",
     };
     return (size_t)r < COUNT_OF(names) ? names[r] : "?";
 }
@@ -266,15 +294,6 @@ static void cart_log_put(Gen3CartSession* s, int len) {
 }
 
 /* One log line: "%08lu " with the tick, the text, a newline. At least one argument after fmt. */
-#define CART_LOG(s, fmt, ...)               \
-    cart_log_put(                           \
-        (s),                                \
-        snprintf(                           \
-            (s)->line,                      \
-            sizeof((s)->line),              \
-            "%08lu " fmt "\n",              \
-            (unsigned long)furi_get_tick(), \
-            __VA_ARGS__))
 
 /* After a connect that ran to its end: the cart as the helper found it */
 static void cart_log_cart(Gen3CartSession* s) {
@@ -406,14 +425,10 @@ static void cart_driver_stop(Gen3CartSession* s) {
     cart_unlock(s);
 }
 
-/* The first Connect: one buffer, first for the helper image and then the jobs' sectors, as long as
- * the image but at least a sector, and no longer than the sender sends; then the client and the
- * jobs' state, which later Connects keep */
-static void cart_setup(Gen3CartSession* s, uint64_t image_len) {
-    uint32_t n = GEN3_CART_BUF_SIZE;
-    if(image_len > n) n = image_len > GEN3_MB_MAX_LEN ? GEN3_MB_MAX_LEN : (uint32_t)image_len;
-    s->buf = malloc(n);
-    s->buf_len = n;
+/* The first Connect: the jobs' sector buffer, kept to the end; then the client and the jobs'
+ * state, which later Connects keep. The helper image has a buffer of its own while it is sent. */
+static void cart_setup(Gen3CartSession* s) {
+    s->buf = malloc(GEN3_CART_BUF_SIZE);
     const Gen3HTransport t = {
         .ctx = s,
         .exchange = cart_exchange,
@@ -430,23 +445,49 @@ static void cart_setup(Gen3CartSession* s, uint64_t image_len) {
     s->cart_ready = true;
 }
 
-/* The helper image into the buffer, checked; false if it is missing or bad. The asset folder is
- * this app's: threads an app starts share its appid. */
-static bool cart_helper_load(Gen3CartSession* s, uint32_t* len) {
+/* Only once the sender can't read the image: the driver stopped, or the pump running (the frame
+ * callback calls the sender only while core is Gen3CartCoreMb, and an ISR can't run between the
+ * worker's writes of core and this) */
+static void cart_image_free(Gen3CartSession* s) {
+    free(s->img);
+    s->img = NULL;
+}
+
+/* The helper image into its own buffer, checked. NoHelper if the file is missing or bad, NoMemory
+ * if the heap's largest free block can't hold it (a failed malloc would crash the Flipper). The
+ * asset folder is this app's: threads an app starts share its appid. */
+static Gen3CartResult cart_helper_load(Gen3CartSession* s, uint32_t* len) {
     File* f = storage_file_alloc(s->storage);
     bool ok =
         storage_file_open(f, APP_ASSETS_PATH(GEN3_HELPER_ASSET), FSAM_READ, FSOM_OPEN_EXISTING);
     const uint64_t size = ok ? storage_file_size(f) : 0;
-    if(ok && !s->cart_ready) cart_setup(s, size);
-    ok = ok && size <= s->buf_len && storage_file_read(f, s->buf, (size_t)size) == size;
+    if(ok && !s->cart_ready) cart_setup(s);
+    ok = ok && size <= GEN3_MB_MAX_LEN;
+    bool mem = true;
+    if(ok) {
+        const size_t block = memmgr_heap_get_max_free_block();
+        CART_LOG(
+            s,
+            "mb image heap %lu block %lu",
+            (unsigned long)memmgr_get_free_heap(),
+            (unsigned long)block);
+        mem = block >= (size_t)size + GEN3_CART_IMG_MARGIN;
+        ok = mem;
+    }
+    if(ok) {
+        s->img = malloc((size_t)size);
+        ok = storage_file_read(f, s->img, (size_t)size) == size;
+    }
     storage_file_close(f); /* required even after a failed open */
     storage_file_free(f);
     *len = ok ? (uint32_t)size : 0;
-    const Gen3MbImageCheck check = ok ? gen3_mb_image_check(s->buf, *len, GEN3_HELPER_PROTO) :
+    const Gen3MbImageCheck check = ok ? gen3_mb_image_check(s->img, *len, GEN3_HELPER_PROTO) :
                                         Gen3MbImageBadLen;
     CART_LOG(
         s, "helper len %lu read %u check %u", (unsigned long)size, (unsigned)ok, (unsigned)check);
-    return check == Gen3MbImageOk;
+    if(check == Gen3MbImageOk) return Gen3CartOk;
+    cart_image_free(s);
+    return mem ? Gen3CartNoHelper : Gen3CartNoMemory;
 }
 
 /* The wire as the log names it: the Normal wire's BIOS phase is ungated unless
@@ -462,7 +503,7 @@ static const char* cart_wire_name(MlinkWire wire) {
 static bool cart_mb_start(Gen3CartSession* s, MlinkWire wire, uint32_t len) {
     MlinkTx first = {0};
     if(wire == MlinkWireNormal) mlink_hw_set_normal_gate(s->hw, GEN3_CART_MB_GATED);
-    gen3_mb_init(&s->mb, wire, s->buf, len, furi_hal_random_get());
+    gen3_mb_init(&s->mb, wire, s->img, len, furi_hal_random_get());
     gen3_mb_frame(&s->mb, NULL, &first, 0);
     s->wire = wire;
     s->core = Gen3CartCoreMb;
@@ -673,11 +714,13 @@ static Gen3CartResult cart_omega_connect(Gen3CartSession* s) {
 static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     cart_driver_stop(s);
     uint32_t len = 0;
-    if(!cart_helper_load(s, &len)) return Gen3CartNoHelper;
-    Gen3CartResult r = cart_driver_start(s, len);
+    Gen3CartResult r = cart_helper_load(s, &len);
+    if(r != Gen3CartOk) return r;
+    r = cart_driver_start(s, len);
     if(r == Gen3CartOk) r = cart_multiboot(s, len);
     if(r != Gen3CartOk) {
-        cart_driver_stop(s);
+        cart_driver_stop(s); /* the sender is stopped: nothing reads the image */
+        cart_image_free(s);
         return r;
     }
 
@@ -691,6 +734,7 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     __DMB();
     s->core = Gen3CartCoreHlink;
     s->pump_on = true;
+    cart_image_free(s); /* the frame callback calls the hlink now, never the sender */
 
     /* The GBA starts the helper a few seconds after the last multiboot word */
     gen3_cart_expect_boot(&s->cart);
@@ -882,6 +926,14 @@ static void cart_run_picture(Gen3CartSession* s) {
     cart_unlock(s);
 }
 
+static void cart_log_heap(Gen3CartSession* s) {
+    CART_LOG(
+        s,
+        "heap %lu block %lu",
+        (unsigned long)memmgr_get_free_heap(),
+        (unsigned long)memmgr_heap_get_max_free_block());
+}
+
 static void cart_run_one(Gen3CartSession* s, Gen3CartJob job) {
     if(job == Gen3CartJobPicture) {
         cart_run_picture(s);
@@ -889,7 +941,9 @@ static void cart_run_one(Gen3CartSession* s, Gen3CartJob job) {
     }
     cart_stamp(s);
     const uint32_t resends = s->cli.resends;
+    s->log_step = Gen3CartStepNone;
     CART_LOG(s, "job %s start", cart_job_name(job));
+    cart_log_heap(s);
     const Gen3CartResult r = cart_job(s, job);
     CART_LOG(
         s,
@@ -898,6 +952,7 @@ static void cart_run_one(Gen3CartSession* s, Gen3CartJob job) {
         cart_result_name(r),
         (unsigned long)(s->cli.resends - resends),
         (unsigned)s->status.finished);
+    cart_log_heap(s);
     if(s->cart_ready && !s->status.omega && job != Gen3CartJobDiscard &&
        job != Gen3CartJobRestoreCheck && job != Gen3CartJobRom) {
         cart_log_slots(s);
@@ -983,6 +1038,7 @@ void gen3_cart_session_free(Gen3CartSession* s) {
     storage_file_free(s->log);
     furi_record_close(RECORD_STORAGE);
     gen3_store_furi_free(s->store);
+    free(s->img);
     free(s->buf);
     furi_mutex_free(s->lock);
     free(s);

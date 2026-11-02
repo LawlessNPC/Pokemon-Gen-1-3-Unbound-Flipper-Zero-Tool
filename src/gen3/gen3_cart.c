@@ -61,8 +61,33 @@ const char* gen3_cart_result_text(Gen3CartResult r) {
         [Gen3CartNoGame] = "Play Unbound on the\nOmega first, then\nconnect again.",
         [Gen3CartWrittenShared] = "Written, but boxes\n20-22 may be\nwrong: Restore.",
         [Gen3CartOmegaSaveFirst] = "Save once in Unbound\nfirst, then connect\nagain.",
+        [Gen3CartNoMemory] = "Not enough memory.\nClose Cartridge and\nopen it again.",
     };
     return (unsigned)r < sizeof(texts) / sizeof(texts[0]) ? texts[r] : "";
+}
+
+const char* gen3_cart_step_name(Gen3CartStep step) {
+    static const char* const names[] = {
+        [Gen3CartStepNone] = "none",
+        [Gen3CartStepMbWait] = "mbwait",
+        [Gen3CartStepMbSend] = "mbsend",
+        [Gen3CartStepIdentify] = "identify",
+        [Gen3CartStepBackupRead] = "bkread",
+        [Gen3CartStepBackupVerify] = "bkverify",
+        [Gen3CartStepAnalyze] = "analyze",
+        [Gen3CartStepPrepare] = "prepare",
+        [Gen3CartStepErase] = "erase",
+        [Gen3CartStepProgram] = "program",
+        [Gen3CartStepCommit] = "commit",
+        [Gen3CartStepVerify] = "verify",
+        [Gen3CartStepPostBackup] = "postbk",
+        [Gen3CartStepRestoreCheck] = "rcheck",
+        [Gen3CartStepRomRead] = "romread",
+        [Gen3CartStepRomVerify] = "romverify",
+        [Gen3CartStepOmegaFind] = "omfind",
+        [Gen3CartStepRomHash] = "romhash",
+    };
+    return (unsigned)step < sizeof(names) / sizeof(names[0]) ? names[step] : "?";
 }
 
 /* ---- Progress, results ---- */

@@ -2038,8 +2038,9 @@ TEST(test_result_texts) {
         [Gen3CartNoGame] = "Play Unbound on the\nOmega first, then\nconnect again.",
         [Gen3CartWrittenShared] = "Written, but boxes\n20-22 may be\nwrong: Restore.",
         [Gen3CartOmegaSaveFirst] = "Save once in Unbound\nfirst, then connect\nagain.",
+        [Gen3CartNoMemory] = "Not enough memory.\nClose Cartridge and\nopen it again.",
     };
-    for(int r = Gen3CartOk; r <= Gen3CartOmegaSaveFirst; r++) {
+    for(int r = Gen3CartOk; r <= Gen3CartNoMemory; r++) {
         const char* t = gen3_cart_result_text((Gen3CartResult)r);
         ASSERT_TRUE(t != NULL);
         ASSERT_STR_EQ(t, want[r]);
@@ -2057,7 +2058,18 @@ TEST(test_result_texts) {
         }
         ASSERT_TRUE(lines <= 3);
     }
-    ASSERT_STR_EQ(gen3_cart_result_text((Gen3CartResult)(Gen3CartOmegaSaveFirst + 1)), "");
+    ASSERT_STR_EQ(gen3_cart_result_text((Gen3CartResult)(Gen3CartNoMemory + 1)), "");
+}
+
+TEST(test_step_names) {
+    for(int st = Gen3CartStepNone; st <= Gen3CartStepRomHash; st++) {
+        const char* n = gen3_cart_step_name((Gen3CartStep)st);
+        ASSERT_TRUE(n != NULL && n[0] && strcmp(n, "?") != 0 && strlen(n) <= 9);
+        for(int o = Gen3CartStepNone; o < st; o++) {
+            ASSERT_TRUE(strcmp(n, gen3_cart_step_name((Gen3CartStep)o)) != 0);
+        }
+    }
+    ASSERT_STR_EQ(gen3_cart_step_name((Gen3CartStep)(Gen3CartStepRomHash + 1)), "?");
 }
 
 int main(void) {
@@ -2126,5 +2138,6 @@ int main(void) {
     RUN(test_mon_close_refused);
     RUN(test_mon_place);
     RUN(test_result_texts);
+    RUN(test_step_names);
     TEST_EXIT();
 }
