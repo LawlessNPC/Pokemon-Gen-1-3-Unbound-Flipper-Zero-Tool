@@ -111,6 +111,16 @@ HpOmegaResult hp_omega_mount(HpOmega* o) {
        fats < 1u || fats > 2u || le16(b, 22) != 0 || fatsz == 0 || root < 2u) {
         return HpOmegaNotFat32;
     }
+    /* The volume is total sectors from part: the reserved sectors and the FATs must leave room for
+     * data, the FAT must reach every cluster, and no sum may wrap (32-bit divisions, not 64-bit
+     * products, keep the image small) */
+    if(part > UINT32_MAX - total || reserved >= total || fatsz > (total - reserved) / fats) {
+        return HpOmegaNotFat32;
+    }
+    const uint32_t data_off = reserved + fats * fatsz;
+    if(data_off >= total) return HpOmegaNotFat32;
+    const uint32_t clusters = (total - data_off) / spc;
+    if(fatsz < (clusters + 1u) / 128u + 1u || root - 2u >= clusters) return HpOmegaNotFat32;
     o->part = part;
     o->spc = spc;
     o->reserved = reserved;
@@ -118,9 +128,8 @@ HpOmegaResult hp_omega_mount(HpOmega* o) {
     o->fatsz = fatsz;
     o->root = root;
     o->fat = part + reserved;
-    o->data = o->fat + fats * fatsz;
-    if(total <= o->data - part) return HpOmegaNotFat32;
-    o->clusters = (total - (o->data - part)) / spc;
+    o->data = part + data_off;
+    o->clusters = clusters;
     o->mounted = true;
     return HpOmegaOk;
 }

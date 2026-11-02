@@ -92,6 +92,29 @@ TEST(test_omega_mount_exfat) {
     fake_fat_free(&card);
 }
 
+/* A boot sector whose FAT size, doubled, wraps 32 bits, or whose FAT is too small for the clusters
+ * the volume claims, doesn't mount */
+TEST(test_omega_mount_bad_fat_size) {
+    static const uint32_t bad[] = {0x80000100u, 0xFFFFFFFFu, 0x10000000u, 1u, 10u};
+    for(uint32_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        make_card(2048, 8, 0);
+        fake_fat_poke(&card, 2048u, 36u, &bad[i], 4u);
+        ASSERT_EQ(hp_omega_mount(&om), HpOmegaNotFat32);
+        ASSERT_TRUE(!om.mounted);
+        fake_fat_free(&card);
+    }
+    /* A root cluster outside the volume */
+    make_card(2048, 8, 0);
+    const uint32_t far = 0x00FFFFFFu;
+    fake_fat_poke(&card, 2048u, 44u, &far, 4u);
+    ASSERT_EQ(hp_omega_mount(&om), HpOmegaNotFat32);
+    fake_fat_free(&card);
+    /* The honest card still mounts, with its FAT exactly as large as it needs */
+    make_card(2048, 8, 0);
+    ASSERT_EQ(hp_omega_mount(&om), HpOmegaOk);
+    fake_fat_free(&card);
+}
+
 TEST(test_omega_open_lfn) {
     make_card(2048, 8, 0);
     ASSERT_EQ(hp_omega_mount(&om), HpOmegaOk);
@@ -461,6 +484,7 @@ int main(void) {
     RUN(test_omega_mount_superfloppy);
     RUN(test_omega_mount_no_card);
     RUN(test_omega_mount_exfat);
+    RUN(test_omega_mount_bad_fat_size);
     RUN(test_omega_open_lfn);
     RUN(test_omega_open_missing);
     RUN(test_omega_open_before_mount);
