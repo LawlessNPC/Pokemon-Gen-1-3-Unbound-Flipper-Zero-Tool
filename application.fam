@@ -80,6 +80,7 @@ App(
         "src/gen3/gen3_ub_mon.c",
         "src/gen3/gen3_ub_edit.c",
         "src/views/gen3_cart_progress.c",
+        "src/views/gen3_ub_pic_select.c",
     ],
     fap_icon="pokemon_10px.png",
     fap_file_assets="files",

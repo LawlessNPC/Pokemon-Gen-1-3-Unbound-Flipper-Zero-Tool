@@ -402,6 +402,9 @@ typedef struct {
 /* How many pages, at most max; 0 if a name can't be read or there are more than max. Each
  * character's end is found by bisection, a few hundred reads in all. */
 size_t gen3_cart_screen_ub_pages(Gen3UbSort s, Gen3CartScreenUbPage* out, size_t max);
+/* Where the species picture browser starts on a page of the species list (first, count): the
+ * offset into the page of the species `current`, 0 if it is not on the page */
+uint16_t gen3_cart_screen_pic_page(uint16_t first, uint16_t count, uint16_t current);
 
 /* A file in the backups folder an Omega's restore takes, as gen3_omega_backup names them:
  * UNBOUND_<...>.sav with something between, no '/', and short enough that "backups/" and it fit

@@ -978,6 +978,13 @@ bool gen3_cart_screen_ub_sorted_name(
     return false;
 }
 
+uint16_t gen3_cart_screen_pic_page(uint16_t first, uint16_t count, uint16_t current) {
+    for(uint16_t k = 0; current != 0 && k < count; k++) {
+        if(gen3_ub_sorted(Gen3UbSortSpecies, (uint16_t)(first + k)) == current) return k;
+    }
+    return 0;
+}
+
 /* The first character of the name at index; 0 if it can't be read */
 static char
     cart_screen_ub_first(Gen3UbSort s, uint16_t index, char name[GEN3_CART_SCREEN_UB_NAME_SIZE]) {

@@ -70,34 +70,36 @@ static void gen3_species_select_draw(Canvas* canvas, void* model_ptr) {
     elements_button_center(canvas, "OK");
 }
 
+bool gen3_fxbm_read(const char* path, uint32_t index, uint32_t size, uint8_t* out) {
+    Storage* storage = furi_record_open(RECORD_STORAGE);
+    File* file = storage_file_alloc(storage);
+    bool ok = storage_file_open(file, path, FSAM_READ, FSOM_OPEN_EXISTING);
+
+    ok = ok && (size == 0 || storage_file_size(file) == size) &&
+         storage_file_seek(file, index * SPRITE_RECORD_SIZE + SPRITE_SIZE_FIELD, true) &&
+         storage_file_read(file, out, SPRITE_DATA_SIZE) == SPRITE_DATA_SIZE;
+    storage_file_free(file);
+    furi_record_close(RECORD_STORAGE);
+    return ok;
+}
+
 /* Reads the name and sprite for the current species into the model. Both come from the SD card,
  * so never from the draw callback, which runs in the GUI thread. */
 static void gen3_species_select_load(View* view) {
-    Storage* storage = furi_record_open(RECORD_STORAGE);
-    File* file = storage_file_alloc(storage);
-    bool is_open = storage_file_open(
-        file, APP_ASSETS_PATH("all_sprites.fxbm"), FSAM_READ, FSOM_OPEN_EXISTING);
-
     with_view_model(
         view,
         Gen3SpeciesSelectModel * model,
         {
             gen3_species_name_get(model->national, model->name);
-            model->has_sprite = false;
-            if(is_open && model->national >= 1 && model->national <= GEN3_SPRITE_MAX_NATIONAL) {
-                uint32_t offset =
-                    (uint32_t)(model->national - 1) * SPRITE_RECORD_SIZE + SPRITE_SIZE_FIELD;
-                if(storage_file_seek(file, offset, true) &&
-                   storage_file_read(file, model->sprite, SPRITE_DATA_SIZE) ==
-                       SPRITE_DATA_SIZE) {
-                    model->has_sprite = true;
-                }
-            }
+            model->has_sprite = model->national >= 1 &&
+                                model->national <= GEN3_SPRITE_MAX_NATIONAL &&
+                                gen3_fxbm_read(
+                                    APP_ASSETS_PATH("all_sprites.fxbm"),
+                                    (uint32_t)model->national - 1u,
+                                    0,
+                                    model->sprite);
         },
         true);
-
-    storage_file_free(file);
-    furi_record_close(RECORD_STORAGE);
 }
 
 static bool gen3_species_select_input(InputEvent* event, void* context) {

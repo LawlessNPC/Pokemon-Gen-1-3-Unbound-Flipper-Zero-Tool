@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <gui/view_dispatcher.h>
 
@@ -23,5 +24,12 @@ void gen3_species_select_start(
     uint16_t national,
     Gen3SpeciesSelectCallback cb,
     void* context);
+
+/* Reads the picture of record `index` of an .fxbm file (a u32 record size, a u32 width, a u32
+ * height and 392 bytes of 56x56 XBM per record) into out, which takes GEN3_FXBM_DATA_SIZE bytes:
+ * the width, the height, then the pixels. size, if not 0, is the file's exact size. false if the
+ * file or the record can't be read. Not from the draw callback. */
+#define GEN3_FXBM_DATA_SIZE 400u
+bool gen3_fxbm_read(const char* path, uint32_t index, uint32_t size, uint8_t* out);
 
 #endif /* GEN3_SPECIES_SELECT_H */

@@ -1971,6 +1971,38 @@ TEST(test_screen_ub_pages) {
     ub_bulk_file_failing = false;
 }
 
+/* The picture browser starts on the current species when it is on the page, else on the first */
+TEST(test_screen_pic_page) {
+    ASSERT_TRUE(ub_bulk_file_open());
+    static Gen3CartScreenUbPage p[GEN3_CART_SCREEN_UB_PAGES];
+    const size_t n = gen3_cart_screen_ub_pages(Gen3UbSortSpecies, p, GEN3_CART_SCREEN_UB_PAGES);
+    ASSERT_TRUE(n > 2);
+    const Gen3CartScreenUbPage* pg = &p[2];
+    const uint16_t mid = gen3_ub_sorted(Gen3UbSortSpecies, (uint16_t)(pg->first + pg->count / 2u));
+
+    ASSERT_TRUE(pg->count > 2);
+    ASSERT_EQ(gen3_cart_screen_pic_page(pg->first, pg->count, mid), pg->count / 2u);
+    ASSERT_EQ(
+        gen3_cart_screen_pic_page(
+            pg->first,
+            pg->count,
+            gen3_ub_sorted(Gen3UbSortSpecies, pg->first)),
+        0);
+    ASSERT_EQ(
+        gen3_cart_screen_pic_page(
+            pg->first,
+            pg->count,
+            gen3_ub_sorted(Gen3UbSortSpecies, (uint16_t)(pg->first + pg->count - 1u))),
+        pg->count - 1u);
+    /* a species of another page, none, and an id that isn't a species */
+    ASSERT_EQ(
+        gen3_cart_screen_pic_page(
+            pg->first, pg->count, gen3_ub_sorted(Gen3UbSortSpecies, p[3].first)),
+        0);
+    ASSERT_EQ(gen3_cart_screen_pic_page(pg->first, pg->count, 0), 0);
+    ASSERT_EQ(gen3_cart_screen_pic_page(pg->first, pg->count, 0xFFFF), 0);
+}
+
 /* The Omega's restore list: backups/UNBOUND_*.sav, newest first, by their stamp and trainer id */
 TEST(test_screen_ub_backups) {
     char row[GEN3_CART_SCREEN_ROW_SIZE];
@@ -2021,6 +2053,7 @@ int main(void) {
     RUN(test_screen_ub_small);
     RUN(test_screen_ub_number);
     RUN(test_screen_ub_pages);
+    RUN(test_screen_pic_page);
     RUN(test_screen_ub_backups);
     RUN(test_screen_ub_row);
     RUN(test_screen_omega_info);

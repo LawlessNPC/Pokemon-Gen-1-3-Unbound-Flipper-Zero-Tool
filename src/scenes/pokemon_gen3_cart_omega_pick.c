@@ -322,8 +322,13 @@ static void gen3_cart_omega_pick_refused(PokemonFap* pokemon_fap) {
 /* New Pokemon's species chosen: the Pokemon, then the editor on it */
 static void gen3_cart_omega_pick_new(PokemonFap* pokemon_fap, uint16_t species) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
-    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    Gen3Omega* o;
 
+    if(!gen3_cart_ui_picture_wait(pokemon_fap)) {
+        gen3_cart_ui_busy_notice(pokemon_fap, PokemonSceneGen3CartOmegaPics);
+        return;
+    }
+    o = gen3_cart_ui_omega(pokemon_fap);
     if(!o || !gen3_omega_owner(o, &ui->ub_mon)) {
         gen3_cart_ui_omega_notice(pokemon_fap, "New Pokemon", GEN3_CART_SCREEN_UB_NO_OWNER);
         return;
@@ -340,16 +345,14 @@ static void gen3_cart_omega_pick_new(PokemonFap* pokemon_fap, uint16_t species) 
     scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartOmegaEdit);
 }
 
-/* A name chosen: list index i of s */
-static void gen3_cart_omega_pick_name(PokemonFap* pokemon_fap, Gen3UbSort s, uint16_t i) {
+bool gen3_cart_omega_pick_id(PokemonFap* pokemon_fap, uint16_t id) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
     Gen3UbEditor* e = &ui->ub_edit;
-    const uint16_t id = gen3_ub_sorted(s, i);
     bool ok = id != 0;
 
     if(ok && ui->ub_pick == Gen3CartUbPickNew) {
         gen3_cart_omega_pick_new(pokemon_fap, id);
-        return;
+        return true;
     }
     if(ok) {
         switch(ui->ub_pick) {
@@ -365,8 +368,15 @@ static void gen3_cart_omega_pick_name(PokemonFap* pokemon_fap, Gen3UbSort s, uin
         }
     }
     if(ok) {
-        scene_manager_previous_scene(pokemon_fap->scene_manager);
-    } else {
+        scene_manager_search_and_switch_to_previous_scene(
+            pokemon_fap->scene_manager, PokemonSceneGen3CartOmegaEdit);
+    }
+    return ok;
+}
+
+/* A name chosen: list index i of s */
+static void gen3_cart_omega_pick_name(PokemonFap* pokemon_fap, Gen3UbSort s, uint16_t i) {
+    if(!gen3_cart_omega_pick_id(pokemon_fap, gen3_ub_sorted(s, i))) {
         gen3_cart_omega_pick_refused(pokemon_fap);
     }
 }
@@ -382,6 +392,16 @@ static void gen3_cart_omega_pick_value(PokemonFap* pokemon_fap, uint32_t event) 
 
     scene_manager_set_scene_state(scene_manager, PokemonSceneGen3CartOmegaPick, event);
     if(gen3_cart_omega_pick_sort(ui->ub_pick, &s)) {
+        if(ui->ub_page == GEN3_CART_UB_LETTERS && k < gen3_cart_omega_page_count &&
+           (ui->ub_pick == Gen3CartUbPickSpecies || ui->ub_pick == Gen3CartUbPickNew)) {
+            /* the species with pictures: the page's first index and count */
+            scene_manager_set_scene_state(
+                scene_manager,
+                PokemonSceneGen3CartOmegaPics,
+                ((uint32_t)gen3_cart_omega_pages[k].first << 16) | gen3_cart_omega_pages[k].count);
+            scene_manager_next_scene(scene_manager, PokemonSceneGen3CartOmegaPics);
+            return;
+        }
         /* a page of names */
         ui->ub_page = (uint8_t)k;
         gen3_cart_omega_pick_show(pokemon_fap);

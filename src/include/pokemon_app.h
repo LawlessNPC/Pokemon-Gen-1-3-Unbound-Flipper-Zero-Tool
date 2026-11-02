@@ -95,6 +95,7 @@ typedef enum {
     AppViewGen3SpeciesSelect,
     AppViewGen3Trade,
     AppViewGen3CartProgress,
+    AppViewGen3UbPic,
 } AppView;
 
 /* Gen III trade app tick (every 100 ms, app thread, between UI events): while the trade screen

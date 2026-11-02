@@ -191,6 +191,11 @@ void gen3_cart_ui_set_result(
     bool dropped,
     uint32_t back);
 
+/* The Unbound pick scene's choice of species id for the editor's Pokemon (or, for New Pokemon, the
+ * new one): changes the editor and returns to it, or opens the editor on the new Pokemon. false
+ * if the editor refuses, which changes nothing. Also for the picture browser (Gen3CartOmegaPics). */
+bool gen3_cart_omega_pick_id(PokemonFap* pokemon_fap, uint16_t id);
+
 /* ---- Background pictures (Gen3CartJobPicture). The picker's scene asks; its view timer polls
  * gen3_cart_ui_picture_ended and sends GEN3_CART_EVENT_PICTURE. App thread only. ---- */
 
