@@ -66,6 +66,9 @@
 #define GEN3_HCMD_OMEGA_READ 0x32u
 #define GEN3_HCMD_OMEGA_CRC32 0x33u
 #define GEN3_HCMD_OMEGA_SHA256 0x34u
+/* ... and its save file, written in place */
+#define GEN3_HCMD_OMEGA_ARM 0x35u
+#define GEN3_HCMD_OMEGA_WRITE_SECTOR 0x36u
 #define GEN3_HCLI_OMEGA_PATH_MAX 96u /* a path's bytes, with its terminator */
 #define GEN3_HCLI_OMEGA_SLOTS 3u
 #define GEN3_HSHA_INIT 1u
@@ -252,5 +255,12 @@ Gen3HcliResult gen3_hcli_omega_sha256(
     uint32_t off,
     uint32_t len,
     uint8_t digest[32]);
+/* Names the one file that may be written: slot 0's size and first cluster, as OMEGA_OPEN gave
+ * them. The helper refuses it unless that is the file it has open. */
+Gen3HcliResult gen3_hcli_omega_arm(Gen3Hcli* c, uint32_t size, uint32_t first_cluster);
+/* Writes the 4 KB image as sector (0..31) of the armed file; crc is the CRC-32 of the bytes
+ * read back from the card */
+Gen3HcliResult
+    gen3_hcli_omega_write_sector(Gen3Hcli* c, uint8_t sector, const uint8_t data[4096], uint32_t* crc);
 /* len: 2..0x40000 bytes, even */
 Gen3HcliResult gen3_hcli_rom_crc32(Gen3Hcli* c, uint32_t addr, uint32_t len, uint32_t* crc);

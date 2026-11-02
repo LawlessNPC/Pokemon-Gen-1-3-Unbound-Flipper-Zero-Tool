@@ -372,6 +372,35 @@ Gen3HcliResult gen3_hcli_omega_sha256(
     return r;
 }
 
+Gen3HcliResult gen3_hcli_omega_arm(Gen3Hcli* c, uint32_t size, uint32_t first_cluster) {
+    Gen3HlinkReq req = {
+        .code = GEN3_HCMD_OMEGA_ARM,
+        .args =
+            {GEN3_HARM_MAGIC,
+             (uint16_t)size,
+             (uint16_t)(size >> 16),
+             (uint16_t)first_cluster,
+             (uint16_t)(first_cluster >> 16)},
+        .nargs = 5,
+    };
+    return hcli_small(c, &req, 0);
+}
+
+Gen3HcliResult
+    gen3_hcli_omega_write_sector(Gen3Hcli* c, uint8_t sector, const uint8_t data[4096], uint32_t* crc) {
+    Gen3HlinkReq req = {
+        .code = GEN3_HCMD_OMEGA_WRITE_SECTOR,
+        .args = {sector},
+        .nargs = 1,
+        .data = data,
+        .data_words = HCLI_SECTOR_WORDS,
+        .busy_us = GEN3_HCLI_BUSY_FLASH_US,
+    };
+    const Gen3HcliResult r = hcli_small(c, &req, HCLI_CRC_WORDS);
+    if(r == Gen3HcliOk) *crc = hcli_le32(c->resp);
+    return r;
+}
+
 Gen3HcliResult gen3_hcli_rom_crc32(Gen3Hcli* c, uint32_t addr, uint32_t len, uint32_t* crc) {
     Gen3HlinkReq req = {
         .code = GEN3_HCMD_ROM_CRC32,

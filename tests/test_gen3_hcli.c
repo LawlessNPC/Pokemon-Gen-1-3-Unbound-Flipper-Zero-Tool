@@ -415,6 +415,8 @@ TEST(test_hcli_codes_match_helper) {
     _Static_assert(GEN3_HCMD_OMEGA_READ == HP_CMD_OMEGA_READ, "OMEGA_READ");
     _Static_assert(GEN3_HCMD_OMEGA_CRC32 == HP_CMD_OMEGA_CRC32, "OMEGA_CRC32");
     _Static_assert(GEN3_HCMD_OMEGA_SHA256 == HP_CMD_OMEGA_SHA256, "OMEGA_SHA256");
+    _Static_assert(GEN3_HCMD_OMEGA_ARM == HP_CMD_OMEGA_ARM, "OMEGA_ARM");
+    _Static_assert(GEN3_HCMD_OMEGA_WRITE_SECTOR == HP_CMD_OMEGA_WRITE_SECTOR, "OMEGA_WRITE_SECTOR");
     _Static_assert(GEN3_HSHA_INIT == HP_SHA_INIT && GEN3_HSHA_FINAL == HP_SHA_FINAL, "SHA flags");
     _Static_assert(GEN3_HCLI_OMEGA_PATH_MAX == HP_OMEGA_PATH_MAX, "path max");
     _Static_assert(GEN3_HOMEGA_NOT_FOUND == HpOmegaNotFound, "not found");
@@ -1643,11 +1645,48 @@ TEST(test_hcli_omega_hash_busy) {
     fake_fat_free(&card);
 }
 
+TEST(test_hcli_omega_write_round_trip) {
+    ASSERT_TRUE(omega_setup());
+    Gen3HOmegaInfo oi;
+    Gen3HOmegaFile f;
+    ASSERT_EQ(gen3_hcli_omega_mount(&cli, &oi), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 0, "/SAVER/Pokemon - Unbound.sav", &f), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_omega_arm(&cli, f.size, f.first_cluster), Gen3HcliOk);
+    static uint8_t img[4096];
+    for(uint32_t i = 0; i < sizeof(img); i++) img[i] = (uint8_t)(i * 7u + 3u);
+    uint32_t crc = 0;
+    ASSERT_EQ(gen3_hcli_omega_write_sector(&cli, 3, img, &crc), Gen3HcliOk);
+    ASSERT_EQ(crc, gen3_crc32(img, sizeof(img)));
+    ASSERT_EQ(tap.busy_us[GEN3_HCMD_OMEGA_WRITE_SECTOR], GEN3_HCLI_BUSY_FLASH_US);
+    for(uint32_t b = 0; b < 8; b++) {
+        uint8_t blk[512];
+        const uint32_t off = 3u * 4096u + b * 512u;
+        ASSERT_TRUE(fake_fat_block(&card, fake_fat_file_lba(&card, f.first_cluster, off), blk));
+        ASSERT_MEM_EQ(blk, img + b * 512u, 512);
+    }
+    fake_fat_free(&card);
+}
+
+TEST(test_hcli_omega_write_not_armed) {
+    ASSERT_TRUE(omega_setup());
+    Gen3HOmegaInfo oi;
+    Gen3HOmegaFile f;
+    ASSERT_EQ(gen3_hcli_omega_mount(&cli, &oi), Gen3HcliOk);
+    ASSERT_EQ(gen3_hcli_omega_open(&cli, 0, "/SAVER/Pokemon - Unbound.sav", &f), Gen3HcliOk);
+    static uint8_t img[4096];
+    uint32_t crc = 0;
+    ASSERT_EQ(gen3_hcli_omega_write_sector(&cli, 3, img, &crc), Gen3HcliStatusError);
+    ASSERT_EQ(cli.last_status, GEN3_HST_NOT_ARMED);
+    fake_fat_free(&card);
+}
+
 int main(void) {
     RUN(test_hcli_omega_round_trip);
     RUN(test_hcli_omega_status);
     RUN(test_hcli_omega_path_len);
     RUN(test_hcli_omega_hash_busy);
+    RUN(test_hcli_omega_write_round_trip);
+    RUN(test_hcli_omega_write_not_armed);
     RUN(test_hcli_codes_match_helper);
     RUN(test_fake_helper_words);
     RUN(test_fake_helper_busy_by_time);
