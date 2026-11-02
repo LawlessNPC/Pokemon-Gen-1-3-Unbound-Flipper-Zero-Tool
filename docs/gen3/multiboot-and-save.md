@@ -1553,7 +1553,11 @@ From `ez-flash/omega-de-kernel`, `source/Ezcard_OP.c` (Apache License 2.0). 16-b
 
 The helper's FAT32 reader (`hp_omega.c`) mounts the card (an MBR's first partition, or a boot
 sector at block 0), walks directories by long name (an LFN run whose checksum matches its 8.3
-entry) or 8.3 name, case-insensitively, and reads files through their cluster chains.
+entry, and whose sequence numbers count down by one to 1) or 8.3 name, case-insensitively, and
+reads files through their cluster chains. A chain entry that is free, reserved, bad (`0x0FFFFFF7`)
+or outside the volume's clusters (`2 .. clusters + 1`, from the boot sector's total sectors) breaks
+the chain, and a directory is read for at most 4096 sectors. The CRC-32 and SHA-256 commands read
+the card in runs of up to 4 blocks.
 
 ## 8.3 Commands
 
@@ -1568,7 +1572,8 @@ Request lengths are fixed, in words; 32-bit numbers go low half first. None is w
 | `0x34` | OMEGA_SHA256 | 6: slot, flags (INIT 1, FINAL 2), offset (2), length (2: at most 0x100000) | 0, or with FINAL 16: the digest's bytes, two a word |
 
 - **OMEGA_MOUNT is REFUSED** (`HP_REFUSE_CART`) unless this session's CART_INFO found no game the
-  helper writes: no Omega command ever goes to a genuine cart. Every other Omega command is REFUSED
+  helper writes and header bytes 0xA0 (the title's first) and 0xAC (the game code's first) both 0,
+  as the Omega's kernel has: no Omega command ever goes to a genuine cart. Every other Omega command is REFUSED
   (`HP_REFUSE_OMEGA`, 9) until a MOUNT succeeded. HELLO and CART_INFO end the mount.
 - A reader failure is UNSUPPORTED with fail code 1 (the card didn't answer, or a broken chain),
   2 (no file system), 3 (not FAT32), 4 (not found) or 5 (a directory); arguments outside the rules

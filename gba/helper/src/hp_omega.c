@@ -8,7 +8,8 @@
 #define HP_OMEGA_BLOCK 512u
 #define HP_OMEGA_RUN 4u /* blocks one hp_hal_omega_sd_read takes */
 #define HP_OMEGA_EOC 0x0FFFFFF8u
-#define HP_OMEGA_DIR_SECTORS_MAX 0x10000u /* a directory read at most: a loop in a chain ends */
+#define HP_OMEGA_DIR_SECTORS_MAX 4096u /* FAT's 2 MiB directory limit; a loop in a chain ends */
+#define HP_OMEGA_BAD 0x0FFFFFF7u /* a FAT entry marking a bad cluster */
 #define HP_OMEGA_LFN_SEQ_MAX 20u /* 260 characters */
 #define HP_OMEGA_NO_MATCH 0x7Fu /* a long-name character no path character equals */
 
@@ -46,7 +47,13 @@ void hp_omega_init(HpOmega* o) {
     for(uint32_t k = 0; k < HP_OMEGA_SLOTS; k++) o->files[k].used = false;
 }
 
-/* The cluster after c into *next (0 at the chain's end); false if the FAT can't be read */
+/* Whether c names a cluster of the volume */
+static bool hp_omega_cluster_ok(const HpOmega* o, uint32_t c) {
+    return c >= 2u && c - 2u < o->clusters;
+}
+
+/* The cluster after c into *next (0 at the chain's end); false if the FAT can't be read, or the
+ * entry is free, reserved, bad, or names a cluster outside the volume */
 static bool hp_omega_next(HpOmega* o, uint32_t c, uint32_t* next) {
     const uint32_t lba = o->fat + c / 128u;
     if(lba != o->fat_cached) {
@@ -57,7 +64,12 @@ static bool hp_omega_next(HpOmega* o, uint32_t c, uint32_t* next) {
         o->fat_cached = lba;
     }
     const uint32_t v = le32(o->fat_buf, (c % 128u) * 4u) & 0x0FFFFFFFu;
-    *next = v >= 2u && v < HP_OMEGA_EOC ? v : 0u;
+    if(v >= HP_OMEGA_EOC) {
+        *next = 0;
+        return true;
+    }
+    if(v == HP_OMEGA_BAD || !hp_omega_cluster_ok(o, v)) return false;
+    *next = v;
     return true;
 }
 
@@ -94,6 +106,7 @@ HpOmegaResult hp_omega_mount(HpOmega* o) {
     const uint8_t fats = b8(b, 16);
     const uint32_t fatsz = le32(b, 36);
     const uint32_t root = le32(b, 44);
+    const uint32_t total = le32(b, 32) ? le32(b, 32) : le16(b, 19);
     if(le16(b, 11) != HP_OMEGA_BLOCK || spc == 0 || (spc & (spc - 1u)) || reserved == 0 ||
        fats < 1u || fats > 2u || le16(b, 22) != 0 || fatsz == 0 || root < 2u) {
         return HpOmegaNotFat32;
@@ -106,6 +119,8 @@ HpOmegaResult hp_omega_mount(HpOmega* o) {
     o->root = root;
     o->fat = part + reserved;
     o->data = o->fat + fats * fatsz;
+    if(total <= o->data - part) return HpOmegaNotFat32;
+    o->clusters = (total - (o->data - part)) / spc;
     o->mounted = true;
     return HpOmegaOk;
 }
@@ -118,9 +133,11 @@ typedef struct {
 
 /* The long name being gathered from an LFN run */
 typedef struct {
-    bool ok; /* a run started with its last entry, every entry since has its checksum */
+    bool ok; /* a run started with its last entry, every entry since has its checksum and the
+              * sequence number one less than the one before */
     bool too_long; /* a character at or past HP_OMEGA_PATH_MAX - 1 */
     uint8_t sum;
+    uint32_t seq; /* the last entry's sequence number: the next is one less, and the run ends at 1 */
     uint32_t len;
     char name[HP_OMEGA_PATH_MAX];
 } HpOmegaLfn;
@@ -134,8 +151,11 @@ static void hp_omega_lfn_entry(HpOmegaLfn* l, const uint16_t* b, uint32_t e) {
         l->too_long = false;
         l->sum = b8(b, e + 13u);
         l->len = seq * 13u;
-    } else if(!l->ok || b8(b, e + 13u) != l->sum || seq < 1u) {
+        l->seq = seq;
+    } else if(!l->ok || b8(b, e + 13u) != l->sum || seq < 1u || seq != l->seq - 1u) {
         l->ok = false;
+    } else {
+        l->seq = seq;
     }
     if(!l->ok) return;
     for(uint32_t j = 0; j < 13u; j++) {
@@ -184,6 +204,7 @@ static HpOmegaResult hp_omega_find(
     lfn.ok = false;
     uint32_t sectors = 0;
     for(uint32_t c = dir; c;) {
+        if(!hp_omega_cluster_ok(o, c)) return HpOmegaSdError;
         for(uint32_t s = 0; s < o->spc; s++) {
             if(++sectors > HP_OMEGA_DIR_SECTORS_MAX) return HpOmegaNotFound;
             if(!hp_omega_block(hp_omega_lba(o, c) + s, b)) return HpOmegaSdError;
@@ -199,7 +220,7 @@ static HpOmegaResult hp_omega_find(
                     hp_omega_lfn_entry(&lfn, b, e);
                     continue;
                 }
-                const bool long_ok = lfn.ok && !lfn.too_long && hp_omega_sum(b, e) == lfn.sum;
+                const bool long_ok = lfn.ok && !lfn.too_long && lfn.seq == 1u && hp_omega_sum(b, e) == lfn.sum;
                 lfn.ok = false;
                 if((attr & 0x08u) || first == '.') continue;
                 const bool match = long_ok ? hp_omega_same(lfn.name, lfn.len, name, len) :
@@ -282,6 +303,7 @@ HpOmegaResult
        (uint64_t)off + (uint64_t)blocks * HP_OMEGA_BLOCK > rounded) {
         return HpOmegaBadArg;
     }
+    if(!hp_omega_cluster_ok(o, f->first)) return HpOmegaSdError;
     for(uint32_t b = 0; b < blocks;) {
         const uint32_t idx = off / HP_OMEGA_BLOCK + b;
         const uint32_t within = idx % o->spc;

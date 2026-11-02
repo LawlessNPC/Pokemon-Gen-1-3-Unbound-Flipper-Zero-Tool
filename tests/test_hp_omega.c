@@ -194,6 +194,72 @@ TEST(test_omega_read_bounds) {
     fake_fat_free(&card);
 }
 
+TEST(test_omega_chain_out_of_range) {
+    make_card(2048, 8, 0);
+    ASSERT_EQ(hp_omega_mount(&om), HpOmegaOk);
+    /* total sectors 65536 - 2048, less the reserved sectors and both FATs */
+    ASSERT_EQ(om.clusters, (65536u - 2048u - (om.data - om.part)) / 8u);
+    ASSERT_EQ(hp_omega_open(&om, 0, "/SAVER/Pokemon - Unbound.sav"), HpOmegaOk);
+    const uint32_t first = om.files[0].first;
+    const uint32_t bad[] = {om.clusters + 5u, 0x0FFFFFF7u, 1u, om.clusters + 2u};
+    for(uint32_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        fake_fat_set_next(&card, first, bad[i]);
+        om.fat_cached = UINT32_MAX; /* the FAT block read before is stale */
+        ASSERT_EQ(hp_omega_open(&om, 0, "/SAVER/Pokemon - Unbound.sav"), HpOmegaOk);
+        const uint32_t reads = gba.omega_reads;
+        ASSERT_EQ(hp_omega_read(&om, 0, 4096u, 1, out), HpOmegaSdError);
+        ASSERT_TRUE(gba.omega_reads - reads <= 1u); /* the FAT block at most, never the data */
+    }
+    /* The last cluster of the volume is fine */
+    fake_fat_set_next(&card, first, om.clusters + 1u);
+    om.fat_cached = UINT32_MAX;
+    ASSERT_EQ(hp_omega_open(&om, 0, "/SAVER/Pokemon - Unbound.sav"), HpOmegaOk);
+    ASSERT_EQ(hp_omega_read(&om, 0, 4096u, 1, out), HpOmegaOk);
+    fake_fat_free(&card);
+}
+
+TEST(test_omega_lfn_missing_seq) {
+    make_card(2048, 8, 0);
+    const uint32_t dir = fake_fat_mkdir(&card, fake_fat_root(&card), "D");
+    /* 30 characters: 3 entries, and the one with sequence 2 is gone */
+    fake_fat_lfn_entry(&card, dir, "Thirty characters in this name", 2);
+    ASSERT_EQ(hp_omega_mount(&om), HpOmegaOk);
+    ASSERT_EQ(hp_omega_open(&om, 0, "/D/Thirty characters in this name"), HpOmegaNotFound);
+    ASSERT_EQ(hp_omega_open(&om, 0, "/D/LFNTEST.DAT"), HpOmegaOk);
+    fake_fat_free(&card);
+}
+
+TEST(test_omega_lfn_bad_sum) {
+    make_card(2048, 8, 0);
+    const uint32_t dir = fake_fat_mkdir(&card, fake_fat_root(&card), "D");
+    fake_fat_lfn_entry(&card, dir, "Thirty characters in this name", 0);
+    ASSERT_EQ(hp_omega_mount(&om), HpOmegaOk);
+    ASSERT_EQ(hp_omega_open(&om, 0, "/D/Thirty characters in this name"), HpOmegaOk);
+    /* The first LFN entry is directory entry 2; its checksum byte no longer fits the 8.3 entry */
+    const uint8_t wrong = 0x5Au;
+    fake_fat_poke(&card, fake_fat_file_lba(&card, dir, 0), 2u * 32u + 13u, &wrong, 1u);
+    ASSERT_EQ(hp_omega_open(&om, 0, "/D/Thirty characters in this name"), HpOmegaNotFound);
+    ASSERT_EQ(hp_omega_open(&om, 0, "/D/LFNTEST.DAT"), HpOmegaOk);
+    fake_fat_free(&card);
+}
+
+TEST(test_omega_dir_loop) {
+    make_card(2048, 8, 0);
+    /* The root's one cluster is full of entries that match nothing, and its chain leads back to it */
+    uint8_t junk[512];
+    memset(junk, 'A', sizeof(junk));
+    const uint32_t root = fake_fat_root(&card);
+    for(uint32_t s = 0; s < 8u; s++) {
+        fake_fat_poke(&card, fake_fat_file_lba(&card, root, s * 512u), 0, junk, sizeof(junk));
+    }
+    fake_fat_set_next(&card, root, root);
+    ASSERT_EQ(hp_omega_mount(&om), HpOmegaOk);
+    const uint32_t reads = gba.omega_reads;
+    ASSERT_EQ(hp_omega_open(&om, 0, "/nothing.sav"), HpOmegaNotFound);
+    ASSERT_TRUE(gba.omega_reads - reads <= 4097u);
+    fake_fat_free(&card);
+}
+
 /* ---- The Omega commands (hp_core.h) ---- */
 
 #define MIB 0x100000u
@@ -260,6 +326,40 @@ TEST(test_cmd_mount_before_info) {
     ASSERT_EQ(run(1, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_REFUSED);
     ASSERT_EQ(p[0], HP_REFUSE_CART);
     ASSERT_EQ(gba.omega_reads, 0);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_mount_refused_titled) {
+    static const char zero4[4] = {0};
+    omega_cart();
+    helper_cmd_header(hdr, gba.own, "HOMEBREW", zero4, 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    const uint32_t reads = gba.omega_reads;
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_CART);
+    ASSERT_EQ(gba.omega_reads, reads);
+    /* A code with no title is refused too */
+    helper_cmd_header(hdr, gba.own, "", "ABCD", 0);
+    fake_gba_rom(&gba, hdr, MIB);
+    ASSERT_EQ(run(3, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(run(4, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_CART);
+    ASSERT_EQ(gba.omega_reads, reads);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_feed_runs) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(open_path(3, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    const uint32_t reads = gba.omega_reads;
+    const uint16_t cr[5] = {0, 0, 0, 4096, 0};
+    ASSERT_EQ(run(4, HP_CMD_OMEGA_CRC32, cr, 5), HP_ST_OK);
+    ASSERT_EQ(w32(0), ~hp_crc32_bytes(0xFFFFFFFFu, data, 4096));
+    /* 8 blocks in one cluster: two runs of 4, and no FAT block needed */
+    ASSERT_EQ(gba.omega_reads - reads, 2u);
     fake_fat_free(&card);
 }
 
@@ -367,7 +467,13 @@ int main(void) {
     RUN(test_omega_lfn_split);
     RUN(test_omega_read_fragmented);
     RUN(test_omega_read_bounds);
+    RUN(test_omega_chain_out_of_range);
+    RUN(test_omega_lfn_missing_seq);
+    RUN(test_omega_lfn_bad_sum);
+    RUN(test_omega_dir_loop);
     RUN(test_cmd_mount_refused_genuine);
+    RUN(test_cmd_mount_refused_titled);
+    RUN(test_cmd_feed_runs);
     RUN(test_cmd_mount_before_info);
     RUN(test_cmd_read_before_mount);
     RUN(test_cmd_omega_flow);

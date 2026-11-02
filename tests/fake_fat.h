@@ -43,6 +43,11 @@ uint32_t fake_fat_add_file(
     uint32_t gap_every);
 /* A deleted entry for long_name: its LFN run and 8.3 entry, each first byte 0xE5 */
 void fake_fat_add_deleted(FakeFat* f, uint32_t dir_cluster, const char* long_name);
+/* Writes cluster's FAT entry (both FATs) */
+void fake_fat_set_next(FakeFat* f, uint32_t cluster, uint32_t next);
+/* An empty file "LFNTEST.DAT" in the directory at dir, with an LFN run for long_name (its checksum
+ * right) from which the entry with sequence drop_seq is left out; 0 leaves none out. */
+void fake_fat_lfn_entry(FakeFat* f, uint32_t dir, const char* long_name, uint8_t drop_seq);
 uint32_t fake_fat_root(const FakeFat* f);
 /* Overwrites n bytes of block lba at off */
 void fake_fat_poke(FakeFat* f, uint32_t lba, uint32_t off, const void* p, uint32_t n);

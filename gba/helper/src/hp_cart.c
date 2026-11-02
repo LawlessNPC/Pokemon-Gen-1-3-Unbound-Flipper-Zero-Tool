@@ -115,6 +115,7 @@ void hp_cart_scan(HpCart* out) {
     uint8_t chk = 0;
     for(uint32_t off = 0xA0; off <= 0xBC; off++) chk = (uint8_t)(chk - hp_cart_byte(off));
     out->complement_ok = hp_cart_byte(0xBD) == (uint8_t)(chk - 0x19u);
+    out->title0 = hp_cart_byte(0xA0);
     for(uint32_t i = 0; i < 4; i++) out->code[i] = hp_cart_byte(0xAC + i);
     out->write_game = hp_cart_write_game(out->code);
     out->rom_size = hp_cart_rom_size();

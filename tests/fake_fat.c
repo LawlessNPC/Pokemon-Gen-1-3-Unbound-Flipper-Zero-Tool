@@ -159,16 +159,29 @@ static void short_name(FakeFat* f, uint8_t out[11]) {
     memcpy(out, tmp, 11);
 }
 
-/* The LFN run then the 8.3 entry for name at the directory's end; first byte 0xE5 if deleted */
-static uint8_t* add_entry(FakeFat* f, uint32_t dir, const char* name, bool deleted) {
+/* The LFN run then the 8.3 entry for name at the directory's end; first byte 0xE5 if deleted. The
+ * 8.3 name is fixed_sn if it isn't NULL. The LFN entry with sequence drop_seq is left out if it
+ * isn't 0. */
+static uint8_t* add_entry_ex(
+    FakeFat* f,
+    uint32_t dir,
+    const char* name,
+    bool deleted,
+    const uint8_t* fixed_sn,
+    uint32_t drop_seq) {
     static const uint8_t at[13] = {1, 3, 5, 7, 9, 14, 16, 18, 20, 22, 24, 28, 30};
     uint8_t sn[11];
-    short_name(f, sn);
+    if(fixed_sn) {
+        memcpy(sn, fixed_sn, 11);
+    } else {
+        short_name(f, sn);
+    }
     const uint8_t sum = lfn_sum(sn);
     const uint32_t len = (uint32_t)strlen(name);
     const uint32_t n = (len + 12u) / 13u;
     uint32_t k = dir_end(f, dir);
     for(uint32_t i = n; i >= 1u; i--) {
+        if(i == drop_seq) continue;
         uint8_t* e = dir_entry(f, dir, k++);
         memset(e, 0, 32);
         e[0] = (uint8_t)(i | (i == n ? 0x40u : 0u));
@@ -188,6 +201,10 @@ static uint8_t* add_entry(FakeFat* f, uint32_t dir, const char* name, bool delet
     put16(e + 24, 0x5B21u);
     if(deleted) e[0] = 0xE5;
     return e;
+}
+
+static uint8_t* add_entry(FakeFat* f, uint32_t dir, const char* name, bool deleted) {
+    return add_entry_ex(f, dir, name, deleted, NULL, 0);
 }
 
 uint32_t fake_fat_mkdir(FakeFat* f, uint32_t parent_cluster, const char* long_name) {
@@ -249,6 +266,15 @@ void fake_fat_add_deleted(FakeFat* f, uint32_t dir_cluster, const char* long_nam
     uint8_t* e = add_entry(f, dir_cluster, long_name, true);
     e[11] = 0x20;
     put32(e + 28, 1234u);
+}
+
+void fake_fat_set_next(FakeFat* f, uint32_t cluster, uint32_t next) {
+    fat_set(f, cluster, next);
+}
+
+void fake_fat_lfn_entry(FakeFat* f, uint32_t dir, const char* long_name, uint8_t drop_seq) {
+    uint8_t* e = add_entry_ex(f, dir, long_name, false, (const uint8_t*)"LFNTEST DAT", drop_seq);
+    e[11] = 0x20;
 }
 
 void fake_fat_poke(FakeFat* f, uint32_t lba, uint32_t off, const void* p, uint32_t n) {

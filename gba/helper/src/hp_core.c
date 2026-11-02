@@ -528,10 +528,14 @@ static uint16_t hp_omega_fail(Hp* hp, HpOmegaResult r) {
     return hp_fail(hp, HP_ST_UNSUPPORTED, (uint16_t)r, 0);
 }
 
-/* OMEGA_MOUNT: only after this session's CART_INFO found no game the helper writes, so that no
- * Omega command ever reaches a genuine cart */
+/* OMEGA_MOUNT: only after this session's CART_INFO found a header with an empty title and game
+ * code, as the Omega's kernel has (first bytes 0xA0 and 0xAC checked), so that no Omega command
+ * ever reaches a genuine cart */
 static uint16_t hp_omega_mount_cmd(Hp* hp) {
-    if(!hp->cart_scanned || hp->cart.write_game) return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_CART, 0);
+    const HpCart* c = &hp->cart;
+    if(!hp->cart_scanned || c->write_game || c->title0 != 0 || c->code[0] != 0) {
+        return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_CART, 0);
+    }
     hp->sha_on = false;
     const HpOmegaResult r = hp_omega_mount(&hp->omega);
     if(r != HpOmegaOk) return hp_omega_fail(hp, r);
@@ -590,24 +594,27 @@ static uint16_t hp_omega_read_cmd(Hp* hp) {
     return hp_respond(hp, HP_ST_OK, (uint16_t)(blocks * 256u));
 }
 
-/* Feeds len bytes of slot's file from off, block by block through sector_buf, to the CRC-32
- * register *crc and/or the SHA-256 hash; off % 512 == 0, and only the range's end may be short of
- * a block, at the file's end */
+/* Feeds len bytes of slot's file from off, in runs of up to 4 blocks a card read, block by block
+ * through sector_buf, to the CRC-32 register *crc and/or the SHA-256 hash; off % 512 == 0, and
+ * only the range's end may be short of a block, at the file's end */
 static HpOmegaResult
     hp_omega_feed(Hp* hp, uint8_t slot, uint32_t off, uint32_t len, uint32_t* crc, bool sha) {
     uint16_t* words = &hp->resp[3]; /* a block's words, then its bytes into sector_buf */
     for(uint32_t done = 0; done < len;) {
-        const HpOmegaResult r = hp_omega_read(&hp->omega, slot, off + done, 1, words);
+        const uint32_t blocks = (len - done + 511u) / 512u < 4u ? (len - done + 511u) / 512u : 4u;
+        const HpOmegaResult r = hp_omega_read(&hp->omega, slot, off + done, (uint8_t)blocks, words);
         if(r != HpOmegaOk) return r;
-        const uint32_t n = len - done < 512u ? len - done : 512u;
-        for(uint32_t i = 0; i < 256u; i++) {
-            const uint16_t w = words[i];
-            hp->sector_buf[2u * i] = (uint8_t)w;
-            hp->sector_buf[2u * i + 1u] = (uint8_t)(w >> 8);
+        for(uint32_t k = 0; k < blocks; k++) {
+            const uint32_t n = len - done < 512u ? len - done : 512u;
+            for(uint32_t i = 0; i < 256u; i++) {
+                const uint16_t w = words[k * 256u + i];
+                hp->sector_buf[2u * i] = (uint8_t)w;
+                hp->sector_buf[2u * i + 1u] = (uint8_t)(w >> 8);
+            }
+            if(crc) *crc = hp_crc32_bytes(*crc, hp->sector_buf, n);
+            if(sha) hp_sha256_update(&hp->sha, hp->sector_buf, n);
+            done += n;
         }
-        if(crc) *crc = hp_crc32_bytes(*crc, hp->sector_buf, n);
-        if(sha) hp_sha256_update(&hp->sha, hp->sector_buf, n);
-        done += n;
     }
     return HpOmegaOk;
 }

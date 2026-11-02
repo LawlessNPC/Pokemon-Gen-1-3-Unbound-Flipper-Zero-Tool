@@ -39,6 +39,7 @@ typedef struct {
     uint32_t part, fat, data, root, fatsz; /* LBAs, the root's cluster, FAT size in sectors */
     uint16_t reserved;
     uint8_t spc, fats;
+    uint32_t clusters; /* the volume's cluster count: clusters 2 .. clusters + 1 exist */
     uint32_t fat_cached; /* the LBA in fat_buf, UINT32_MAX none */
     uint16_t fat_buf[256];
     uint16_t dir_buf[256];
