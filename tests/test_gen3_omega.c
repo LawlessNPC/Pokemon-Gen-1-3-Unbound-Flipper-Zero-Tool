@@ -56,6 +56,8 @@ typedef struct {
     uint32_t unplug_cmd_at;
     uint32_t poke_write_at; /* once this OMEGA_WRITE_SECTOR has run, byte poke_off of the save */
     uint32_t poke_off; /* on the card is changed, as a write that landed there too would */
+    uint32_t rom_reads; /* OMEGA_READs of the game file (slot 2), and the end of the furthest: */
+    uint32_t rom_max_end; /* offset + blocks * 512 */
 } Hook;
 
 static Hook hook;
@@ -64,6 +66,12 @@ static void hook_cb(void* ctx, uint8_t code, uint16_t arg0) {
     (void)arg0;
     Hook* k = ctx;
     k->calls[code]++;
+    if(code == GEN3_HCMD_OMEGA_READ && fh.hp.rx_n >= 4u && fh.hp.req[0] == GEN3_OMEGA_SLOT_ROM) {
+        const uint32_t end = ((uint32_t)fh.hp.req[1] | (uint32_t)fh.hp.req[2] << 16) +
+                             512u * fh.hp.req[3];
+        k->rom_reads++;
+        if(end > k->rom_max_end) k->rom_max_end = end;
+    }
     if(k->unplug_sha_at && code == GEN3_HCMD_OMEGA_SHA256 && k->calls[code] == k->unplug_sha_at) {
         fake_helper_unplug_at(&fh, fake_helper_transfers(&fh), FOREVER);
     }
@@ -1728,13 +1736,15 @@ static void put_pal_lz(uint32_t off, const uint16_t* pal) {
     }
 }
 
+static uint32_t front_base = PIC_FRONT, pal_base = PIC_PAL; /* where build_rom_at put the tables */
+
 static void put_entry(uint32_t species, uint32_t front, uint32_t pal) {
-    put32(PIC_FRONT + 8u * species, 0x08000000u + front);
-    put16(PIC_FRONT + 8u * species + 4u, 0x800);
-    put16(PIC_FRONT + 8u * species + 6u, species);
-    put32(PIC_PAL + 8u * species, 0x08000000u + pal);
-    put16(PIC_PAL + 8u * species + 4u, species);
-    put16(PIC_PAL + 8u * species + 6u, 0);
+    put32(front_base + 8u * species, 0x08000000u + front);
+    put16(front_base + 8u * species + 4u, 0x800);
+    put16(front_base + 8u * species + 6u, species);
+    put32(pal_base + 8u * species, 0x08000000u + pal);
+    put16(pal_base + 8u * species + 4u, species);
+    put16(pal_base + 8u * species + 6u, 0);
 }
 
 static void rom_hash(void) {
@@ -1744,11 +1754,13 @@ static void rom_hash(void) {
     hp_sha256_final(&s, rom_sha);
 }
 
-static void build_rom(void) {
+static void build_rom_at(uint32_t fb, uint32_t pb) {
+    front_base = fb;
+    pal_base = pb;
     uint32_t x = 99u;
     for(uint32_t i = 0; i < ROM_LEN; i++) rom[i] = (uint8_t)((x = x * 1103515245u + 12345u) >> 16);
-    put32(0x128, 0x08000000u + PIC_FRONT);
-    put32(0x130, 0x08000000u + PIC_PAL);
+    put32(0x128, 0x08000000u + fb);
+    put32(0x130, 0x08000000u + pb);
     memcpy(rom + PIC_S1, ub_pic_vectors[0].tiles_lz, ub_pic_vectors[0].tiles_lz_size);
     put_pal_lz(PIC_S1 + 0x800u, ub_pic_vectors[0].palette);
     put_entry(1, PIC_S1, PIC_S1 + 0x800u);
@@ -1759,7 +1771,20 @@ static void build_rom(void) {
     memcpy(rom + end, ub_pic_vectors[2].tiles_lz, ub_pic_vectors[2].tiles_lz_size);
     put_pal_lz(end - 0x40u, ub_pic_vectors[2].palette);
     put_entry(1267, end, end - 0x40u);
+    /* species 63 with vector 3, for the tables that are not 512-aligned */
+    memcpy(rom + PIC_S440 + 0x1000u, ub_pic_vectors[3].tiles_lz, ub_pic_vectors[3].tiles_lz_size);
+    put_pal_lz(PIC_S440 + 0x1800u, ub_pic_vectors[3].palette);
+    put_entry(63, PIC_S440 + 0x1000u, PIC_S440 + 0x1800u);
     rom_hash();
+}
+
+static void build_rom(void) {
+    build_rom_at(PIC_FRONT, PIC_PAL);
+}
+
+/* No read of the game file went past its end */
+static bool reads_inside(void) {
+    return hook.rom_max_end <= ROM_LEN;
 }
 
 /* A connected bench on the ROM as it is now (patched or not) */
@@ -1784,6 +1809,7 @@ TEST(test_omega_pics_find_ok) {
     ASSERT_TRUE(om.pics_off == NULL);
     /* block 0, then the front and palette entries of species 1 */
     ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ] - reads, 3);
+    ASSERT_TRUE(reads_inside());
     /* once per connect */
     ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
     ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ] - reads, 3);
@@ -1815,6 +1841,9 @@ TEST(test_omega_pics_bad_header) {
         ASSERT_TRUE(!om.pics_ok);
         ASSERT_TRUE(om.pics_off != NULL && om.pics_off[0]);
         ASSERT_TRUE(hook.calls[GEN3_HCMD_OMEGA_READ] - reads <= 3u);
+        ASSERT_TRUE(reads_inside());
+        /* a rejected header pointer: block 0 only; a rejected entry: and the two entries */
+        ASSERT_EQ(hook.rom_reads, (k <= 3u || k == 8u) ? 1u : 3u);
         ASSERT_TRUE(om.connected);
         /* and a picture is refused, with nothing sent */
         const uint32_t sent = hook.calls[GEN3_HCMD_OMEGA_READ];
@@ -1837,6 +1866,7 @@ TEST(test_omega_pic_ok) {
     ASSERT_TRUE(memcmp(d, ub_pic_vectors[1].record, GEN3_UB_PIC_RECORD) == 0);
     ASSERT_TRUE(absent(PIC_CACHE ".tmp"));
     ASSERT_TRUE(om.connected);
+    ASSERT_TRUE(reads_inside());
     /* again: the old file replaced */
     ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartOk);
     d = fake_store_file(&store, PIC_CACHE, &size);
@@ -1864,6 +1894,33 @@ TEST(test_omega_pic_at_end) {
     const uint8_t* d = fake_store_file(&store, GEN3_OMEGA_PICS "/1267.fxb", &size);
     ASSERT_TRUE(d != NULL && size == GEN3_UB_PIC_RECORD);
     ASSERT_TRUE(memcmp(d, ub_pic_vectors[2].record, GEN3_UB_PIC_RECORD) == 0);
+    ASSERT_TRUE(reads_inside());
+    ASSERT_EQ(hook.rom_max_end, ROM_LEN); /* and the last block was read */
+}
+
+TEST(test_omega_pic_straddle) {
+    /* tables 4 bytes past a block: species 63's entries start at offset 508 of a block, so
+     * each is read as two blocks */
+    build_rom_at(PIC_FRONT + 4u, PIC_PAL + 4u);
+    ASSERT_EQ((PIC_FRONT + 4u + 8u * 63u) % 512u, 508u);
+    ASSERT_TRUE(pics_bench());
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_TRUE(om.pics_ok);
+    ASSERT_EQ(om.pic_table, PIC_FRONT + 4u);
+    const uint32_t reads = hook.rom_reads;
+    ASSERT_EQ(gen3_omega_picture(&om, 63, GEN3_OMEGA_PICS), Gen3CartOk);
+    /* two entries of two blocks each, then the palette's and the picture's streams */
+    ASSERT_TRUE(hook.rom_reads - reads >= 4u);
+    uint32_t size = 0;
+    const uint8_t* d = fake_store_file(&store, GEN3_OMEGA_PICS "/63.fxb", &size);
+    ASSERT_TRUE(d != NULL && size == GEN3_UB_PIC_RECORD);
+    ASSERT_TRUE(memcmp(d, ub_pic_vectors[3].record, GEN3_UB_PIC_RECORD) == 0);
+    ASSERT_TRUE(reads_inside());
+    /* a species whose entry is within a block still works */
+    ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartOk);
+    d = fake_store_file(&store, PIC_CACHE, &size);
+    ASSERT_TRUE(d != NULL && memcmp(d, ub_pic_vectors[1].record, GEN3_UB_PIC_RECORD) == 0);
+    build_rom();
 }
 
 TEST(test_omega_pic_bad_entry) {
@@ -1887,6 +1944,7 @@ TEST(test_omega_pic_bad_entry) {
         ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartBadBackup);
         ASSERT_TRUE(pic_files_absent());
         ASSERT_TRUE(om.connected);
+        ASSERT_TRUE(reads_inside());
         /* a good species still works, and the bad one is tried again */
         ASSERT_EQ(gen3_omega_picture(&om, 1, GEN3_OMEGA_PICS), Gen3CartOk);
         ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartBadBackup);
@@ -1899,6 +1957,7 @@ TEST(test_omega_pic_bad_entry) {
     ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
     ASSERT_EQ(gen3_omega_picture(&om, 1267, GEN3_OMEGA_PICS), Gen3CartBadBackup);
     ASSERT_TRUE(absent(GEN3_OMEGA_PICS "/1267.fxb"));
+    ASSERT_TRUE(reads_inside());
     build_rom();
 }
 
@@ -1919,6 +1978,7 @@ TEST(test_omega_pic_link_lost) {
         ASSERT_TRUE(r == Gen3CartLinkLost || r == Gen3CartBusyTimeout);
         ASSERT_TRUE(!om.connected);
         ASSERT_TRUE(pic_files_absent());
+        ASSERT_TRUE(reads_inside());
         ASSERT_EQ(gen3_omega_changes(&om), changes);
         ASSERT_EQ(om.dirty, dirty);
         ASSERT_TRUE(om.work_ok);
@@ -1938,6 +1998,7 @@ TEST(test_omega_pic_unverified) {
     ASSERT_EQ(gen3_omega_picture(&om, 440, GEN3_OMEGA_PICS), Gen3CartRefused);
     ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_READ], reads);
     ASSERT_EQ(hook.calls[GEN3_HCMD_OMEGA_OPEN], opens);
+    ASSERT_EQ(hook.rom_reads, 0);
     ASSERT_TRUE(pic_files_absent());
     gen3_omega_set_expected_sha(rom_sha);
 }
@@ -2001,6 +2062,7 @@ int main(void) {
     RUN(test_omega_pics_bad_header);
     RUN(test_omega_pic_ok);
     RUN(test_omega_pic_at_end);
+    RUN(test_omega_pic_straddle);
     RUN(test_omega_pic_bad_entry);
     RUN(test_omega_pic_link_lost);
     RUN(test_omega_pic_unverified);
