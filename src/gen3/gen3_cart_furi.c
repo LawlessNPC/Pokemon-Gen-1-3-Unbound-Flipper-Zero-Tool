@@ -203,6 +203,7 @@ static const char* cart_job_name(Gen3CartJob job) {
         [Gen3CartJobRestore] = "restore",
         [Gen3CartJobRom] = "rom",
         [Gen3CartJobReconnect] = "reconnect",
+        [Gen3CartJobPicture] = "picture",
     };
     return (size_t)job < COUNT_OF(names) ? names[job] : "?";
 }
@@ -785,6 +786,7 @@ static Gen3CartResult cart_job_omega(Gen3CartSession* s, Gen3CartJob job, const 
     case Gen3CartJobConnect:
     case Gen3CartJobRom:
     case Gen3CartJobReconnect:
+    case Gen3CartJobPicture:
         break;
     }
     return r;
@@ -820,6 +822,7 @@ static Gen3CartResult cart_job(Gen3CartSession* s, Gen3CartJob job) {
         return r;
     }
     case Gen3CartJobConnect:
+    case Gen3CartJobPicture:
         break;
     }
     return Gen3CartBadArg;
@@ -843,7 +846,47 @@ static void cart_stamp(Gen3CartSession* s) {
 
 /* ---- Worker ---- */
 
+/* A background picture (gen3_cart_session_picture): the pictures' tables once per connect, then the
+ * species' record. It leaves the foreground job's status alone and logs one line. */
+static void cart_run_picture(Gen3CartSession* s) {
+    Gen3Omega* o = &s->omega;
+    const uint16_t species = s->status.pic_species;
+    Gen3CartResult r = Gen3CartBadArg;
+
+    if(s->cart_ready && s->status.omega) {
+        r = Gen3CartOk;
+        if(!o->pics_checked) {
+            r = gen3_omega_pics_find(o);
+            if(r == Gen3CartOk) {
+                if(o->pics_ok) {
+                    CART_LOG(
+                        s,
+                        "omega pics ok front %lx pal %lx",
+                        (unsigned long)o->pic_table,
+                        (unsigned long)o->pal_table);
+                } else {
+                    CART_LOG(s, "omega pics off %s", o->pics_off ? o->pics_off : "?");
+                }
+            }
+        }
+        if(r == Gen3CartOk) {
+            r = o->pics_ok ? gen3_omega_picture(o, species, GEN3_OMEGA_PICS) : Gen3CartRefused;
+        }
+    }
+    CART_LOG(s, "job picture %u end %s", (unsigned)species, cart_result_name(r));
+
+    cart_lock(s);
+    s->status.pic_result = r;
+    s->status.pic_busy = false;
+    s->status.busy = false;
+    cart_unlock(s);
+}
+
 static void cart_run_one(Gen3CartSession* s, Gen3CartJob job) {
+    if(job == Gen3CartJobPicture) {
+        cart_run_picture(s);
+        return;
+    }
     cart_stamp(s);
     const uint32_t resends = s->cli.resends;
     CART_LOG(s, "job %s start", cart_job_name(job));
@@ -878,7 +921,10 @@ static int32_t cart_worker(void* ctx) {
         const bool pending = s->req_pending;
         const Gen3CartJob job = s->req_job;
         s->req_pending = false;
-        if(pending) {
+        if(pending && job == Gen3CartJobPicture) {
+            /* The foreground job's status stays as it was */
+            s->status.busy = true;
+        } else if(pending) {
             s->status.busy = true;
             s->status.job = job;
             s->status.step = Gen3CartStepNone;
@@ -944,7 +990,7 @@ void gen3_cart_session_free(Gen3CartSession* s) {
 
 bool gen3_cart_session_run(Gen3CartSession* s, Gen3CartJob job, const char* arg) {
     furi_check(s);
-    if((size_t)job > (size_t)Gen3CartJobReconnect) return false;
+    if((size_t)job > (size_t)Gen3CartJobReconnect) return false; /* not Picture */
     cart_lock(s);
     const bool idle = !s->status.busy && !s->req_pending;
     if(idle) {
@@ -964,6 +1010,24 @@ bool gen3_cart_session_run(Gen3CartSession* s, Gen3CartJob job, const char* arg)
     return idle;
 }
 
+bool gen3_cart_session_picture(Gen3CartSession* s, uint16_t species) {
+    furi_check(s);
+    cart_lock(s);
+    const bool idle = !s->status.busy && !s->req_pending;
+    if(idle) {
+        s->req_pending = true;
+        s->req_job = Gen3CartJobPicture;
+        s->req_has_arg = false;
+        /* Set here, with the lock, so the app sees the job at once; the worker is idle */
+        s->status.pic_busy = true;
+        s->status.pic_species = species;
+        s->cancel = false;
+    }
+    cart_unlock(s);
+    if(idle) furi_thread_flags_set(furi_thread_get_id(s->thread), GEN3_CART_FLAG_JOB);
+    return idle;
+}
+
 void gen3_cart_session_cancel(Gen3CartSession* s) {
     furi_check(s);
     s->cancel = true;
@@ -976,7 +1040,7 @@ void gen3_cart_session_status(Gen3CartSession* s, Gen3CartSessionStatus* out) {
     *out = s->status;
     if(s->req_pending) {
         out->busy = true;
-        out->job = s->req_job;
+        if(s->req_job != Gen3CartJobPicture) out->job = s->req_job;
         /* As the worker will once it takes the Connect */
         if(s->req_job == Gen3CartJobConnect) memset(&out->mb, 0, sizeof(out->mb));
     }

@@ -413,3 +413,17 @@ void gen3_cart_screen_ub_backup_label(const char* name, char out[GEN3_CART_SCREE
 /* a was made after b: its stamp (after the last '_') is later, or the same and its name sorts
  * after b's */
 bool gen3_cart_screen_ub_backup_newer(const char* a, const char* b);
+
+/* The background picture requests: at most one picture job runs and one species waits behind it,
+ * the newest asked for (the picker's fast scrolling replaces the waiting one). 0 is none. */
+typedef struct {
+    uint16_t running, waiting;
+} Gen3CartPicQueue;
+/* species becomes the waiting one, unless it is the running one (then nothing waits: it is the
+ * newest request); 0 is ignored */
+void gen3_cart_pic_want(Gen3CartPicQueue* q, uint16_t species);
+/* The running job ended or none runs: the waiting one becomes the running one and is returned, to
+ * start; 0 (and nothing running) if none waits */
+uint16_t gen3_cart_pic_next(Gen3CartPicQueue* q);
+/* Drops the waiting one (leaving the picker); the running one stays until it ends */
+void gen3_cart_pic_drop(Gen3CartPicQueue* q);

@@ -109,6 +109,79 @@ Gen3Omega* gen3_cart_ui_omega(PokemonFap* pokemon_fap) {
     return gen3_cart_session_omega(pokemon_fap->gen3_cart_ui->session);
 }
 
+/* ---- Background pictures ---- */
+
+bool gen3_cart_ui_picture_busy(PokemonFap* pokemon_fap) {
+    return pokemon_fap->gen3_cart_ui && gen3_cart_ui_status(pokemon_fap)->pic_busy;
+}
+
+bool gen3_cart_ui_pictures_on(PokemonFap* pokemon_fap) {
+    if(!pokemon_fap->gen3_cart_ui) return false;
+    const Gen3CartSessionStatus* st = gen3_cart_ui_status(pokemon_fap);
+    if(!st->omega) return false;
+    /* The job's: it was asked for with the pictures on */
+    if(st->pic_busy) return true;
+    const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    return o && o->connected && o->verified && !(o->pics_checked && !o->pics_ok);
+}
+
+bool gen3_cart_ui_picture_wait(PokemonFap* pokemon_fap) {
+    for(uint32_t waited = 0; gen3_cart_ui_picture_busy(pokemon_fap); waited += 20u) {
+        if(waited >= 10000u) return false;
+        furi_delay_ms(20);
+    }
+    return true;
+}
+
+void gen3_cart_ui_busy_notice(PokemonFap* pokemon_fap, uint32_t back) {
+    Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
+
+    snprintf(ui->result_header, sizeof(ui->result_header), "%s", "Cartridge");
+    ui->result_text = "Busy. Try again.";
+    ui->retry_mode = Gen3CartRetryNone;
+    ui->result_back = back;
+    scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartResult);
+}
+
+/* Moves the waiting species to running and starts it; if the session won't take it (another job
+ * runs), it goes back to waiting */
+static void gen3_cart_pic_start(Gen3CartUi* ui) {
+    const uint16_t species = gen3_cart_pic_next(&ui->pics);
+
+    if(species && !gen3_cart_session_picture(ui->session, species)) {
+        ui->pics.running = 0;
+        ui->pics.waiting = species;
+    }
+}
+
+void gen3_cart_ui_picture_pump(PokemonFap* pokemon_fap) {
+    if(!pokemon_fap->gen3_cart_ui) return;
+    Gen3CartUi* ui = pokemon_fap->gen3_cart_ui;
+
+    /* A running one (or one that ended and is not yet taken by picture_ended) holds the queue */
+    if(ui->pics.running || !ui->pics.waiting) return;
+    gen3_cart_pic_start(ui);
+}
+
+void gen3_cart_ui_picture_want(PokemonFap* pokemon_fap, uint16_t species) {
+    if(!gen3_cart_ui_pictures_on(pokemon_fap)) return;
+    gen3_cart_pic_want(&pokemon_fap->gen3_cart_ui->pics, species);
+    gen3_cart_ui_picture_pump(pokemon_fap);
+}
+
+bool gen3_cart_ui_picture_ended(PokemonFap* pokemon_fap, uint16_t* species, Gen3CartResult* r) {
+    if(!pokemon_fap->gen3_cart_ui) return false;
+    Gen3CartUi* ui = pokemon_fap->gen3_cart_ui;
+    if(!ui->pics.running) return false;
+    const Gen3CartSessionStatus* st = gen3_cart_ui_status(pokemon_fap);
+    if(st->pic_busy) return false;
+    *species = ui->pics.running;
+    *r = st->pic_result;
+    ui->pics.running = 0;
+    gen3_cart_pic_start(ui);
+    return true;
+}
+
 uint16_t gen3_cart_ui_changes(PokemonFap* pokemon_fap) {
     if(gen3_cart_ui_status(pokemon_fap)->omega) {
         const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
@@ -269,6 +342,11 @@ void gen3_cart_ui_progress(PokemonFap* pokemon_fap, Gen3CartScreenState state) {
 void gen3_cart_ui_run_job(PokemonFap* pokemon_fap, Gen3CartJob job, const char* arg) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
 
+    /* A background picture job holds the session; give it up to 10 s, else do nothing */
+    if(!gen3_cart_ui_picture_wait(pokemon_fap)) {
+        gen3_cart_ui_busy_notice(pokemon_fap, PokemonSceneGen3Cart);
+        return;
+    }
     ui->job = job;
     snprintf(ui->arg, sizeof(ui->arg), "%s", arg ? arg : "");
     ui->job_started = false;

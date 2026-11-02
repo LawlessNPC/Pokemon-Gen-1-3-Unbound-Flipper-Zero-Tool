@@ -27,9 +27,16 @@ Gen3CartSession* gen3_cart_session_alloc(void* gblink_handle);
 void gen3_cart_session_free(Gen3CartSession* s);
 /* Starts a job on the worker. arg: Restore and RestoreCheck, the backup's name relative to the
  * store's folder ("backups/....sav"); Rom, "resume" to go on from the .part, or NULL; others
- * ignore it. false, and nothing started, while a job runs. A job before the first Connect has
+ * ignore it. false, and nothing started, while a job runs. Not Gen3CartJobPicture (false):
+ * gen3_cart_session_picture starts that. A job before the first Connect has
  * loaded the helper file ends BadArg. */
 bool gen3_cart_session_run(Gen3CartSession* s, Gen3CartJob job, const char* arg);
+/* Starts Gen3CartJobPicture for species on the worker: an Omega's picture, fetched into the
+ * store's GEN3_OMEGA_PICS folder (gen3_omega_picture) after the one-time gen3_omega_pics_find. It
+ * sets status.busy and pic_busy at once and ends with pic_result; nothing else of the status
+ * changes, and the log gets one line, `job picture <species> end <result>`. false, and nothing
+ * started, while a job runs. A job before an Omega's Connect ends BadArg. */
+bool gen3_cart_session_picture(Gen3CartSession* s, uint16_t species);
 /* Asks the running job to stop where it can (gen3_cart.h says where; Write and Restore never do,
  * nor Discard). Until then it stays busy. */
 void gen3_cart_session_cancel(Gen3CartSession* s);

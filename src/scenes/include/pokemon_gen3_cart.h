@@ -36,6 +36,8 @@
 #define GEN3_CART_EVENT_RIGHT 0x47330505u
 /* The party and box scenes, to themselves: nothing to browse, back to the hub */
 #define GEN3_CART_EVENT_HUB 0x47330506u
+/* A background picture job ended (gen3_cart_ui_picture_ended): sent by the picker's view timer */
+#define GEN3_CART_EVENT_PICTURE 0x47330507u
 
 /* What the Unbound pick scene (Gen3CartOmegaPick) lists for the editor */
 typedef enum {
@@ -100,6 +102,8 @@ typedef struct Gen3CartUi {
     uint8_t ub_pick; /* the pick scene's list, a Gen3CartUbPick */
     uint8_t ub_page; /* its page of names, or GEN3_CART_UB_LETTERS */
     Gen3UbMon ub_mon; /* a record read from the working copy, or the owner of a new one */
+    /* The background picture requests: the species running and the newest waiting */
+    Gen3CartPicQueue pics;
 } Gen3CartUi;
 
 /* Allocates on first use the ui, the session (gen3_cart_session_alloc, which starts its worker
@@ -186,3 +190,25 @@ void gen3_cart_ui_set_result(
     Gen3CartResult r,
     bool dropped,
     uint32_t back);
+
+/* ---- Background pictures (Gen3CartJobPicture). The picker's scene asks; its view timer polls
+ * gen3_cart_ui_picture_ended and sends GEN3_CART_EVENT_PICTURE. App thread only. ---- */
+
+/* An Omega's pictures can be asked for: the last Connect found an Omega, it is connected and
+ * verified, and its pictures were not found off. While a picture job runs: true. */
+bool gen3_cart_ui_pictures_on(PokemonFap* pokemon_fap);
+/* A picture job runs. While it does, gen3_cart_ui_omega is NULL. */
+bool gen3_cart_ui_picture_busy(PokemonFap* pokemon_fap);
+/* Waits for a running picture job, polling every 20 ms for up to 10 s: true once none runs, false
+ * if one still does. Call before touching the Omega or starting a job. */
+bool gen3_cart_ui_picture_wait(PokemonFap* pokemon_fap);
+/* Shows "Busy. Try again." as a notice (Gen3CartResult) whose OK returns to the scene back, and
+ * does nothing else: for a wait that timed out */
+void gen3_cart_ui_busy_notice(PokemonFap* pokemon_fap, uint32_t back);
+/* Starts the waiting species if no picture job runs (and no other job: it stays waiting) */
+void gen3_cart_ui_picture_pump(PokemonFap* pokemon_fap);
+/* true once per finished picture job, with its species and result; it then starts the waiting one.
+ * Call gen3_cart_ui_picture_pump after gen3_cart_pic_want on ui->pics. */
+bool gen3_cart_ui_picture_ended(PokemonFap* pokemon_fap, uint16_t* species, Gen3CartResult* r);
+/* A picture is wanted (the newest request wins), then pumped */
+void gen3_cart_ui_picture_want(PokemonFap* pokemon_fap, uint16_t species);

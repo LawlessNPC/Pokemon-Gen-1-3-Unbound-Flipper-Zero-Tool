@@ -131,9 +131,14 @@ static void gen3_cart_omega_edit_row(PokemonFap* pokemon_fap, uint32_t row) {
 /* Back: the Pokemon into its slot, then the list */
 static void gen3_cart_omega_edit_back(PokemonFap* pokemon_fap) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
-    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
     Gen3CartMon m = Gen3CartMonOk;
 
+    /* A picture job holds the Omega: wait for it before the put; the edit stays if it won't end */
+    if(!gen3_cart_ui_picture_wait(pokemon_fap)) {
+        gen3_cart_ui_busy_notice(pokemon_fap, PokemonSceneGen3CartOmegaEdit);
+        return;
+    }
+    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
     if(ui->ub_new) {
         gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartOmegaPut);
         return;

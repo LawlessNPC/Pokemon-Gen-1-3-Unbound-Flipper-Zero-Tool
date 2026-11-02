@@ -24,6 +24,7 @@ Gen3CartBack gen3_cart_screen_back(Gen3CartJob job) {
     case Gen3CartJobBackup:
     case Gen3CartJobRestoreCheck:
     case Gen3CartJobReconnect:
+    case Gen3CartJobPicture:
         break;
     }
     return Gen3CartBackStop;
@@ -42,6 +43,7 @@ bool gen3_cart_screen_new_trainer(Gen3CartJob job, Gen3CartResult r) {
     case Gen3CartJobRestoreCheck:
     case Gen3CartJobRom:
     case Gen3CartJobReconnect:
+    case Gen3CartJobPicture:
         break;
     }
     return false;
@@ -222,6 +224,8 @@ static const char* cart_screen_stopped(Gen3CartJob job) {
         return "ROM copy stopped";
     case Gen3CartJobReconnect:
         return "Reconnect halted"; /* "Reconnect stopped" is over 16 characters */
+    case Gen3CartJobPicture:
+        break; /* no screen: never a foreground job */
     }
     return "Stopped";
 }
@@ -248,6 +252,8 @@ static const char* cart_screen_header(Gen3CartJob job, Gen3CartResult r) {
         return ok ? "ROM copied" : "ROM copy failed";
     case Gen3CartJobReconnect:
         return ok ? "Reconnected" : "Reconnect failed";
+    case Gen3CartJobPicture:
+        break; /* no screen */
     }
     return "Cartridge";
 }
@@ -1087,4 +1093,19 @@ bool gen3_cart_screen_ub_backup_newer(const char* a, const char* b) {
     if(c != 0) return c > 0;
     if(la != lb) return la > lb;
     return strcmp(a, b) > 0;
+}
+
+void gen3_cart_pic_want(Gen3CartPicQueue* q, uint16_t species) {
+    if(species == 0) return;
+    q->waiting = species == q->running ? 0 : species;
+}
+
+uint16_t gen3_cart_pic_next(Gen3CartPicQueue* q) {
+    q->running = q->waiting;
+    q->waiting = 0;
+    return q->running;
+}
+
+void gen3_cart_pic_drop(Gen3CartPicQueue* q) {
+    q->waiting = 0;
 }

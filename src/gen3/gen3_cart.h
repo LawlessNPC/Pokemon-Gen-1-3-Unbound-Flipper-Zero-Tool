@@ -506,6 +506,9 @@ typedef enum {
     Gen3CartJobRestore,
     Gen3CartJobRom,
     Gen3CartJobReconnect,
+    /* An Omega's background picture fetch (gen3_cart_session_picture): no job scene, and it
+     * leaves job, result, step and the progress of the last foreground job as they were */
+    Gen3CartJobPicture,
 } Gen3CartJob;
 
 /* About 100 B: never a stack local in a scene; copy it into a static buffer. */
@@ -527,4 +530,10 @@ typedef struct {
     Gen3SaveTrainer restore_trainer; /* RestoreCheck: the backup's trainer */
     bool restore_has_trainer;
     bool omega; /* the last Connect found an EZ-Flash Omega and went its way (gen3_omega.h) */
+    /* A background picture job (Gen3CartJobPicture) runs, for pic_species; it also sets busy. Its
+     * end sets pic_result and clears pic_busy, and touches no other field: result stays the last
+     * foreground job's. */
+    bool pic_busy;
+    uint16_t pic_species;
+    Gen3CartResult pic_result;
 } Gen3CartSessionStatus;

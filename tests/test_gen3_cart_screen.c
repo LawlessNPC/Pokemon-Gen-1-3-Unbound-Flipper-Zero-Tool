@@ -1446,6 +1446,48 @@ TEST(test_leave_text) {
     ASSERT_TRUE(fits(t, 2, GEN3_CART_SCREEN_LINE_LEN));
 }
 
+/* ---- The background picture requests (Gen3CartPicQueue) ---- */
+
+TEST(test_pic_queue_latest_wins) {
+    Gen3CartPicQueue q = {.running = 4, .waiting = 0};
+    gen3_cart_pic_want(&q, 5);
+    gen3_cart_pic_want(&q, 6);
+    gen3_cart_pic_want(&q, 7);
+    ASSERT_EQ(q.running, 4);
+    ASSERT_EQ(q.waiting, 7);
+    ASSERT_EQ(gen3_cart_pic_next(&q), 7);
+    ASSERT_EQ(q.running, 7);
+    ASSERT_EQ(q.waiting, 0);
+    ASSERT_EQ(gen3_cart_pic_next(&q), 0);
+    ASSERT_EQ(q.running, 0);
+    /* nothing runs: a request waits for the pump to start it */
+    gen3_cart_pic_want(&q, 9);
+    ASSERT_EQ(gen3_cart_pic_next(&q), 9);
+}
+
+TEST(test_pic_queue_same) {
+    Gen3CartPicQueue q = {.running = 4, .waiting = 0};
+    gen3_cart_pic_want(&q, 4);
+    ASSERT_EQ(q.waiting, 0);
+    /* asking for the running one again after another was waiting: that one is stale */
+    gen3_cart_pic_want(&q, 8);
+    gen3_cart_pic_want(&q, 4);
+    ASSERT_EQ(q.waiting, 0);
+    ASSERT_EQ(q.running, 4);
+    /* species 0 is no request */
+    gen3_cart_pic_want(&q, 0);
+    ASSERT_EQ(q.waiting, 0);
+}
+
+TEST(test_pic_queue_drop) {
+    Gen3CartPicQueue q = {.running = 4, .waiting = 0};
+    gen3_cart_pic_want(&q, 5);
+    gen3_cart_pic_drop(&q);
+    ASSERT_EQ(q.waiting, 0);
+    ASSERT_EQ(q.running, 4);
+    ASSERT_EQ(gen3_cart_pic_next(&q), 0);
+}
+
 /* ---- An EZ-Flash Omega (Unbound) ---- */
 
 TEST(test_screen_ub_row) {
@@ -2019,5 +2061,8 @@ int main(void) {
     RUN(test_info_no_backup);
     RUN(test_info_unreadable);
     RUN(test_leave_text);
+    RUN(test_pic_queue_latest_wins);
+    RUN(test_pic_queue_same);
+    RUN(test_pic_queue_drop);
     TEST_EXIT();
 }

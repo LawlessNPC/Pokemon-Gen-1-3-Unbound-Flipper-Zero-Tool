@@ -207,9 +207,14 @@ static void gen3_cart_confirm_put(PokemonFap* pokemon_fap) {
 /* The Omega's Put: the new Pokemon into the free box slot, which gen3_omega_mon_put checks is free */
 static void gen3_cart_confirm_omega_put(PokemonFap* pokemon_fap) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
-    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
     Gen3CartMon m = Gen3CartMonBadArg;
 
+    /* A picture job holds the Omega: wait for it; the new Pokemon stays if it won't end */
+    if(!gen3_cart_ui_picture_wait(pokemon_fap)) {
+        gen3_cart_ui_busy_notice(pokemon_fap, PokemonSceneGen3CartOmegaPut);
+        return;
+    }
+    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
     if(o && ui->ub_new) m = gen3_omega_mon_put(o, ui->box, ui->slot, &ui->ub_edit.mon, true);
     ui->ub_new = false;
     if(m == Gen3CartMonOk) {
