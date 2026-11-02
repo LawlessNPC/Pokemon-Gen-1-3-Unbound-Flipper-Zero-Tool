@@ -725,10 +725,8 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
         return r;
     }
 
-    /* The jobs' sector buffer comes only now, so that the peak is the image alone */
-    if(!s->cart_ready) cart_setup(s);
-
-    /* The pump takes the link over. On the Normal wire the ready gate applies from now: the helper says when it is ready. */
+    /* The pump takes the link over. On the Normal wire the ready gate applies from now: the helper
+     * says when it is ready. */
     if(s->wire == MlinkWireNormal) {
         mlink_hw_set_normal_gate(s->hw, true);
         if(!GEN3_CART_MB_GATED) CART_LOG(s, "wire %s", "normal gated (helper)");
@@ -738,6 +736,10 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     s->core = Gen3CartCoreHlink;
     s->pump_on = true;
     cart_image_free(s); /* the frame callback calls the hlink now, never the sender */
+
+    /* The jobs' sector buffer comes out of the image's freed hole, so the peak is the image alone.
+     * Nothing above uses cli, cart or omega; the first command is below. */
+    if(!s->cart_ready) cart_setup(s);
 
     /* The GBA starts the helper a few seconds after the last multiboot word */
     gen3_cart_expect_boot(&s->cart);
