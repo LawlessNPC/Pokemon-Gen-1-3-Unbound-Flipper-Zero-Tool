@@ -520,13 +520,13 @@ Pokemon Unbound is a ROM hack that people play from a flash cart, so its save is
 - writes the changes back with a verified, slot-safe write: the new save goes into the save slot the game isn't loading, and the game switches to it only once it is complete, so a write cut off part way leaves the old save loading. Cartridge writes only the save file's own blocks on the card;
 - restores a backup the same way.
 
-Pictures for Unbound's newer Pokemon are still to come.
+Pictures: the species picker shows a picture for every species. The original ones (up to Deoxys) are in the app. The newer ones and the forms are read from your own Unbound file on the Omega's card the first time they are shown (while connected, and only with Unbound 2.1.1.1), turned into the same style on the Flipper, and kept in `apps_data/pokemon/gen3/unbound_pics`. The folder is safe to delete: the pictures are fetched again. No picture of a newer species is shipped, and nothing is written to the Omega's card.
 
 **Save first.** While you play, the Definitive Edition keeps the save in the cart and copies it to its card at the next normal power-on. So after playing, switch the GBA on normally once and let the Omega save, then switch it off, and only then connect. Cartridge checks this, and says so if the save hasn't reached the card yet.
 
 The checklist is [`docs/gen3/hardware-test-unbound.md`](docs/gen3/hardware-test-unbound.md).
 
-Credits: Unbound's save layout, species data, record rules and Pokemon identity solver come from [PUSE](https://github.com/Zannael/PUSE) (MIT License), through `tools/unbound_tables.py`. The Omega's SD card read and write sequences follow EZ-Flash's own [Omega Definitive Edition kernel](https://github.com/ez-flash/omega-de-kernel) (Apache License 2.0).
+Credits: Unbound's save layout, species data, record rules and Pokemon identity solver come from [PUSE](https://github.com/Zannael/PUSE) (MIT License), through `tools/unbound_tables.py`. The Omega's SD card read and write sequences follow EZ-Flash's own [Omega Definitive Edition kernel](https://github.com/ez-flash/omega-de-kernel) (Apache License 2.0). Where Unbound keeps its picture tables comes from the [Dynamic Pokemon Expansion](https://github.com/Skeli789/Dynamic-Pokemon-Expansion) (WTFPL), and the picture style is the one `tools/gen3_sprites.py` makes.
 
 ### Link Test, log and checklists
 `Link Test` checks the link without trading: the Flipper acts as the other player in the game's Cable Club Trade Center, and shows the cable, the link's state, and the GBA player's name and TID. Plug in the cable as in [Cable](#cable).

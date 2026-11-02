@@ -2,7 +2,7 @@
 
 Goal: Pokemon Cartridge connects to an EZ-Flash Omega Definitive Edition over the link cable, finds the game the Omega started last and its save on the Omega's microSD card, checks that the game file is Pokemon Unbound 2.1.1.1, backs the save up to the Flipper, lists the party and the 24 boxes, edits Pokemon, and writes the changes back to the save on the Omega's card (a verified write into the save slot the game doesn't load). A restore puts a backup back the same way.
 
-**Run order.** Do H first: it connects, makes one small edit and writes it. **If H fails, stop the test** and report it (the last `omega program` line in the log says how far the write got; see "If it fails"). Then A to G (part 1: they still apply; A needs a save pending, so do it whenever you have played), then I, J, K, L, R and M.
+**Run order.** Do H first: it connects, makes one small edit and writes it. **If H fails, stop the test** and report it (the last `omega program` line in the log says how far the write got; see "If it fails"). Then A to G (part 1: they still apply; A needs a save pending, so do it whenever you have played), then I, J, K, L, R, P and M.
 
 **Before you start.** Back up the Omega's microSD card (copy `SAVER/` to a computer) if you can. The write only touches the open save file's own blocks, but the backup costs a minute.
 
@@ -14,7 +14,7 @@ You need: Flipper with the KBEmbedded Game Link GPIO module, GBA (or GBA SP), a 
 
 - **The DE's save.** While you play, the Omega Definitive Edition keeps the save in the cart, and copies it to its microSD card the next time you switch on normally (a saving screen, or `Save sav?` if its auto-save setting is off). A START+SELECT power-on skips that, so after playing, **switch on normally once and let the Omega save, then switch off**, and only then connect. Cartridge checks this itself (A).
 - **Which game.** Cartridge reads the game the Omega started last, from `SAVER/Recently play.txt`, and its save, `SAVER/<game name>.sav`.
-- **The log** is `apps_data/pokemon/gen3_cart.log`. Its Omega lines, each only for what that Connect got to: `omega flag <word>` (`0011` while the DE has a save to copy; write down what it shows in B), `omega mount ...`, `omega recent '<game file>'`, `omega save '<save file>' size 131072`, `omega rom '<game file>' size <n> clus <n>`, `omega sha <hash> cached <0|1> match <0|1>`, `backup <name>`, `ub slots ...` and `ub trainer <name> <TID>`. Close Cartridge before copying it off (the USB CLI can't read it while Cartridge runs).
+- **The log** is `apps_data/pokemon/gen3_cart.log`. Its Omega lines, each only for what that Connect got to: `omega flag <word>` (`0011` while the DE has a save to copy; write down what it shows in B), `omega mount ...`, `omega recent '<game file>'`, `omega save '<save file>' size 131072`, `omega rom '<game file>' size <n> clus <n>`, `omega sha <hash> cached <0|1> match <0|1>`, `backup <name>`, `ub slots ...`, `ub trainer <name> <TID>`, and (P) `omega pics ok front <hex> pal <hex>` or `omega pics off <reason>`, and `job picture <species number> end <result>`. Close Cartridge before copying it off (the USB CLI can't read it while Cartridge runs).
 - **Write log lines.** `omega write changes <n> dirty <mask>` when you choose `Write`, then `omega program 1/15` ... `omega program 15/15` (each once its sector is written: the write test, then the 14 sectors of the slot the game doesn't load; the total is 16 or 17 if the edit changed the boxes in sectors 30 and 31), then `omega disarm Ok`, the new backup's lines, and `job write end Ok`. Anything but `Ok` there is a failure (see the table). A restore logs `omega restore <file>` instead of `omega write changes`, then the same `omega program`, `omega disarm` and backup lines, ending `job restore end Ok`.
 - **Backups** are in `apps_data/pokemon/gen3/backups/`, named `UNBOUND_<TID>_<date>-<time>.sav`: the whole 128 KB save as the Omega's card holds it.
 
@@ -116,6 +116,18 @@ R rolls the save back to before H, then puts the current one back (R.4): pick ea
 1. During B's `Backing up save`, and again during H's `Writing`, run `free` in the qFlipper CLI (or `ufbt cli`) and write down `Free heap size`. Under 4,000: report it.
 2. Over the whole test, write down whether Cartridge ever crashed (the Flipper restarted or showed an error screen) or froze (no answer to the buttons), and on which screen. Either: report it with the log.
 
+## P. Pictures
+
+Pictures of the original species (up to Deoxys) are in the app. The newer ones are read from your own Unbound file on the Omega's card the first time they are shown, and kept on the Flipper in `apps_data/pokemon/gen3/unbound_pics`. This only works while Cartridge is connected to the Omega and the game file is Unbound 2.1.1.1 (`Cart info`); otherwise a newer species shows `?`. Nothing is written to the Omega's card.
+
+1. Connect as in B, until the hub (headed `POKEMON UNBOUND`). `Party and boxes`, a box, a Pokemon, `Pokemon`: the letters. Choose `B`. The picker shows `BULBASAUR` with its picture at once, and `< 1/<n> >` under the name. Left and Right step through the letter's species (round the end).
+2. Back to the letters, choose `T`, and step to `TURTWIG`. It shows a box with `?` first, then its picture within about 3 seconds. Write down how long it took.
+3. Step on and back to `TURTWIG`: its picture shows at once, with no `?`.
+4. Back to the letters, choose a letter with many newer species (for example `S`), and press Right ten times quickly. Pictures fill in one by one behind you, and the Flipper keeps answering every button press at once.
+5. Back out to the letters and choose `T` again: `TURTWIG`, and the ones you saw before, show their pictures at once. Press `OK` on one: the editor carries on as before (for `Pokemon`, the species changes; in a `New Pokemon` slot, the editor opens on it).
+6. Close Cartridge and copy `gen3_cart.log` off. It has `omega pics ok front <hex> pal <hex>` once, and a `job picture <species number> end Ok` line for each newer picture you waited for. It has no `omega pics off`.
+7. M, but with the free heap taken in the picker while a picture loads (step 2 or 4).
+
 ## Results
 
 | Step | Pass / fail | What each screen showed (Flipper, GBA) |
@@ -133,7 +145,8 @@ R rolls the save back to before H, then puts the current one back (R.4): pick ea
 | K Two new Pokemon (original, newer) in the game; one withdrawn to the party | | |
 | L Box 21 edit written and correct in the game (screen said ________) | | |
 | R Restore of H.1's backup: the game loads the save from before H; R.4 puts R.1's backup (time ____) back and the game loads it | | |
-| M Free heap while backing up: ______ bytes; while writing: ______ bytes; crashes or freezes: ______ | | |
+| P Pictures: Bulbasaur at once; TURTWIG `?` then its picture in ___ s; cached ones at once; ten fast steps stayed responsive; log `omega pics ok`, no `omega pics off` | | |
+| M Free heap while backing up: ______ bytes; while writing: ______ bytes; crashes or freezes: ______; free heap in the picker while a picture loaded: ______ bytes | | |
 
 ## If it fails
 
@@ -155,3 +168,8 @@ Report the step, what the Flipper and the GBA showed, and `apps_data/pokemon/gen
 | `Written and verified, but no new backup. Back up again first.` | the write is done and checked, but the link dropped before the new backup was saved | `Back up again` if the hub shows it; if not, close Cartridge (Back on the hub), reopen it and Connect again, which makes a fresh backup, before editing again |
 | `Link lost.` during the write | the cable or the GBA's power dropped. The game still loads a whole save (the old one unless the write got to its end) | `Retry` (switch the GBA on holding START+SELECT), check the hub and the game, report the log |
 | `Writing off` in `Cart info` | the game file isn't 2.1.1.1, or no current backup | `Back up again`; for a version, see `Version: not 2.1.1.1` |
+| `omega pics off front table pointer`, `palette table pointer`, `front pointer`, `palette pointer`, `front size`, `front tag` or `palette tag` in the log, and every newer species shows `?` | your Unbound file's picture tables aren't where DPE puts them (the file's header pointers at 0x128 and 0x130 don't lead to tables that check out), so Cartridge doesn't read any picture from it | nothing to fix: the original species still show their pictures. Report `gen3_cart.log` |
+| A newer species shows `?` and stays so, with `job picture <species number> end <result>` other than `Ok` in the log | that species' entry in your file didn't check out, or the link or the card failed for that read. Nothing was kept, so the next view tries again | step away and back; if it repeats, report the species and the log line. `Link lost` or a `Refused` result: connect again |
+| A newer species shows `?` and the log has no `job picture` line for it | not connected to the Omega, or the game file isn't Unbound 2.1.1.1 (`Cart info`) | connect as in B |
+| A picture looks wrong (another Pokemon, a smear) | the converted picture kept in the cache is bad | report the species, then delete its file from `apps_data/pokemon/gen3/unbound_pics` on the Flipper's SD card (`<species number>.fxb`, or the whole folder: it is always safe) and open the species again: it is fetched again |
+| The Flipper froze or restarted while you browsed pictures | memory | report it under M with the screen and the log |

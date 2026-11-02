@@ -1,5 +1,11 @@
 # Changelog - Patch Notes
 
+## Version 3.4
+**New Features**
+- Cartridge shows a picture for every species in Pokemon Unbound's species picker. The original species use the pictures that ship with the app; newer species and forms are read from your own Unbound file on the Omega's card the first time they appear, converted on the Flipper to the same style, and kept in `apps_data/pokemon/gen3/unbound_pics` (safe to delete). Nothing is written to the Omega's card, and no picture of a newer species is shipped
+- The picture tables' place in the game file comes from the Dynamic Pokemon Expansion (github.com/Skeli789/Dynamic-Pokemon-Expansion, WTFPL); the picture style is `tools/gen3_sprites.py`'s
+- The checklist has a new part P for pictures: `docs/gen3/hardware-test-unbound.md`
+
 ## Version 3.3
 **New Features**
 - Cartridge edits Pokemon Unbound on an EZ-Flash Omega Definitive Edition and writes the changes back to the save on the Omega's microSD card: species, level, nickname, held item, moves, nature, ability, shiny, IVs and EVs of party and box Pokemon, and new Pokemon in empty box slots
