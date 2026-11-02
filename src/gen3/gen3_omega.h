@@ -4,12 +4,16 @@
 #include <stdint.h>
 #include <src/gen3/gen3_cart.h>
 #include <src/gen3/gen3_hcli.h>
+#include <src/gen3/gen3_ub_mon.h>
 #include <src/gen3/gen3_ub_save.h>
 
 /* The jobs for Pokemon Unbound on an EZ-Flash Omega Definitive Edition (multiboot-and-save.md §8):
  * after HELLO and CART_INFO found the Omega's kernel, find the game the Omega started last and its
  * save on the Omega's microSD, check the game file is Unbound 2.1.1.1, back the save up, and read
- * its party and boxes from the backup. Reads only: nothing is written to the card. Pure C, no heap;
+ * its party and boxes from the backup. Reads only: nothing is written to the card. Edits go into a
+ * working copy of the backup on the Flipper's store (GEN3_OMEGA_WORK), never into the backup; the
+ * copy is made at the end of each backup (if it can't be, the backup still succeeds, work_ok stays
+ * false and nothing can be edited). Pure C, no heap;
  * the worker-thread rules of gen3_cart.h hold (no job keeps more than 256 B of locals). */
 
 #define GEN3_OMEGA_FLAG_ADDR 0x08790000u /* the DE kernel's pending-save flag (Read_sav_info(0)) */
@@ -17,6 +21,8 @@
 #define GEN3_OMEGA_RECENT "/SAVER/Recently play.txt"
 #define GEN3_OMEGA_CACHE "omega_rom.txt" /* on the store: one line per game file checked */
 #define GEN3_OMEGA_HASH_STEP 0x100000u /* bytes of the game file one SHA256 step hashes */
+#define GEN3_OMEGA_WORK "omega_work.bin" /* the working copy; not .sav, so it is no backup */
+#define GEN3_OMEGA_CHANGED_BYTES ((6u + GEN3_UB_BOXES * GEN3_UB_BOX_SLOTS + 7u) / 8u)
 #define GEN3_OMEGA_SLOT_SAVE 0u
 #define GEN3_OMEGA_SLOT_RECENT 1u
 #define GEN3_OMEGA_SLOT_ROM 2u
@@ -49,6 +55,10 @@ typedef struct {
     Gen3UbSlots slots;
     bool has_trainer;
     Gen3UbTrainer trainer;
+    /* The working copy: a copy of the backup that edits go into */
+    bool work_ok; /* it exists and matches the backup, edits aside */
+    uint32_t dirty; /* bit k: physical sector k of the save was edited */
+    uint8_t changed[GEN3_OMEGA_CHANGED_BYTES]; /* party slot i: bit i; box b slot s: 6 + b * 30 + s */
     char line[160]; /* a cache line being built or compared */
 } Gen3Omega;
 
@@ -83,6 +93,29 @@ uint8_t gen3_omega_party_count(Gen3Omega* o);
 /* Slot (box, slot) of the backup's loaded save; box GEN3_SAVE_PARTY is the party. Ok, Empty (no
  * species there, or past the party's count), BadArg (not browsable, or no such slot), SdError. */
 Gen3CartMon gen3_omega_summary(Gen3Omega* o, uint8_t box, uint8_t slot, Gen3UbSummary* out);
+
+/* Slot (box, slot) of the working copy as a record, out->party set. Ok, Empty (no species there,
+ * or past the party's count), BadArg (not browsable, no working copy, or no such slot), SdError. */
+Gen3CartMon gen3_omega_mon_get(Gen3Omega* o, uint8_t box, uint8_t slot, Gen3UbMon* out);
+/* Writes m into the working copy: a party slot below the count (m a party record, written as
+ * given), or a box slot (m a box record). A box slot that is empty takes only a new Pokemon
+ * (new_mon); an occupied one only an edit; else Taken. An egg, in the slot or as m, is Egg. Marks
+ * the slot changed and its sectors dirty. Refused (BadArg, nothing written) unless browsable, the
+ * game file verified and the working copy there. SdError if the copy couldn't be written; it is
+ * then not trusted (work_ok false) until gen3_omega_discard rebuilds it. */
+Gen3CartMon gen3_omega_mon_put(
+    Gen3Omega* o,
+    uint8_t box,
+    uint8_t slot,
+    const Gen3UbMon* m,
+    bool new_mon);
+bool gen3_omega_mon_changed(const Gen3Omega* o, uint8_t box, uint8_t slot);
+uint16_t gen3_omega_changes(const Gen3Omega* o); /* slots changed */
+/* The working copy rebuilt from the backup: no edits. BadArg without a current backup. */
+Gen3CartResult gen3_omega_discard(Gen3Omega* o);
+/* The record new Pokemon take their OT from: the first party Pokemon that is no egg and whose OT id
+ * is the trainer's (TID | SID << 16), else the first that is no egg; false if there is none. */
+bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
 
 #ifdef GEN3_TESTING
 /* Host tests: the hash a game file must have to be verified (NULL: Unbound 2.1.1.1's) */

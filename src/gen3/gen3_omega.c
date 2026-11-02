@@ -215,6 +215,13 @@ static Gen3CartResult om_unbound_footer(Gen3Omega* o, uint32_t s, bool* yes) {
     return Gen3CartOk;
 }
 
+/* The edits made on the backup being replaced go with it */
+static void om_drop_edits(Gen3Omega* o) {
+    o->work_ok = false;
+    o->dirty = 0;
+    memset(o->changed, 0, sizeof(o->changed));
+}
+
 Gen3CartResult gen3_omega_connect(Gen3Omega* o) {
     o->connected = false;
     o->flag_read = false;
@@ -224,6 +231,7 @@ Gen3CartResult gen3_omega_connect(Gen3Omega* o) {
     o->save_path[0] = 0;
     o->hashed = o->verified = o->from_cache = false;
     o->backup_current = false;
+    om_drop_edits(o);
     om_step(o, Gen3CartStepOmegaFind, 0, OM_FIND_STEPS);
     uint8_t flag[2];
     Gen3CartResult r = om_link(o, gen3_hcli_rom_read(o->cli, GEN3_OMEGA_FLAG_ADDR, 1, flag));
@@ -340,9 +348,34 @@ static bool om_section(Gen3Omega* o, const char* name, uint8_t id) {
     return ok;
 }
 
+/* GEN3_OMEGA_WORK made from the backup, 4 KB at a time through buf; removed if it fails */
+static Gen3CartResult om_work_make(Gen3Omega* o) {
+    const Gen3Store* st = &o->store;
+    void* src = st->open(st->ctx, o->backup_name, Gen3StoreRead);
+    if(!src) return Gen3CartSdError;
+    void* dst = st->open(st->ctx, GEN3_OMEGA_WORK, Gen3StoreCreate);
+    if(!dst) {
+        st->close(st->ctx, src);
+        return Gen3CartSdError;
+    }
+    Gen3CartResult r = Gen3CartOk;
+    for(uint32_t s = 0; s < GEN3_UB_SECTORS && r == Gen3CartOk; s++) {
+        if(!st->read(st->ctx, src, s * OM_SECTOR, o->buf, OM_SECTOR)) {
+            r = Gen3CartSdError;
+        } else if(!st->write(st->ctx, dst, s * OM_SECTOR, o->buf, OM_SECTOR)) {
+            r = om_sd_fail(o);
+        }
+    }
+    st->close(st->ctx, src);
+    if(!st->close(st->ctx, dst) && r == Gen3CartOk) r = Gen3CartSdError;
+    if(r != Gen3CartOk) st->remove(st->ctx, GEN3_OMEGA_WORK);
+    return r;
+}
+
 Gen3CartResult gen3_omega_backup(Gen3Omega* o, const char* stamp) {
     if(!o->connected) return Gen3CartBadArg;
     o->backup_current = false;
+    om_drop_edits(o);
     o->has_trainer = false;
     const Gen3Store* st = &o->store;
     if(st->free_bytes(st->ctx) < GEN3_UB_SAVE_SIZE + OM_SECTOR) return Gen3CartSdFull;
@@ -397,6 +430,8 @@ Gen3CartResult gen3_omega_backup(Gen3Omega* o, const char* stamp) {
     }
     om_step(o, Gen3CartStepAnalyze, 1, 1);
     o->backup_current = true;
+    /* If the copy can't be made the backup stands, but nothing can be edited */
+    o->work_ok = om_work_make(o) == Gen3CartOk;
     return Gen3CartOk;
 }
 
@@ -411,11 +446,17 @@ uint8_t gen3_omega_party_count(Gen3Omega* o) {
     return gen3_ub_party_count(o->buf);
 }
 
+/* The file browsing reads: the working copy, so that edits show, else the backup */
+static const char* om_source(const Gen3Omega* o) {
+    return o->work_ok ? GEN3_OMEGA_WORK : o->backup_name;
+}
+
 Gen3CartMon gen3_omega_summary(Gen3Omega* o, uint8_t box, uint8_t slot, Gen3UbSummary* out) {
     if(!gen3_omega_browsable(o)) return Gen3CartMonBadArg;
+    const char* src = om_source(o);
     if(box == GEN3_SAVE_PARTY) {
         if(slot >= GEN3_UB_PARTY_MAX) return Gen3CartMonBadArg;
-        if(!om_section(o, o->backup_name, 1)) return Gen3CartMonSdError;
+        if(!om_section(o, src, 1)) return Gen3CartMonSdError;
         if(slot >= gen3_ub_party_count(o->buf)) return Gen3CartMonEmpty;
         gen3_ub_party_summary(o->buf + GEN3_UB_PARTY_OFF(slot), out);
         return out->species ? Gen3CartMonOk : Gen3CartMonEmpty;
@@ -424,7 +465,7 @@ Gen3CartMon gen3_omega_summary(Gen3Omega* o, uint8_t box, uint8_t slot, Gen3UbSu
     if(!gen3_ub_box_pieces(&o->slots, box, slot, &pc)) return Gen3CartMonBadArg;
     uint8_t rec[GEN3_UB_BOX_MON];
     const Gen3Store* st = &o->store;
-    void* f = st->open(st->ctx, o->backup_name, Gen3StoreRead);
+    void* f = st->open(st->ctx, src, Gen3StoreRead);
     if(!f) return Gen3CartMonSdError;
     bool ok = true;
     uint32_t at = 0;
@@ -436,4 +477,160 @@ Gen3CartMon gen3_omega_summary(Gen3Omega* o, uint8_t box, uint8_t slot, Gen3UbSu
     if(!ok) return Gen3CartMonSdError;
     gen3_ub_box_summary(rec, gen3_ub_growth, NULL, out);
     return out->species ? Gen3CartMonOk : Gen3CartMonEmpty;
+}
+
+/* ---- Editing the working copy ---- */
+
+#define OM_PARTY_IV 72u /* the IV word, whose bit 30 is the egg flag */
+#define OM_BOX_IV 54u
+
+static bool om_egg_bit(const uint8_t* iv_word) {
+    return (iv_word[3] >> 6) & 1u;
+}
+
+/* Box record (box, slot) of the file name into rec; false if no such slot or unreadable */
+static bool om_box_rec(Gen3Omega* o, const char* name, const Gen3UbPieces* pc, uint8_t* rec, bool write) {
+    const Gen3Store* st = &o->store;
+    void* f = st->open(st->ctx, name, write ? Gen3StoreUpdate : Gen3StoreRead);
+    if(!f) return false;
+    bool ok = true;
+    uint32_t at = 0;
+    for(uint8_t k = 0; k < pc->n && ok; k++) {
+        const uint32_t off = pc->sector[k] * OM_SECTOR + pc->off[k];
+        ok = write ? st->write(st->ctx, f, off, rec + at, pc->len[k])
+                   : st->read(st->ctx, f, off, rec + at, pc->len[k]);
+        at += pc->len[k];
+    }
+    if(!st->close(st->ctx, f)) ok = false;
+    return ok;
+}
+
+static bool om_editable(const Gen3Omega* o) {
+    return gen3_omega_browsable(o) && o->work_ok;
+}
+
+Gen3CartMon gen3_omega_mon_get(Gen3Omega* o, uint8_t box, uint8_t slot, Gen3UbMon* out) {
+    if(!om_editable(o)) return Gen3CartMonBadArg;
+    memset(out, 0, sizeof(*out));
+    if(box == GEN3_SAVE_PARTY) {
+        if(slot >= GEN3_UB_PARTY_MAX) return Gen3CartMonBadArg;
+        if(!om_section(o, GEN3_OMEGA_WORK, 1)) return Gen3CartMonSdError;
+        if(slot >= gen3_ub_party_count(o->buf)) return Gen3CartMonEmpty;
+        out->party = true;
+        memcpy(out->raw, o->buf + GEN3_UB_PARTY_OFF(slot), GEN3_UB_PARTY_MON);
+    } else {
+        Gen3UbPieces pc;
+        if(!gen3_ub_box_pieces(&o->slots, box, slot, &pc)) return Gen3CartMonBadArg;
+        if(!om_box_rec(o, GEN3_OMEGA_WORK, &pc, out->raw, false)) return Gen3CartMonSdError;
+    }
+    return gen3_ub_mon_species(out) ? Gen3CartMonOk : Gen3CartMonEmpty;
+}
+
+static uint32_t om_bit(uint8_t box, uint8_t slot) {
+    return box == GEN3_SAVE_PARTY ? slot : 6u + (uint32_t)box * GEN3_UB_BOX_SLOTS + slot;
+}
+
+static void om_mark(Gen3Omega* o, uint8_t box, uint8_t slot, uint32_t sectors) {
+    const uint32_t b = om_bit(box, slot);
+    o->changed[b / 8u] = (uint8_t)(o->changed[b / 8u] | 1u << (b % 8u));
+    o->dirty |= sectors;
+}
+
+Gen3CartMon gen3_omega_mon_put(
+    Gen3Omega* o,
+    uint8_t box,
+    uint8_t slot,
+    const Gen3UbMon* m,
+    bool new_mon) {
+    if(!om_editable(o) || !o->verified) return Gen3CartMonBadArg;
+    const Gen3Store* st = &o->store;
+    if(box == GEN3_SAVE_PARTY) {
+        if(!m->party || slot >= GEN3_UB_PARTY_MAX) return Gen3CartMonBadArg;
+        if(!om_section(o, GEN3_OMEGA_WORK, 1)) return Gen3CartMonSdError;
+        if(slot >= gen3_ub_party_count(o->buf)) return Gen3CartMonBadArg;
+        if(om_egg_bit(o->buf + GEN3_UB_PARTY_OFF(slot) + OM_PARTY_IV) ||
+           om_egg_bit(m->raw + OM_PARTY_IV)) {
+            return Gen3CartMonEgg;
+        }
+        void* f = st->open(st->ctx, GEN3_OMEGA_WORK, Gen3StoreUpdate);
+        bool ok = f != NULL;
+        if(ok) {
+            ok = st->write(
+                st->ctx,
+                f,
+                o->slots.phys[1] * OM_SECTOR + GEN3_UB_PARTY_OFF(slot),
+                m->raw,
+                GEN3_UB_PARTY_MON);
+            if(!st->close(st->ctx, f)) ok = false;
+        }
+        if(!ok) {
+            o->work_ok = false;
+            return Gen3CartMonSdError;
+        }
+        om_mark(o, box, slot, 1u << o->slots.phys[1]);
+        return Gen3CartMonOk;
+    }
+    Gen3UbPieces pc;
+    if(m->party || !gen3_ub_box_pieces(&o->slots, box, slot, &pc)) return Gen3CartMonBadArg;
+    uint8_t cur[GEN3_UB_BOX_MON];
+    if(!om_box_rec(o, GEN3_OMEGA_WORK, &pc, cur, false)) return Gen3CartMonSdError;
+    const bool empty = (cur[28] | cur[29]) == 0;
+    if(empty != new_mon) return Gen3CartMonTaken;
+    if(om_egg_bit(cur + OM_BOX_IV) || om_egg_bit(m->raw + OM_BOX_IV)) return Gen3CartMonEgg;
+    uint8_t rec[GEN3_UB_BOX_MON];
+    memcpy(rec, m->raw, sizeof(rec));
+    if(!om_box_rec(o, GEN3_OMEGA_WORK, &pc, rec, true)) {
+        o->work_ok = false;
+        return Gen3CartMonSdError;
+    }
+    uint32_t sectors = 0;
+    for(uint8_t k = 0; k < pc.n; k++) sectors |= 1u << pc.sector[k];
+    om_mark(o, box, slot, sectors);
+    return Gen3CartMonOk;
+}
+
+bool gen3_omega_mon_changed(const Gen3Omega* o, uint8_t box, uint8_t slot) {
+    if(box == GEN3_SAVE_PARTY ? slot >= GEN3_UB_PARTY_MAX
+                              : box >= GEN3_UB_BOXES || slot >= GEN3_UB_BOX_SLOTS) {
+        return false;
+    }
+    const uint32_t b = om_bit(box, slot);
+    return (o->changed[b / 8u] >> (b % 8u)) & 1u;
+}
+
+uint16_t gen3_omega_changes(const Gen3Omega* o) {
+    uint16_t n = 0;
+    for(uint32_t i = 0; i < sizeof(o->changed); i++) {
+        for(uint8_t v = o->changed[i]; v; v &= (uint8_t)(v - 1u)) n++;
+    }
+    return n;
+}
+
+Gen3CartResult gen3_omega_discard(Gen3Omega* o) {
+    if(!o->backup_current) return Gen3CartBadArg;
+    om_drop_edits(o);
+    const Gen3CartResult r = om_work_make(o);
+    o->work_ok = r == Gen3CartOk;
+    return r;
+}
+
+bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out) {
+    if(!gen3_omega_browsable(o) || !om_section(o, om_source(o), 1)) return false;
+    const uint8_t n = gen3_ub_party_count(o->buf);
+    const uint32_t trainer = (uint32_t)o->trainer.tid | (uint32_t)o->trainer.sid << 16;
+    int first = -1, pick = -1;
+    for(uint8_t i = 0; i < n && pick < 0; i++) {
+        const uint8_t* rec = o->buf + GEN3_UB_PARTY_OFF(i);
+        if(om_egg_bit(rec + OM_PARTY_IV)) continue;
+        if(first < 0) first = i;
+        const uint32_t otid = (uint32_t)rec[4] | (uint32_t)rec[5] << 8 | (uint32_t)rec[6] << 16 |
+                              (uint32_t)rec[7] << 24;
+        if(o->has_trainer && otid == trainer) pick = i;
+    }
+    if(pick < 0) pick = first;
+    if(pick < 0) return false;
+    memset(out, 0, sizeof(*out));
+    out->party = true;
+    memcpy(out->raw, o->buf + GEN3_UB_PARTY_OFF(pick), GEN3_UB_PARTY_MON);
+    return true;
 }

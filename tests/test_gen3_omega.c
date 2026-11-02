@@ -15,6 +15,7 @@
 #include <src/gen3/gen3_rules.h>
 #include <src/gen3/gen3_save.h>
 #include <src/gen3/gen3_text.h>
+#include <src/gen3/gen3_ub_mon.h>
 
 /* The Omega jobs (gen3_omega.h) against the helper's real core on the fake GBA, with an EZ-Flash
  * Omega's card (fake_fat.h) and a RAM store. The default card: /ROMS/Pokemon - Unbound.gba
@@ -433,6 +434,260 @@ TEST(test_omega_summary) {
     ASSERT_EQ(gen3_omega_summary(&om, 3, 5, &m), Gen3CartMonSdError);
 }
 
+/* ---- The working copy and edits ---- */
+
+static bool backed_up(void) {
+    return setup() && gen3_omega_connect(&om) == Gen3CartOk &&
+           gen3_omega_backup(&om, STAMP) == Gen3CartOk;
+}
+
+static uint32_t bits(uint32_t v) {
+    uint32_t n = 0;
+    for(; v; v &= v - 1u) n++;
+    return n;
+}
+
+TEST(test_omega_work_copy) {
+    ASSERT_TRUE(backed_up());
+    uint32_t size = 0;
+    const uint8_t* w = fake_store_file(&store, GEN3_OMEGA_WORK, &size);
+    ASSERT_TRUE(w != NULL);
+    ASSERT_EQ(size, FAKE_UB_LEN);
+    ASSERT_MEM_EQ(w, save_img, FAKE_UB_LEN);
+    ASSERT_TRUE(om.work_ok);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_EQ(om.dirty, 0);
+    ASSERT_TRUE(!gen3_omega_mon_changed(&om, 3, 5));
+}
+
+TEST(test_omega_work_copy_fails) {
+    ASSERT_TRUE(setup());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    /* the backup's 32 writes succeed, the working copy's first does not */
+    fake_store_fail_write_after(&store, 32);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    ASSERT_TRUE(gen3_omega_browsable(&om));
+    ASSERT_TRUE(!om.work_ok);
+    ASSERT_TRUE(absent(GEN3_OMEGA_WORK));
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &m), Gen3CartMonBadArg);
+}
+
+TEST(test_omega_put_box) {
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &m), Gen3CartMonOk);
+    ASSERT_TRUE(!m.party);
+    ASSERT_EQ(gen3_ub_mon_species(&m), 1265);
+    gen3_ub_mon_set_friendship(&m, 77);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &m, false), Gen3CartMonOk);
+    Gen3UbMon back;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &back), Gen3CartMonOk);
+    ASSERT_MEM_EQ(back.raw, m.raw, 58);
+    ASSERT_EQ(gen3_ub_mon_friendship(&back), 77);
+    ASSERT_TRUE(gen3_omega_mon_changed(&om, 3, 5));
+    ASSERT_TRUE(!gen3_omega_mon_changed(&om, 3, 4));
+    ASSERT_TRUE(!gen3_omega_mon_changed(&om, GEN3_SAVE_PARTY, 5));
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+    Gen3UbPieces pc;
+    ASSERT_TRUE(gen3_ub_box_pieces(&om.slots, 3, 5, &pc));
+    uint32_t want = 0;
+    for(uint8_t k = 0; k < pc.n; k++) want |= 1u << pc.sector[k];
+    ASSERT_EQ(om.dirty, want);
+    /* the backup is unchanged, and the working copy differs only in the record */
+    uint32_t size = 0;
+    const uint8_t* b = fake_store_file(&store, BACKUP, &size);
+    ASSERT_MEM_EQ(b, save_img, FAKE_UB_LEN);
+    const uint8_t* w = fake_store_file(&store, GEN3_OMEGA_WORK, &size);
+    uint32_t diff = 0;
+    for(uint32_t i = 0; i < FAKE_UB_LEN; i++) diff += w[i] != save_img[i];
+    ASSERT_EQ(diff, 1);
+    /* the summary shows the working copy */
+    Gen3UbSummary sm;
+    ASSERT_EQ(gen3_omega_summary(&om, 3, 5, &sm), Gen3CartMonOk);
+    ASSERT_EQ(sm.species, 1265);
+}
+
+TEST(test_omega_put_box_straddle) {
+    ASSERT_TRUE(backed_up());
+    uint8_t box = 0, slot = 0;
+    Gen3UbPieces pc;
+    bool found = false;
+    for(box = 0; box < GEN3_UB_BOXES && !found; box++) {
+        for(slot = 0; slot < GEN3_UB_BOX_SLOTS && !found; slot++) {
+            found = gen3_ub_box_pieces(&om.slots, box, slot, &pc) && pc.n == 2;
+        }
+    }
+    ASSERT_TRUE(found);
+    box--;
+    slot--;
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, box, slot, &m), Gen3CartMonEmpty);
+    ASSERT_EQ(gen3_omega_owner(&om, &m), true);
+    Gen3UbMon n;
+    ASSERT_TRUE(gen3_ub_new_box_mon(&n, 1, 5, &m));
+    ASSERT_EQ(gen3_omega_mon_put(&om, box, slot, &n, true), Gen3CartMonOk);
+    ASSERT_EQ(bits(om.dirty), 2);
+    ASSERT_EQ(om.dirty, (1u << pc.sector[0]) | (1u << pc.sector[1]));
+    Gen3UbMon back;
+    ASSERT_EQ(gen3_omega_mon_get(&om, box, slot, &back), Gen3CartMonOk);
+    ASSERT_MEM_EQ(back.raw, n.raw, 58);
+    ASSERT_TRUE(gen3_omega_mon_changed(&om, box, slot));
+}
+
+TEST(test_omega_put_party) {
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, GEN3_SAVE_PARTY, 1, &m), Gen3CartMonOk);
+    ASSERT_TRUE(m.party);
+    ASSERT_EQ(gen3_ub_mon_species(&m), 1000);
+    gen3_ub_mon_set_friendship(&m, 9);
+    ASSERT_EQ(gen3_omega_mon_put(&om, GEN3_SAVE_PARTY, 1, &m, false), Gen3CartMonOk);
+    Gen3UbMon back;
+    ASSERT_EQ(gen3_omega_mon_get(&om, GEN3_SAVE_PARTY, 1, &back), Gen3CartMonOk);
+    ASSERT_MEM_EQ(back.raw, m.raw, 100);
+    ASSERT_TRUE(gen3_omega_mon_changed(&om, GEN3_SAVE_PARTY, 1));
+    ASSERT_TRUE(!gen3_omega_mon_changed(&om, GEN3_SAVE_PARTY, 0));
+    ASSERT_EQ(om.dirty, 1u << om.slots.phys[1]);
+    /* a box record into a party slot, and a party record into a box slot */
+    Gen3UbMon bx;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &bx), Gen3CartMonOk);
+    ASSERT_EQ(gen3_omega_mon_put(&om, GEN3_SAVE_PARTY, 0, &bx, false), Gen3CartMonBadArg);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &m, false), Gen3CartMonBadArg);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 24, 0, &bx, false), Gen3CartMonBadArg);
+}
+
+TEST(test_omega_put_new_and_taken) {
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon owner, occ, n;
+    ASSERT_TRUE(gen3_omega_owner(&om, &owner));
+    ASSERT_TRUE(gen3_ub_new_box_mon(&n, 1, 5, &owner));
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 6, &n, true), Gen3CartMonOk);
+    ASSERT_TRUE(gen3_omega_mon_changed(&om, 3, 6));
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 6, &n, true), Gen3CartMonTaken);
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &occ), Gen3CartMonOk);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &n, true), Gen3CartMonTaken);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 7, &n, false), Gen3CartMonTaken);
+    ASSERT_TRUE(!gen3_omega_mon_changed(&om, 3, 7));
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+    ASSERT_EQ(gen3_omega_mon_put(&om, GEN3_SAVE_PARTY, 2, &owner, false), Gen3CartMonBadArg);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 30, &n, true), Gen3CartMonBadArg);
+}
+
+TEST(test_omega_put_refused_unverified) {
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &m), Gen3CartMonOk);
+    gen3_ub_mon_set_friendship(&m, 77);
+    om.verified = false;
+    const uint32_t writes = store.writes;
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &m, false), Gen3CartMonBadArg);
+    ASSERT_EQ(store.writes, writes);
+    ASSERT_EQ(om.dirty, 0);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+}
+
+TEST(test_omega_put_egg) {
+    ASSERT_TRUE(setup());
+    uint8_t nick[10], rec[100];
+    gen3_text_encode("EGG", nick, 10, 10);
+    fake_ub_party_rec(rec, 1, 5, nick, 1u << 30);
+    fake_ub_put_party(save_img, 0, 0, rec);
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    Gen3UbMon m;
+    /* a slot that holds an egg */
+    ASSERT_EQ(gen3_omega_mon_get(&om, GEN3_SAVE_PARTY, 0, &m), Gen3CartMonOk);
+    ASSERT_EQ(gen3_omega_mon_put(&om, GEN3_SAVE_PARTY, 0, &m, false), Gen3CartMonEgg);
+    /* a record with the egg bit, into a normal slot */
+    ASSERT_EQ(gen3_omega_mon_get(&om, GEN3_SAVE_PARTY, 1, &m), Gen3CartMonOk);
+    m.raw[75] |= 0x40;
+    ASSERT_EQ(gen3_omega_mon_put(&om, GEN3_SAVE_PARTY, 1, &m, false), Gen3CartMonEgg);
+    Gen3UbMon b;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &b), Gen3CartMonOk);
+    b.raw[57] |= 0x40;
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &b, false), Gen3CartMonEgg);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 6, &b, true), Gen3CartMonEgg);
+    ASSERT_EQ(om.dirty, 0);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    uint32_t size = 0;
+    ASSERT_MEM_EQ(fake_store_file(&store, GEN3_OMEGA_WORK, &size), save_img, FAKE_UB_LEN);
+}
+
+TEST(test_omega_owner) {
+    ASSERT_TRUE(setup());
+    uint8_t nick[10], rec[100];
+    gen3_text_encode("X", nick, 10, 10);
+    fake_ub_party_rec(rec, 1, 5, nick, 0);
+    rec[4] = 1; /* another OT */
+    fake_ub_put_party(save_img, 0, 0, rec);
+    fake_ub_party_rec(rec, 1000, 5, nick, 0);
+    const uint32_t id = 12345u | 54321u << 16;
+    for(uint32_t i = 0; i < 4; i++) rec[4 + i] = (uint8_t)(id >> (8 * i));
+    fake_ub_put_party(save_img, 0, 1, rec);
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    Gen3UbMon o;
+    ASSERT_TRUE(gen3_omega_owner(&om, &o));
+    ASSERT_TRUE(o.party);
+    ASSERT_EQ(gen3_ub_mon_species(&o), 1000);
+    /* no match: slot 0 */
+    fake_ub_party_rec(rec, 1000, 5, nick, 0);
+    rec[4] = 2;
+    fake_ub_put_party(save_img, 0, 1, rec);
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    ASSERT_TRUE(gen3_omega_owner(&om, &o));
+    ASSERT_EQ(gen3_ub_mon_species(&o), 1);
+    /* eggs are skipped */
+    fake_ub_party_rec(rec, 1, 5, nick, 1u << 30);
+    fake_ub_put_party(save_img, 0, 0, rec);
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    ASSERT_TRUE(gen3_omega_owner(&om, &o));
+    ASSERT_EQ(gen3_ub_mon_species(&o), 1000);
+    fake_ub_party_rec(rec, 1000, 5, nick, 1u << 30);
+    fake_ub_put_party(save_img, 0, 1, rec);
+    ASSERT_TRUE(default_bench());
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_backup(&om, STAMP), Gen3CartOk);
+    ASSERT_TRUE(!gen3_omega_owner(&om, &o));
+}
+
+TEST(test_omega_discard) {
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &m), Gen3CartMonOk);
+    gen3_ub_mon_set_friendship(&m, 77);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &m, false), Gen3CartMonOk);
+    ASSERT_EQ(gen3_omega_changes(&om), 1);
+    ASSERT_EQ(gen3_omega_discard(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_EQ(om.dirty, 0);
+    ASSERT_TRUE(om.work_ok);
+    ASSERT_TRUE(!gen3_omega_mon_changed(&om, 3, 5));
+    uint32_t size = 0;
+    const uint8_t* w = fake_store_file(&store, GEN3_OMEGA_WORK, &size);
+    ASSERT_EQ(size, FAKE_UB_LEN);
+    ASSERT_MEM_EQ(w, save_img, FAKE_UB_LEN);
+}
+
+TEST(test_omega_edits_dropped_on_reconnect) {
+    ASSERT_TRUE(backed_up());
+    Gen3UbMon m;
+    ASSERT_EQ(gen3_omega_mon_get(&om, 3, 5, &m), Gen3CartMonOk);
+    ASSERT_EQ(gen3_omega_mon_put(&om, 3, 5, &m, false), Gen3CartMonOk);
+    ASSERT_TRUE(om.dirty != 0);
+    ASSERT_EQ(gen3_omega_connect(&om), Gen3CartOk);
+    ASSERT_EQ(om.dirty, 0);
+    ASSERT_EQ(gen3_omega_changes(&om), 0);
+    ASSERT_TRUE(!om.work_ok);
+}
+
 int main(void) {
     if(!ub_bulk_file_open()) return 1;
     rom = malloc(ROM_LEN);
@@ -459,6 +714,17 @@ int main(void) {
     RUN(test_omega_backup_link_lost);
     RUN(test_omega_backup_cancel);
     RUN(test_omega_summary);
+    RUN(test_omega_work_copy);
+    RUN(test_omega_work_copy_fails);
+    RUN(test_omega_put_box);
+    RUN(test_omega_put_box_straddle);
+    RUN(test_omega_put_party);
+    RUN(test_omega_put_new_and_taken);
+    RUN(test_omega_put_refused_unverified);
+    RUN(test_omega_put_egg);
+    RUN(test_omega_owner);
+    RUN(test_omega_discard);
+    RUN(test_omega_edits_dropped_on_reconnect);
     fake_fat_free(&card);
     free(rom);
     TEST_EXIT();
