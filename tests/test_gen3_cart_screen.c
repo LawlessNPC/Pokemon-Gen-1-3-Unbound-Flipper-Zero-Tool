@@ -101,7 +101,7 @@ TEST(test_new_trainer) {
                            job == Gen3CartJobRestore;
         ASSERT_EQ(gen3_cart_screen_new_trainer(job, Gen3CartOk), takes);
         /* Anything else leaves no new backup, or none at all: the trainer stays */
-        for(int r = Gen3CartOk + 1; r <= Gen3CartLinkBusy; r++) {
+        for(int r = Gen3CartOk + 1; r <= Gen3CartNoMemory; r++) {
             ASSERT_FALSE(gen3_cart_screen_new_trainer(job, (Gen3CartResult)r));
         }
     }
@@ -523,7 +523,7 @@ TEST(test_result_retry) {
     Gen3CartScreenResult r;
 
     /* Connect: every failure goes back to the instructions */
-    for(int res = Gen3CartLinkLost; res <= Gen3CartLinkBusy; res++) {
+    for(int res = Gen3CartLinkLost; res <= Gen3CartNoMemory; res++) {
         gen3_cart_screen_result(
             Gen3CartJobConnect, Gen3CartStepMbWait, (Gen3CartResult)res, false, true, &r);
         ASSERT_EQ(r.retry, Gen3CartRetryConnect);
@@ -690,7 +690,7 @@ TEST(test_result_finished) {
 
 TEST(test_result_texts_fit) {
     for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
-        for(int res = Gen3CartOk; res <= Gen3CartLinkBusy; res++) {
+        for(int res = Gen3CartOk; res <= Gen3CartNoMemory; res++) {
             for(int step = Gen3CartStepNone; step <= Gen3CartStepRomVerify; step++) {
                 for(int flags = 0; flags < 4; flags++) {
                     Gen3CartScreenResult r;
@@ -1758,7 +1758,7 @@ TEST(test_screen_omega_result) {
 
     /* Every job's every result fits */
     for(size_t j = 0; j < sizeof(all_jobs) / sizeof(all_jobs[0]); j++) {
-        for(int r = Gen3CartOk; r <= Gen3CartOmegaSaveFirst; r++) {
+        for(int r = Gen3CartOk; r <= Gen3CartNoMemory; r++) {
             gen3_cart_screen_omega_result(all_jobs[j], (Gen3CartResult)r, &res);
             ASSERT_TRUE(fits(res.header, 1, GEN3_CART_SCREEN_TITLE_LEN));
             ASSERT_TRUE(fits(res.text, 3, GEN3_CART_SCREEN_LINE_LEN));

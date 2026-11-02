@@ -91,6 +91,7 @@ struct Gen3CartSession {
     uint8_t* buf; /* the jobs' sector buffer: GEN3_CART_BUF_SIZE bytes, kept once set up */
     uint8_t* img; /* the helper image: only from its load until the multiboot send has ended */
     Gen3CartStep log_step; /* the step the log last named */
+    uint32_t log_part; /* its eighth the log last named */
     char stamp[16]; /* YYYYMMDD-HHMMSS */
     Gen3Hcli cli;
     Gen3Cart cart;
@@ -158,6 +159,7 @@ static void cart_unlock(Gen3CartSession* s) {
 
 static void cart_log_put(Gen3CartSession* s, int len);
 
+/* One log line: "%08lu " with the tick, the text, a newline. At least one argument after fmt. */
 #define CART_LOG(s, fmt, ...)               \
     cart_log_put(                           \
         (s),                                \
@@ -172,8 +174,10 @@ static void cart_progress(void* ctx, Gen3CartStep step, uint32_t done, uint32_t 
     Gen3CartSession* s = ctx;
     /* One line when the step changes and every 8th part of a long one, with the memory left: a
      * freeze's log shows where it stopped */
-    if(step != s->log_step || (total >= 16u && done && done % 8u == 0)) {
+    const uint32_t part = total ? (uint32_t)((uint64_t)done * 8u / total) : 0;
+    if(step != s->log_step || part != s->log_part) {
         s->log_step = step;
+        s->log_part = part;
         CART_LOG(
             s,
             "step %s %lu/%lu heap %lu block %lu",
@@ -292,8 +296,6 @@ static void cart_log_put(Gen3CartSession* s, int len) {
         s->log_open = false;
     }
 }
-
-/* One log line: "%08lu " with the tick, the text, a newline. At least one argument after fmt. */
 
 /* After a connect that ran to its end: the cart as the helper found it */
 static void cart_log_cart(Gen3CartSession* s) {
@@ -425,7 +427,7 @@ static void cart_driver_stop(Gen3CartSession* s) {
     cart_unlock(s);
 }
 
-/* The first Connect: the jobs' sector buffer, kept to the end; then the client and the jobs'
+/* The first Connect, once its helper is sent: the jobs' sector buffer, kept to the end; then the client and the jobs'
  * state, which later Connects keep. The helper image has a buffer of its own while it is sent. */
 static void cart_setup(Gen3CartSession* s) {
     s->buf = malloc(GEN3_CART_BUF_SIZE);
@@ -461,14 +463,13 @@ static Gen3CartResult cart_helper_load(Gen3CartSession* s, uint32_t* len) {
     bool ok =
         storage_file_open(f, APP_ASSETS_PATH(GEN3_HELPER_ASSET), FSAM_READ, FSOM_OPEN_EXISTING);
     const uint64_t size = ok ? storage_file_size(f) : 0;
-    if(ok && !s->cart_ready) cart_setup(s);
-    ok = ok && size <= GEN3_MB_MAX_LEN;
+    ok = ok && size >= GEN3_MB_MIN_LEN && size <= GEN3_MB_MAX_LEN;
     bool mem = true;
     if(ok) {
         const size_t block = memmgr_heap_get_max_free_block();
         CART_LOG(
             s,
-            "mb image heap %lu block %lu",
+            "helper heap %lu block %lu",
             (unsigned long)memmgr_get_free_heap(),
             (unsigned long)block);
         mem = block >= (size_t)size + GEN3_CART_IMG_MARGIN;
@@ -724,8 +725,10 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
         return r;
     }
 
-    /* The pump takes the link over; the buffer is the jobs' sector buffer from here on. On the
-     * Normal wire the ready gate applies from now: the helper says when it is ready. */
+    /* The jobs' sector buffer comes only now, so that the peak is the image alone */
+    if(!s->cart_ready) cart_setup(s);
+
+    /* The pump takes the link over. On the Normal wire the ready gate applies from now: the helper says when it is ready. */
     if(s->wire == MlinkWireNormal) {
         mlink_hw_set_normal_gate(s->hw, true);
         if(!GEN3_CART_MB_GATED) CART_LOG(s, "wire %s", "normal gated (helper)");
