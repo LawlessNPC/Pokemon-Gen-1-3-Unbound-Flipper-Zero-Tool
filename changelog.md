@@ -2,7 +2,8 @@
 
 ## Version 3.4
 **New Features**
-- Cartridge shows a picture for every species in Pokemon Unbound's species picker. The original species use the pictures that ship with the app; newer species and forms are read from your own Unbound file on the Omega's card the first time they appear, converted on the Flipper to the same style, and kept in `apps_data/pokemon/gen3/unbound_pics` (safe to delete). Nothing is written to the Omega's card, and no picture of a newer species is shipped
+- Cartridge shows each species' picture in Pokemon Unbound's species picker. The original species use the pictures that ship with the app; newer species and forms are fetched from your own Unbound file on the Omega's card the first time they appear, while Cartridge is connected (else they show `?`), converted on the Flipper to the same style, and kept in `apps_data/pokemon/gen3/unbound_pics` (safe to delete). Nothing is written to the Omega's card, and no picture of a newer species is shipped
+- The species picker no longer offers `BAD EGG`, `EGG`, `MISSINGNO?` or the `?` placeholders, which are not species, and the editor refuses them. Names PUSE's data had lost a character of are spelt out: `FLABEBE`, `NIDORAN F` and `NIDORAN M`, `MR. MIME`, `MIME JR.`, `MR. RIME`, `UNOWN !`
 - The picture tables' place in the game file comes from the Dynamic Pokemon Expansion (github.com/Skeli789/Dynamic-Pokemon-Expansion, WTFPL); the picture style is `tools/gen3_sprites.py`'s
 - The checklist has a new part P for pictures: `docs/gen3/hardware-test-unbound.md`
 
