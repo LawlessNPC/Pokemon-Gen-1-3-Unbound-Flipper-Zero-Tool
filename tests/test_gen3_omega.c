@@ -945,8 +945,12 @@ TEST(test_omega_restore_ok) {
     Gen3UbMon bx;
     ASSERT_TRUE(edit_box3(77, &bx));
     ASSERT_TRUE(bx.raw[0] != 0 || rec_first[0] != 0);
+    /* and a record in shared sector 31, so that the restore has something to undo there */
+    Gen3UbMon nw;
+    ASSERT_TRUE(put_new(21, 0, &nw));
     ASSERT_EQ(gen3_omega_write(&om, STAMP2), Gen3CartOk);
     card_save(card_after);
+    ASSERT_TRUE(memcmp(card_after + 30u * SEC, card_before + 30u * SEC, 2u * SEC) != 0);
     Gen3UbSlots s;
     image_slots(card_after, &s);
     ASSERT_EQ(s.counter[s.loaded], 21);
