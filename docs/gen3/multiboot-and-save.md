@@ -1185,7 +1185,7 @@ the word after the false `SOF`.
 | 0x02 | `CART_INFO` | — | 96 words cart header; flags (logo == own header, `0x96` ok, complement ok); ROM size (2 words, §3.7); save-library string kind and offset | scans again each time, and ends any arming: the cart may not be the one the arming checked |
 | 0x03 | `SAVE_PROBE` | — | flash ID; class (0 = 128 KB MX-style, 1 = 64 KB, 2 = SRAM-like, 3 = none/unknown); `pre0, pre1`, ID bytes; SRAM-probe result | runs §3.3 once and caches the result; later calls return the cache |
 | 0x04 | `ARM_WRITE` | magic `0x5752`, expected flash ID, target slot T, mode, active counter N (2 words) | status | First ends any arming and clears `erased_ok` (below), whatever the outcome. A wrong magic, T > 1 or mode > 1 is `BAD_ARG`; an expected ID other than the probed one is `REFUSED`. H re-reads the slots. Which slot the game loads is §5.5 exactly as the game runs it, with the game's own section sizes (§5.4) from the cart header's code (`AXV`/`AXP` Ruby/Sapphire, `BPR`/`BPG` FireRed/LeafGreen). Mode 0 (a write): the game must load slot 1−T, and slot 1−T must also be a clean save: 14 sectors with valid signature, full-length checksum (§5.3, so the bytes past each section are zero), ids 0–13 once each, one counter N, N % 2 = 1−T. Mode 1 (a restore onto an empty or corrupt save): the game must load neither slot, and neither may be a clean save. Otherwise `REFUSED`. A slot the game takes is never written, whatever its padding. Arms writes for the 14 sectors of slot T only |
-| 0x05 | `DISARM` | — | status | also automatic once all 14 sectors of slot T are completed (below), on any flash error, `HELLO`, `CART_INFO`, and every `ARM_WRITE` |
+| 0x05 | `DISARM` | — | status | also automatic once all 14 sectors of slot T are completed (below), on any flash error, `HELLO`, `CART_INFO`, and every `ARM_WRITE`. Ends the Omega's `OMEGA_ARM` too (§8.3), and so does each of these |
 | 0x10 | `READ_SECTOR` | sector 0..31 | 2048 words | |
 | 0x11 | `READ_FOOTERS` | — | 32 × 8 words: bytes 0xFF4..0xFFF (6 words), full-length checksum (1 word), 0 | ≈ 260 transfers; enough for §5.5 except the exact-size check |
 | 0x12 | `SECTOR_CRC32` | sector | 2 words | read-back verify without re-reading over the link |
@@ -1602,10 +1602,11 @@ gets the stored response again and is not run twice.
   a block. 1 MiB a step keeps each command's BUSY time well inside the Flipper's budget.
 
 - **OMEGA_ARM** first ends any arming. A wrong magic is BAD_ARG. It is REFUSED (`HP_REFUSE_OMEGA`)
-  unless the card is mounted and slot 0 is open with exactly that size and first cluster: the
-  Flipper names the one file that may be written, and the helper checks it is the file it has open.
-  `omega_armed` is separate from ARM_WRITE's `armed`. HELLO, CART_INFO, OMEGA_MOUNT and an OMEGA_OPEN
-  of slot 0 end it (an open of another slot doesn't).
+  unless the card is mounted and slot 0 is open with exactly that size and first cluster, and that
+  size is a save's, 131072 bytes: the Flipper names the one file that may be written, and the helper
+  checks it is the file it has open. `omega_armed` is separate from ARM_WRITE's `armed`, but
+  DISARM ends both. HELLO, CART_INFO, DISARM, OMEGA_MOUNT and an OMEGA_OPEN of slot 0 end it (an
+  open of another slot doesn't), and so does anything else that ends ARM_WRITE's arming (§6.3).
 - **OMEGA_WRITE_SECTOR** is NOT_ARMED unless armed, BAD_ARG for a sector over 31, and UNSUPPORTED
   with the reader's fail code for a card or chain failure (1: the card didn't answer a write or a
   read, or the chain is broken; nothing is written for a broken chain). Otherwise it answers the

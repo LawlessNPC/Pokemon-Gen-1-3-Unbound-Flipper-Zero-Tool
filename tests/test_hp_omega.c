@@ -550,8 +550,8 @@ TEST(test_cmd_write_unarmed) {
     open_save();
     ASSERT_EQ(write_sector(4, 5, img), HP_ST_NOT_ARMED);
     ASSERT_EQ(gba.omega_writes, 0);
-    /* armed, then each of HELLO, CART_INFO, MOUNT and OPEN of slot 0 disarms */
-    for(uint32_t how = 0; how < 4u; how++) {
+    /* armed, then each of HELLO, CART_INFO, MOUNT, OPEN of slot 0 and DISARM disarms */
+    for(uint32_t how = 0; how < 5u; how++) {
         ASSERT_EQ(arm_with(10, SAV_LEN, save_first), HP_ST_OK);
         if(how == 0) {
             ASSERT_EQ(run(11, HP_CMD_HELLO, NULL, 0), HP_ST_OK);
@@ -566,8 +566,11 @@ TEST(test_cmd_write_unarmed) {
             ASSERT_EQ(open_path(12, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
             ASSERT_EQ(arm_with(13, SAV_LEN, save_first), HP_ST_OK);
             ASSERT_EQ(run(14, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
-        } else {
+        } else if(how == 3) {
             ASSERT_EQ(open_path(11, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+        } else {
+            /* the save chip's DISARM ends the Omega's arming too */
+            ASSERT_EQ(run(11, HP_CMD_DISARM, NULL, 0), HP_ST_OK);
         }
         ASSERT_EQ(write_sector(20, 5, img), HP_ST_NOT_ARMED);
         if(how == 2) ASSERT_EQ(open_path(21, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
@@ -589,22 +592,31 @@ TEST(test_cmd_arm_wrong_file) {
     ASSERT_EQ(run(3, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
     ASSERT_EQ(arm_with(4, SAV_LEN, 5), HP_ST_REFUSED);
     ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
-    ASSERT_EQ(open_path(5, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    /* the save open in slot 1 only, named exactly: a slot 1 file is not the save */
+    ASSERT_EQ(open_path(5, 1, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
     save_first = w32(2);
-    /* another size or cluster, and a wrong magic */
-    ASSERT_EQ(arm_with(6, SAV_LEN - 512u, save_first), HP_ST_REFUSED);
+    ASSERT_EQ(arm_with(6, SAV_LEN, save_first), HP_ST_REFUSED);
     ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
-    ASSERT_EQ(arm_with(7, SAV_LEN, save_first + 1u), HP_ST_REFUSED);
-    ASSERT_EQ(arm_with(8, SAV_LEN + 1u, save_first), HP_ST_REFUSED);
+    /* slot 0 open on a file of another size than a save's, named exactly: never armed */
+    ASSERT_EQ(open_path(7, 0, "/ROMS/game.gba"), HP_ST_OK);
+    ASSERT_EQ(w32(0), TXT_LEN);
+    const uint32_t rom_first = w32(2);
+    ASSERT_EQ(arm_with(8, TXT_LEN, rom_first), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    ASSERT_EQ(write_sector(9, 0, img), HP_ST_NOT_ARMED);
+    ASSERT_EQ(open_path(10, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    ASSERT_EQ(w32(2), save_first);
+    /* another size or cluster, and a wrong magic */
+    ASSERT_EQ(arm_with(11, SAV_LEN - 512u, save_first), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    ASSERT_EQ(arm_with(12, SAV_LEN, save_first + 1u), HP_ST_REFUSED);
+    ASSERT_EQ(arm_with(13, SAV_LEN + 1u, save_first), HP_ST_REFUSED);
     const uint16_t magic[5] = {0x5753, (uint16_t)SAV_LEN, (uint16_t)(SAV_LEN >> 16), (uint16_t)save_first, 0};
-    ASSERT_EQ(run(9, HP_CMD_OMEGA_ARM, magic, 5), HP_ST_BAD_ARG);
-    /* a slot 1 file is not the save */
-    ASSERT_EQ(open_path(10, 1, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
-    ASSERT_EQ(write_sector(11, 0, img), HP_ST_NOT_ARMED);
+    ASSERT_EQ(run(14, HP_CMD_OMEGA_ARM, magic, 5), HP_ST_BAD_ARG);
     /* a good arming, then a refused one, leaves nothing armed */
-    ASSERT_EQ(arm_with(12, SAV_LEN, save_first), HP_ST_OK);
-    ASSERT_EQ(arm_with(13, SAV_LEN, save_first + 1u), HP_ST_REFUSED);
-    ASSERT_EQ(write_sector(14, 0, img), HP_ST_NOT_ARMED);
+    ASSERT_EQ(arm_with(15, SAV_LEN, save_first), HP_ST_OK);
+    ASSERT_EQ(arm_with(16, SAV_LEN, save_first + 1u), HP_ST_REFUSED);
+    ASSERT_EQ(write_sector(17, 0, img), HP_ST_NOT_ARMED);
     ASSERT_EQ(gba.omega_writes, 0);
     fake_fat_free(&card);
 }
@@ -637,7 +649,8 @@ TEST(test_cmd_write_bad_chain) {
     ASSERT_EQ(p[0], HpOmegaSdError);
     ASSERT_EQ(gba.omega_writes, 0);
     ASSERT_EQ(fake_fat_digest_except(&card, save_first), digest);
-    /* a chain that breaks in the middle of a sector's own clusters refuses it whole */
+    /* a chain that ends early (a free entry after the first cluster) refuses sector 1, whose one
+     * cluster (4 KB clusters here) it no longer reaches */
     fake_fat_set_next(&card, save_first, 0); /* a free entry */
     ASSERT_EQ(write_sector(6, 1, img), HP_ST_UNSUPPORTED);
     ASSERT_EQ(gba.omega_writes, 0);

@@ -129,8 +129,9 @@ struct Hp {
     uint16_t last_len;
     /* The Omega's card: mounted by OMEGA_MOUNT; HELLO and CART_INFO start afresh */
     HpOmega omega;
-    /* OMEGA_ARM allowed OMEGA_WRITE_SECTOR to the file open in slot 0; HELLO, CART_INFO, OMEGA_MOUNT
-     * and an OMEGA_OPEN of slot 0 end it. Separate from armed, the save chip's. */
+    /* OMEGA_ARM allowed OMEGA_WRITE_SECTOR to the file open in slot 0; HELLO, CART_INFO, DISARM
+     * (and whatever else ends the save chip's arming), OMEGA_MOUNT and an OMEGA_OPEN of slot 0 end
+     * it. Separate from armed, the save chip's. */
     bool omega_armed;
     /* OMEGA_SHA256's hash in progress: of slot sha_slot, the next byte expected at sha_next */
     HpSha256 sha;

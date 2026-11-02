@@ -168,10 +168,12 @@ static uint16_t hp_fail(Hp* hp, uint8_t status, uint16_t code, uint16_t off) {
     return hp_respond(hp, status, 2);
 }
 
+/* Ends any arming: the save chip's, and the Omega's (DISARM is the Flipper's way to end both) */
 static void hp_disarm(Hp* hp) {
     hp->armed = false;
     hp->programmed = 0;
     hp->completed = 0;
+    hp->omega_armed = false;
 }
 
 /* CART_INFO: 96 header words; flags; ROM size (2 words); library kind; its offset (2 words). The
@@ -181,7 +183,6 @@ static void hp_disarm(Hp* hp) {
 static uint16_t hp_cart_info(Hp* hp) {
     hp_disarm(hp);
     hp_omega_init(&hp->omega);
-    hp->omega_armed = false;
     hp->sha_on = false;
     hp->probed = false;
     hp_cart_scan(&hp->cart);
@@ -228,7 +229,6 @@ static uint16_t hp_save_probe(Hp* hp) {
 static uint16_t hp_hello(Hp* hp) {
     hp_disarm(hp);
     hp_omega_init(&hp->omega);
-    hp->omega_armed = false;
     hp->sha_on = false;
     hp->flash.erased_ok = 0;
     const uint8_t* own = hp_hal_own_header();
@@ -688,15 +688,15 @@ static uint16_t hp_omega_sha_cmd(Hp* hp) {
 
 /* OMEGA_ARM: magic, the save's size (2 words) and first cluster (2 words). It first ends any
  * arming. REFUSED unless the card is mounted and slot 0 is open with exactly that size and first
- * cluster: the Flipper names the one file that may be written, and the helper checks it is the
- * file it has open. */
+ * cluster, and that size is a save's (32 sectors, 131072 bytes): the Flipper names the one file
+ * that may be written, and the helper checks it is the file it has open. */
 static uint16_t hp_omega_arm_cmd(Hp* hp) {
     const uint16_t* a = hp->req;
     hp->omega_armed = false;
     if(a[0] != HP_ARM_MAGIC) return hp_fail(hp, HP_ST_BAD_ARG, 0, 0);
     const HpOmegaFile* f = &hp->omega.files[0];
-    if(!hp->omega.mounted || !f->used || f->size != (a[1] | (uint32_t)a[2] << 16) ||
-       f->first != (a[3] | (uint32_t)a[4] << 16)) {
+    if(!hp->omega.mounted || !f->used || f->size != HP_OMEGA_SECTORS * HP_FLASH_SECTOR_LEN ||
+       f->size != (a[1] | (uint32_t)a[2] << 16) || f->first != (a[3] | (uint32_t)a[4] << 16)) {
         return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_OMEGA, 0);
     }
     hp->omega_armed = true;
