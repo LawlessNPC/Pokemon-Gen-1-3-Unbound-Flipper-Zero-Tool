@@ -28,7 +28,9 @@ static void gen3_cart_omega_slots_callback(void* context, uint32_t index) {
 
 static void gen3_cart_omega_slots_list(PokemonFap* pokemon_fap) {
     Submenu* submenu = pokemon_fap->submenu;
-    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    /* The picker's last fetch may still run (Back from the letters of New Pokemon): wait for it,
+     * or the list would find no Omega and go to the hub */
+    Gen3Omega* o = gen3_cart_ui_omega_idle(pokemon_fap);
     const uint8_t box = gen3_cart_ui_get(pokemon_fap)->box;
     const bool party = box == GEN3_SAVE_PARTY;
     char header[12];

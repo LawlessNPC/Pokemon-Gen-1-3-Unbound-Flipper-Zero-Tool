@@ -1068,6 +1068,7 @@ Gen3CartResult gen3_omega_restore(Gen3Omega* o, const char* name, const char* st
 #define OM_PAL_AT 3584u /* the decoded palette, 32 bytes */
 #define OM_REC_AT 3616u /* the record converted */
 #define OM_PIC_WORK 2048u /* the converter's work */
+#define OM_UNOWN 201u /* the palette table's tag for every Unown form (ids 413 .. 439), as DPE's */
 
 static uint32_t om_le32(const uint8_t* p) {
     return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
@@ -1094,7 +1095,8 @@ static Gen3CartResult om_pic_entry(Gen3Omega* o, uint32_t table, uint16_t specie
 }
 
 /* The tables' entries of a species, and their checks: *front and *pal are the streams' file
- * offsets. NULL if they check out, else why. */
+ * offsets. NULL if they check out, else why. A palette entry is tagged with the species, or with
+ * Unown for an Unown form, whose palette it shares. */
 static const char* om_pic_check(
     const Gen3Omega* o,
     uint16_t species,
@@ -1104,7 +1106,8 @@ static const char* om_pic_check(
     uint32_t* pal) {
     if(fe[4] != (GEN3_UB_PIC_RAW & 0xFFu) || fe[5] != (GEN3_UB_PIC_RAW >> 8)) return "front size";
     if(fe[6] != (species & 0xFFu) || fe[7] != (species >> 8)) return "front tag";
-    if(pe[4] != (species & 0xFFu) || pe[5] != (species >> 8)) return "palette tag";
+    const uint16_t tag = (uint16_t)(pe[4] | pe[5] << 8);
+    if(tag != species && tag != OM_UNOWN) return "palette tag";
     /* a stream starts inside the file, with at least its 4-byte header */
     if(!om_rom_off(o, om_le32(fe), 4u, front)) return "front pointer";
     if(!om_rom_off(o, om_le32(pe), 4u, pal)) return "palette pointer";

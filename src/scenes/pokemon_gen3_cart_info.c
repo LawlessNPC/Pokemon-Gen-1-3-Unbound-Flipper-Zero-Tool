@@ -10,12 +10,13 @@ static char gen3_cart_info_text[GEN3_CART_SCREEN_INFO_SIZE];
 
 void pokemon_scene_gen3_cart_info_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
+    /* A picture job the picker left running is waited for; the Omega is NULL if it runs on */
+    const Gen3Omega* o = gen3_cart_ui_omega_idle(pokemon_fap);
     /* NULL while a job runs, whose cart it is then */
     const Gen3Cart* c = gen3_cart_ui_cart(pokemon_fap);
     DialogEx* dialog_ex = pokemon_fap->dialog_ex;
 
     gen3_cart_ui_dialog(pokemon_fap);
-    const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
     if(o && gen3_cart_ui_status(pokemon_fap)->omega) {
         gen3_cart_screen_omega_info(o, gen3_cart_info_header, gen3_cart_info_text);
         dialog_ex_set_header(dialog_ex, gen3_cart_info_header, 64, 0, AlignCenter, AlignTop);

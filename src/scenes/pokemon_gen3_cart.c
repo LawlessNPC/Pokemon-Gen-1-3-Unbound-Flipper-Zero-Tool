@@ -133,6 +133,11 @@ bool gen3_cart_ui_picture_wait(PokemonFap* pokemon_fap) {
     return true;
 }
 
+Gen3Omega* gen3_cart_ui_omega_idle(PokemonFap* pokemon_fap) {
+    gen3_cart_ui_picture_wait(pokemon_fap);
+    return gen3_cart_ui_omega(pokemon_fap);
+}
+
 void gen3_cart_ui_busy_notice(PokemonFap* pokemon_fap, uint32_t back) {
     Gen3CartUi* ui = gen3_cart_ui_get(pokemon_fap);
 
@@ -414,8 +419,9 @@ static void gen3_cart_add(PokemonFap* pokemon_fap, const char* label, uint32_t i
  * back up, restore */
 static void gen3_cart_omega_hub(PokemonFap* pokemon_fap) {
     Submenu* submenu = pokemon_fap->submenu;
-    /* NULL while a job runs: then only Cart info, which waits for it too */
-    const Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    /* A picture job the picker left running is waited for. NULL while another job runs: then only
+     * Cart info, which waits for it too */
+    const Gen3Omega* o = gen3_cart_ui_omega_idle(pokemon_fap);
     Gen3CartScreenHub items;
 
     gen3_cart_screen_omega_hub(o, &items);

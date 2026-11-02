@@ -205,6 +205,10 @@ bool gen3_cart_ui_picture_busy(PokemonFap* pokemon_fap);
 /* Waits for a running picture job, polling every 20 ms for up to 10 s: true once none runs, false
  * if one still does. Call before touching the Omega or starting a job. */
 bool gen3_cart_ui_picture_wait(PokemonFap* pokemon_fap);
+/* gen3_cart_ui_omega once a running picture job has ended (gen3_cart_ui_picture_wait), for a
+ * screen built from the Omega: the picker's last fetch may still run when it is left. NULL if
+ * there is no Omega, or the job still runs after the wait. */
+Gen3Omega* gen3_cart_ui_omega_idle(PokemonFap* pokemon_fap);
 /* Shows "Busy. Try again." as a notice (Gen3CartResult) whose OK returns to the scene back, and
  * does nothing else: for a wait that timed out */
 void gen3_cart_ui_busy_notice(PokemonFap* pokemon_fap, uint32_t back);

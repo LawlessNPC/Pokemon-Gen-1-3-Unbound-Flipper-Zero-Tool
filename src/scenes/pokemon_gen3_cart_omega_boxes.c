@@ -21,7 +21,8 @@ static void gen3_cart_omega_boxes_callback(void* context, uint32_t index) {
 void pokemon_scene_gen3_cart_omega_boxes_on_enter(void* context) {
     PokemonFap* pokemon_fap = context;
     Submenu* submenu = pokemon_fap->submenu;
-    Gen3Omega* o = gen3_cart_ui_omega(pokemon_fap);
+    /* a picture job the picker left running is waited for */
+    Gen3Omega* o = gen3_cart_ui_omega_idle(pokemon_fap);
     char label[20];
 
     submenu_reset(submenu);

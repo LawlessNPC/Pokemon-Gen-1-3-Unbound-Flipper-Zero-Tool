@@ -1961,6 +1961,43 @@ TEST(test_omega_pic_bad_entry) {
     build_rom();
 }
 
+/* DPE's palette table tags every Unown form (Unbound ids 413 .. 439) as Unown, 201: such an entry
+ * is the form's own. A palette tag of another species still fails. */
+TEST(test_omega_pic_unown_form) {
+    for(uint32_t k = 0; k < 3u; k++) {
+        build_rom();
+        put_entry(413, PIC_S440, PIC_S440 + 0x800u); /* Unown B, with 440's streams */
+        put16(PIC_PAL + 8u * 413u + 4u, k == 0 ? 201u : k == 1 ? 202u : 412u);
+        rom_hash();
+        ASSERT_TRUE(pics_bench());
+        ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+        ASSERT_TRUE(om.pics_ok);
+        uint32_t size = 0;
+        const uint8_t* d;
+        if(k == 0) {
+            ASSERT_EQ(gen3_omega_picture(&om, 413, GEN3_OMEGA_PICS), Gen3CartOk);
+            d = fake_store_file(&store, GEN3_OMEGA_PICS "/413.fxb", &size);
+            ASSERT_TRUE(d != NULL && size == GEN3_UB_PIC_RECORD);
+            ASSERT_TRUE(memcmp(d, ub_pic_vectors[1].record, GEN3_UB_PIC_RECORD) == 0);
+        } else {
+            ASSERT_EQ(gen3_omega_picture(&om, 413, GEN3_OMEGA_PICS), Gen3CartBadBackup);
+            ASSERT_TRUE(absent(GEN3_OMEGA_PICS "/413.fxb") && absent(GEN3_OMEGA_PICS "/413.fxb.tmp"));
+        }
+        ASSERT_TRUE(om.connected);
+        ASSERT_TRUE(reads_inside());
+    }
+    /* the front entry's tag still has to be the form's own */
+    build_rom();
+    put_entry(413, PIC_S440, PIC_S440 + 0x800u);
+    put16(PIC_PAL + 8u * 413u + 4u, 201u);
+    put16(PIC_FRONT + 8u * 413u + 6u, 201u);
+    rom_hash();
+    ASSERT_TRUE(pics_bench());
+    ASSERT_EQ(gen3_omega_pics_find(&om), Gen3CartOk);
+    ASSERT_EQ(gen3_omega_picture(&om, 413, GEN3_OMEGA_PICS), Gen3CartBadBackup);
+    build_rom();
+}
+
 TEST(test_omega_pic_link_lost) {
     for(uint32_t k = 1; k <= 5u; k++) {
         build_rom();
@@ -2064,6 +2101,7 @@ int main(void) {
     RUN(test_omega_pic_at_end);
     RUN(test_omega_pic_straddle);
     RUN(test_omega_pic_bad_entry);
+    RUN(test_omega_pic_unown_form);
     RUN(test_omega_pic_link_lost);
     RUN(test_omega_pic_unverified);
     fake_fat_free(&card);
