@@ -123,10 +123,13 @@ bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
 
 /* The working copy's edits written to the card's save, as the game saves: the slot the game
  * doesn't load gets all 14 sections with counter N + 1, so that until its last sector is whole the
- * game still loads the old one. In order:
- * - Nothing without changes; Refused unless verified, browsable and the working copy there; BadArg
- *   without a stamp (at most GEN3_CART_STAMP_MAX characters); LinkLost unless connected; SdFull
- *   unless 131072 + 4096 bytes are free. None of these sends anything.
+ * game still loads the old one. That holds while the slot it writes holds no part of a newer save:
+ * a save of the game's own cut short there (its index 13 sound, its counter not older than N)
+ * could be completed by a cut of this write into a slot of both, so that is refused. In order:
+ * - Nothing without changes; Refused unless verified, browsable and the working copy there;
+ *   OmegaSaveFirst for that cut save (a save in the game replaces it); BadArg without a stamp (at
+ *   most GEN3_CART_STAMP_MAX characters); LinkLost unless connected; SdFull unless 131072 + 4096
+ *   bytes are free. None of these sends anything.
  * - Prepare: slot 0 opened again on the save's path, with the connect's size and first cluster,
  *   and each sector's OMEGA_CRC32 the backup's; else Changed, the backup and the edits dropped.
  *   Then OMEGA_ARM for that file.
@@ -141,12 +144,14 @@ bool gen3_omega_owner(Gen3Omega* o, Gen3UbMon* out);
  * Ok: written, verified and backed up. Until the new slot is whole the game loads the old one:
  * FlashError (a write the helper failed), VerifyFailed (a read-back that differs), LinkLost or
  * BusyTimeout; the backup and the edits stay, though a Write again finds the card Changed once
- * any of the new slot's bytes did change. After it, the backup and the edits are dropped:
- * WrittenShared (a write or a check of sector 30 or 31 failed), VerifyFailed (the Verify step),
- * LinkLost or BusyTimeout; and WrittenNoBackup if only the new backup failed. LinkLost,
- * BusyTimeout and HelperError, or an answer to a write the client couldn't take, end the connect:
- * nothing more is sent before a new Connect. Progress Prepare, Program per sector, Verify per
- * sector, then PostBackup for the new backup's steps; never cancelled. */
+ * any of the new slot's bytes did change. After it the game loads the new save, and the backup
+ * and the edits are dropped: WrittenShared (a write or a check of sector 30 or 31 failed, the
+ * link included), VerifyFailed (the Verify step found a sector other than it should be), and
+ * WrittenNoBackup when the Verify step or the new backup couldn't finish (a lost link, a helper
+ * error) or the new backup failed. LinkLost, BusyTimeout and HelperError, wherever they come, or
+ * an answer to a write the client couldn't take, end the connect: nothing more is sent before a
+ * new Connect. Progress Prepare, Program per sector, Verify per sector, then PostBackup for the
+ * new backup's steps; never cancelled. */
 Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp);
 
 #ifdef GEN3_TESTING

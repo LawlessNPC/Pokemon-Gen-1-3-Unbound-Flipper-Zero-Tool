@@ -126,6 +126,9 @@ typedef enum {
     /* An Omega write: the new slot is written, but writing or checking a shared PC sector (30 or
      * 31, which hold boxes 20-22 as shown) failed */
     Gen3CartWrittenShared,
+    /* An Omega write refused: the slot the game doesn't load holds a save of the game's own that
+     * was cut short, which a cut of this write could complete with half of each */
+    Gen3CartOmegaSaveFirst,
 } Gen3CartResult;
 
 /* At most 3 lines of at most 21 characters, broken with '\n'; "" for a value outside the enum */

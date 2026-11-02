@@ -653,6 +653,19 @@ static void om_end_link(Gen3Omega* o, Gen3CartResult r) {
     }
 }
 
+/* The slot the game doesn't load ends (index 13) in a sound sector no older than the loaded slot:
+ * what a save of the game's own leaves when cut short. The game writes a slot from index r
+ * (r_loaded + 1, as this write's rotation) up to 13, then 0 .. r - 1; this write goes from index
+ * 0 up. So once that save reached index 13, a cut of this write at a sector's end could leave a
+ * whole slot, every id once at N + 1, half of each save, and the game would load it. */
+static bool om_other_slot_cut(const Gen3Omega* o) {
+    const uint32_t loaded = (uint32_t)o->slots.loaded;
+    const uint32_t last = (1u - loaded) * GEN3_UB_SLOT_SECTORS + GEN3_UB_SLOT_SECTORS - 1u;
+    const Gen3UbSector* f = &o->infos[last];
+    return f->sig_ok && f->sum_ok && f->id < GEN3_UB_SLOT_SECTORS &&
+           (int32_t)(f->counter - o->slots.counter[loaded]) >= 0;
+}
+
 /* OMEGA_CRC32 of the save's sector s */
 static Gen3CartResult om_crc(Gen3Omega* o, uint32_t s, uint32_t* crc) {
     return om_link(
@@ -775,13 +788,17 @@ static Gen3CartResult om_write_shared(Gen3Omega* o, uint32_t total) {
 }
 
 /* Each sector's OMEGA_CRC32 against want_crc: VerifyFailed, or WrittenShared if only sectors 30
- * and 31 differ */
+ * and 31 differ. Every write is done by now, so the game loads the new save: a check the link cut
+ * short is WrittenNoBackup. */
 static Gen3CartResult om_write_verify(Gen3Omega* o) {
     bool bad = false, shared = false;
     for(uint32_t s = 0; s < GEN3_UB_SECTORS; s++) {
         uint32_t crc = 0;
         const Gen3CartResult r = om_crc(o, s, &crc);
-        if(r != Gen3CartOk) return r;
+        if(r != Gen3CartOk) {
+            om_end_link(o, r);
+            return Gen3CartWrittenNoBackup;
+        }
         if(crc != o->want_crc[s]) {
             if(s >= OM_SHARED) {
                 shared = true;
@@ -816,6 +833,7 @@ static Gen3CartResult om_write_backup(Gen3Omega* o, const char* stamp) {
 Gen3CartResult gen3_omega_write(Gen3Omega* o, const char* stamp) {
     if(gen3_omega_changes(o) == 0) return Gen3CartNothing;
     if(!o->verified || !om_editable(o)) return Gen3CartRefused;
+    if(om_other_slot_cut(o)) return Gen3CartOmegaSaveFirst;
     if(!stamp || strlen(stamp) > GEN3_CART_STAMP_MAX) return Gen3CartBadArg;
     if(!o->connected) return Gen3CartLinkLost;
     const Gen3Store* st = &o->store;

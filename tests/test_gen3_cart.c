@@ -2036,9 +2036,10 @@ TEST(test_result_texts) {
         [Gen3CartLinkBusy] = "The link is busy.\nClose other link\napps, then Retry.",
         [Gen3CartOmegaPending] = "Omega hasn't saved\nto its card. Switch\non normally once.",
         [Gen3CartNoGame] = "Play Unbound on the\nOmega first, then\nconnect again.",
-        [Gen3CartWrittenShared] = "Written, but boxes\n20-23 may be\nwrong: Restore.",
+        [Gen3CartWrittenShared] = "Written, but boxes\n20-22 may be\nwrong: Restore.",
+        [Gen3CartOmegaSaveFirst] = "Save once in Unbound\nfirst, then connect\nagain.",
     };
-    for(int r = Gen3CartOk; r <= Gen3CartWrittenShared; r++) {
+    for(int r = Gen3CartOk; r <= Gen3CartOmegaSaveFirst; r++) {
         const char* t = gen3_cart_result_text((Gen3CartResult)r);
         ASSERT_TRUE(t != NULL);
         ASSERT_STR_EQ(t, want[r]);
@@ -2056,7 +2057,7 @@ TEST(test_result_texts) {
         }
         ASSERT_TRUE(lines <= 3);
     }
-    ASSERT_STR_EQ(gen3_cart_result_text((Gen3CartResult)(Gen3CartWrittenShared + 1)), "");
+    ASSERT_STR_EQ(gen3_cart_result_text((Gen3CartResult)(Gen3CartOmegaSaveFirst + 1)), "");
 }
 
 int main(void) {
