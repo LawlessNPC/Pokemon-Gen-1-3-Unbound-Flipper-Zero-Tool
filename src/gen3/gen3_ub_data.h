@@ -23,6 +23,9 @@ bool gen3_ub_species_name(uint16_t species, char out[GEN3_UB_NAME_LEN + 1u]);
 int gen3_ub_growth(uint16_t species, void* ctx);
 /* The National Dex number, 0 if unmapped or unreadable */
 uint16_t gen3_ub_national(uint16_t species);
+/* The National Dex number (1..386) whose shipped picture the species uses, 0 to fetch it from the
+ * ROM (or an unknown species) */
+uint16_t gen3_ub_shipped_picture(uint16_t species);
 
 /* Moves (ids 1..922), items (1..728), abilities (1..254): the name in uppercase, "#<id>" and false
  * for an id with none or a read failure */

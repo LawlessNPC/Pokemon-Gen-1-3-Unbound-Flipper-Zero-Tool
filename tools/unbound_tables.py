@@ -14,10 +14,10 @@ species_identity_meta.json and species_learnsets.json. Nothing in the checkout i
 Standard library only. On any failed check the script names the first failure, exits 1 and writes
 nothing. Running it twice writes the same bytes.
 
-Layout (version 2), little-endian:
+Layout (version 3), little-endian:
 
     0      4          magic "UBND"
-    4      2          version 2
+    4      2          version 3
     6      2          table count
     8      4          CRC-32 (IEEE) of the bytes from 12 to the end
     12     12 * count table directory: tag (4 ASCII), offset (4), entries (2), entry size (2)
@@ -42,10 +42,15 @@ run 0 .. 1267 (1268 entries); id 0 is empty or zero in every table.
     SRTS    2 bytes   species ids 1 .. 1267 sorted by the stored name
     SRTM    2 bytes   move ids 1 .. 922 sorted by the stored name
     SRTI    2 bytes   ids of the named items in pockets 1 to 3, sorted by the stored name
+    SHIP    2 bytes   species ids 0 .. 1267: the National Dex number 1 .. 386 whose shipped picture
+                      (files/all_sprites.fxbm, index number - 1) the species uses, else 0 (fetch it
+                      from the ROM). A species gets its NDEX number if that is 1 .. 386 and it is
+                      the lowest species id with that number; id 0 is 0.
 
 Sorting compares the stored uppercase ASCII bytes, as strcmp does, and breaks ties by id.
 
-Version 1 had NAME, GROW and NDEX alone, each of 1268 entries; they are unchanged.
+Version 1 had NAME, GROW and NDEX alone, each of 1268 entries; version 2 added the tables from
+MOVE to SRTI. Version 3 adds SHIP at the end; all the earlier tables are unchanged.
 """
 
 import json
@@ -58,7 +63,7 @@ import zlib
 PUSE_COMMIT = "2c624440fb24940480a3430fa17214942d4ba04a"
 NAME_SIZE = 11
 NAME_MAX = 10
-VERSION = 2
+VERSION = 3
 MOVE_SIZE = 13
 ITEM_SIZE = 18
 ABIL_SIZE = 16
@@ -126,6 +131,7 @@ def build(puse):
 
     tables = [(b"NAME", name_t, NAME_SIZE, count), (b"GROW", grow_t, 1, count), (b"NDEX", ndex_t, 2, count)]
     tables += more_tables(data, names, count)
+    tables.append((b"SHIP", ship_table(ndex_t, count), 2, count))
     offset = 12 + 12 * len(tables)
     toc = bytearray()
     body = bytearray()
@@ -136,6 +142,19 @@ def build(puse):
         body += t
     rest = bytes(toc + body)
     return b"UBND" + struct.pack("<HHI", VERSION, len(tables), zlib.crc32(rest)) + rest
+
+
+def ship_table(ndex_t, count):
+    """SHIP: the National number 1..386 for the lowest species id with it, else 0."""
+    seen = set()
+    ship = bytearray()
+    for sid in range(count):
+        n = struct.unpack_from("<H", ndex_t, 2 * sid)[0]
+        use = sid != 0 and 1 <= n <= 386 and n not in seen
+        if use:
+            seen.add(n)
+        ship += struct.pack("<H", n if use else 0)
+    return ship
 
 
 def padded(name, size):

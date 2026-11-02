@@ -42,6 +42,19 @@ TEST(test_ub_growth_ndex) {
     ASSERT_EQ(gen3_ub_national(1268), 0);
 }
 
+TEST(test_ub_shipped) {
+    ASSERT_TRUE(ub_bulk_file_open());
+    ASSERT_EQ(gen3_ub_shipped_picture(1), 1);
+    ASSERT_EQ(gen3_ub_shipped_picture(25), 25);
+    ASSERT_EQ(gen3_ub_shipped_picture(252), 0); /* a CFRU placeholder */
+    ASSERT_EQ(gen3_ub_shipped_picture(277), 252); /* Treecko */
+    ASSERT_EQ(gen3_ub_shipped_picture(440), 0); /* Turtwig, National 387 */
+    ASSERT_EQ(gen3_ub_shipped_picture(1020), 0); /* Alolan Rattata, National 19 but not the lowest id */
+    ASSERT_EQ(gen3_ub_shipped_picture(413), 0); /* Unown B */
+    ASSERT_EQ(gen3_ub_shipped_picture(0), 0);
+    ASSERT_EQ(gen3_ub_shipped_picture(1268), 0);
+}
+
 TEST(test_ub_moves) {
     ASSERT_TRUE(ub_bulk_file_open());
     char name[13];
@@ -171,6 +184,7 @@ int main(void) {
     RUN(test_ub_data_header);
     RUN(test_ub_names);
     RUN(test_ub_growth_ndex);
+    RUN(test_ub_shipped);
     RUN(test_ub_moves);
     RUN(test_ub_items);
     RUN(test_ub_abilities);

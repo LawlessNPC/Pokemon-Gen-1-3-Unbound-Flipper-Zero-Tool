@@ -5,7 +5,7 @@
 
 #include <src/gen3/gen3_hlink.h>
 
-#define UB_DATA_VERSION 2u
+#define UB_DATA_VERSION 3u
 #define UB_DATA_HEAD 12u
 #define UB_DATA_TOC_ENTRY 12u
 #define UB_DATA_TABLES_MAX 16u
@@ -36,14 +36,15 @@ typedef enum {
     UbSrts,
     UbSrtm,
     UbSrti,
+    UbShip,
     UbTableCount
 } UbTableId;
 
 static const char ub_tags[UbTableCount][5] = {
     "NAME", "GROW", "NDEX", "MOVE", "MVPP", "ITEM", "ITPK", "ABIL",
-    "SABL", "BASE", "GEND", "LVUP", "SRTS", "SRTM", "SRTI"};
+    "SABL", "BASE", "GEND", "LVUP", "SRTS", "SRTM", "SRTI", "SHIP"};
 static const uint8_t ub_sizes[UbTableCount] = {
-    UB_DATA_NAME_SIZE, 1, 2, UB_MOVE_SIZE, 1, UB_ITEM_SIZE, 1, UB_ABIL_SIZE, 3, 6, 1, 2, 2, 2, 2};
+    UB_DATA_NAME_SIZE, 1, 2, UB_MOVE_SIZE, 1, UB_ITEM_SIZE, 1, UB_ABIL_SIZE, 3, 6, 1, 2, 2, 2, 2, 2};
 
 static Gen3UbRead ub_read = NULL;
 static void* ub_ctx = NULL;
@@ -74,7 +75,7 @@ static bool ub_shape_ok(const UbTable* t) {
            t[UbGend].entries == species && t[UbLvup].entries >= species + 1u &&
            t[UbMove].entries != 0 && t[UbMvpp].entries == t[UbMove].entries &&
            t[UbItem].entries != 0 && t[UbItpk].entries == t[UbItem].entries &&
-           t[UbAbil].entries != 0;
+           t[UbAbil].entries != 0 && t[UbShip].entries == species;
 }
 
 bool gen3_ub_data_open(Gen3UbRead read, void* ctx) {
@@ -158,6 +159,11 @@ int gen3_ub_growth(uint16_t species, void* ctx) {
 uint16_t gen3_ub_national(uint16_t species) {
     uint8_t b[2];
     return ub_entry(UbNdex, species, b) ? ub_le16(b) : 0u;
+}
+
+uint16_t gen3_ub_shipped_picture(uint16_t species) {
+    uint8_t b[2];
+    return ub_entry(UbShip, species, b) ? ub_le16(b) : 0u;
 }
 
 bool gen3_ub_move_name(uint16_t move, char out[13]) {
