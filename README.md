@@ -509,21 +509,24 @@ Experimental. `Cartridge` reads the save of the cartridge in the GBA over the li
 
 **The helper.** The program the Flipper sends to the GBA is built from `gba/helper/` with the ufbt toolchain (`make -C gba/helper install`), which writes `files/gen3_helper.mb`; both apps ship that file. Never edit it by hand. `make -C gba/helper check` rebuilds it and checks that the result is byte for byte the committed file. Pokemon Cartridge always sends its own built-in copy of that file, and checks only the helper's protocol version (`HP_PROTO_VERSION`, in the file's header and in the helper's first answer). `HP_BUILD_ID` is for logs and support only: the helper reports it, `gen3_cart.log` records it (`hello proto 1 build 1`), and nothing checks it. Releasing: if `files/gen3_helper.mb` differs from the one in the last release, bump `HP_BUILD_ID` in `gba/helper/include/hp_version.h`, so that logs tell the two apart (the tests in `tests/test_hp_link.c` that pin build 1 change with it), then run `make -C gba/helper install`. Development builds keep build 1, which version 3.1 ships.
 
-### Pokemon Unbound on an EZ-Flash Omega (read-only for now)
+### Pokemon Unbound on an EZ-Flash Omega
 Pokemon Unbound is a ROM hack that people play from a flash cart, so its save isn't on a save chip but in a file on the flash cart's microSD card. With an **EZ-Flash Omega Definitive Edition**, Cartridge connects as it does to a cartridge (START+SELECT at power-on), then:
 
 - finds the game the Omega started last (`SAVER/Recently play.txt`) and its save (`SAVER/<game>.sav`) on the Omega's card;
 - checks that the game file is Pokemon Unbound 2.1.1.1 (its SHA-256, computed on the GBA the first time and remembered after);
 - backs the save up to `apps_data/pokemon/gen3/backups/UNBOUND_<TID>_<date>-<time>.sav`;
-- lists the party and the 24 boxes, with Unbound's species names.
+- lists the party and the 24 boxes, with Unbound's species names;
+- edits party and box Pokemon: species, level, nickname, held item, moves, nature, ability, shiny, IVs and EVs, and puts new Pokemon into empty box slots;
+- writes the changes back with a verified, slot-safe write: the new save goes into the save slot the game isn't loading, and the game switches to it only once it is complete, so a write cut off part way leaves the old save loading. Cartridge writes only the save file's own blocks on the card;
+- restores a backup the same way.
 
-**This version only reads.** Editing and writing back, and pictures for Unbound's newer Pokemon, come next. Nothing is ever written to the Omega's card in this version.
+Pictures for Unbound's newer Pokemon are still to come.
 
 **Save first.** While you play, the Definitive Edition keeps the save in the cart and copies it to its card at the next normal power-on. So after playing, switch the GBA on normally once and let the Omega save, then switch it off, and only then connect. Cartridge checks this, and says so if the save hasn't reached the card yet.
 
 The checklist is [`docs/gen3/hardware-test-unbound.md`](docs/gen3/hardware-test-unbound.md).
 
-Credits: Unbound's save layout and species data come from [PUSE](https://github.com/Zannael/PUSE) (MIT License), through `tools/unbound_tables.py`. The Omega's SD card interface follows EZ-Flash's own [Omega Definitive Edition kernel](https://github.com/ez-flash/omega-de-kernel) (Apache License 2.0).
+Credits: Unbound's save layout, species data, record rules and Pokemon identity solver come from [PUSE](https://github.com/Zannael/PUSE) (MIT License), through `tools/unbound_tables.py`. The Omega's SD card read and write sequences follow EZ-Flash's own [Omega Definitive Edition kernel](https://github.com/ez-flash/omega-de-kernel) (Apache License 2.0).
 
 ### Link Test, log and checklists
 `Link Test` checks the link without trading: the Flipper acts as the other player in the game's Cable Club Trade Center, and shows the cable, the link's state, and the GBA player's name and TID. Plug in the cable as in [Cable](#cable).
@@ -537,7 +540,7 @@ The hardware checklists:
 - [Trading with Ruby](docs/gen3/hardware-test-2.md)
 - [FireRed: Link Test, trading, editor, `.pk3` files and a cartridge swap](docs/gen3/hardware-test-frlg.md)
 - [Cartridge: connect, backup, browse, edit and write, restore, ROM copy, with Ruby and FireRed](docs/gen3/hardware-test-3.md)
-- [Cartridge: Pokemon Unbound on an EZ-Flash Omega, read-only](docs/gen3/hardware-test-unbound.md)
+- [Cartridge: Pokemon Unbound on an EZ-Flash Omega: connect, backup, browse, edit, write, restore](docs/gen3/hardware-test-unbound.md)
 
 ## How Does it Work?
 

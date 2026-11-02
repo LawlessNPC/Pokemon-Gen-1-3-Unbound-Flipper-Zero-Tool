@@ -1,5 +1,13 @@
 # Changelog - Patch Notes
 
+## Version 3.3
+**New Features**
+- Cartridge edits Pokemon Unbound on an EZ-Flash Omega Definitive Edition and writes the changes back to the save on the Omega's microSD card: species, level, nickname, held item, moves, nature, ability, shiny, IVs and EVs of party and box Pokemon, and new Pokemon in empty box slots
+- The write is verified and slot-safe: it goes into the save slot the game isn't loading, only the save file's own blocks on the card are touched, and a write cut off part way leaves the old save loading. It refuses if the card's save changed since the backup, and backs the result up. Restoring a backup works the same way
+- Boxes 20-22 share two sectors with both save slots; if their write can't be confirmed Cartridge says so and offers Restore
+- The checklist, now with the write tests, is `docs/gen3/hardware-test-unbound.md`
+- Unbound's record rules and Pokemon identity solver come from PUSE (github.com/Zannael/PUSE, MIT License); the Omega's SD read and write sequences follow EZ-Flash's Omega Definitive Edition kernel (Apache License 2.0)
+
 ## Version 3.2
 **New Features**
 - Cartridge reads Pokemon Unbound from an EZ-Flash Omega Definitive Edition (read-only for now): it finds the game the Omega started last and its save on the Omega's microSD card, checks the game file is Unbound 2.1.1.1, backs the save up and lists the party and the 24 boxes. The checklist is `docs/gen3/hardware-test-unbound.md`
