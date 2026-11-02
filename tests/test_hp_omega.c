@@ -300,14 +300,18 @@ static uint8_t hdr[0xC0];
 
 /* An Omega at power-on: the kernel's header, title and code empty; the card as make_card's, plus
  * /ROMS/game.gba of TXT_LEN bytes */
-static void omega_cart(void) {
+static void omega_cart_ex(uint8_t spc, uint32_t gap_every) {
     static const char zero4[4] = {0};
-    make_card(2048, 8, 0);
+    make_card(2048, spc, gap_every);
     const uint32_t roms = fake_fat_mkdir(&card, fake_fat_root(&card), "ROMS");
     fake_fat_add_file(&card, roms, "game.gba", data, TXT_LEN, 2);
     helper_cmd_header(hdr, gba.own, "", zero4, 0);
     fake_gba_rom(&gba, hdr, MIB);
     hp_init(&hp);
+}
+
+static void omega_cart(void) {
+    omega_cart_ex(8, 0);
 }
 
 static uint16_t run(uint8_t seq, uint8_t code, const uint16_t* args, uint16_t n) {
@@ -479,6 +483,214 @@ TEST(test_cmd_open_notfound) {
     fake_fat_free(&card);
 }
 
+/* ---- The save file's write (OMEGA_ARM, OMEGA_WRITE_SECTOR) ---- */
+
+#define SECTOR 4096u
+
+static uint8_t img[SAV_LEN]; /* what the tests write: sector k is img + k * SECTOR */
+static uint16_t wargs[1u + SECTOR / 2u];
+static uint32_t save_first; /* the open save's first cluster */
+static uint64_t card_digest; /* fake_fat_digest_except before the writes */
+
+/* CART_INFO, MOUNT and OPEN of the save into slot 0, as seq 1..3 */
+static void open_save(void) {
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(run(2, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(open_path(3, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    save_first = w32(2);
+}
+
+static uint16_t arm_with(uint8_t seq, uint32_t size, uint32_t first) {
+    const uint16_t a[5] = {
+        0x5752, (uint16_t)size, (uint16_t)(size >> 16), (uint16_t)first, (uint16_t)(first >> 16)};
+    return run(seq, HP_CMD_OMEGA_ARM, a, 5);
+}
+
+static uint16_t write_sector(uint8_t seq, uint16_t sector, const uint8_t* image) {
+    wargs[0] = sector;
+    for(uint32_t i = 0; i < SECTOR / 2u; i++) wargs[1u + i] = (uint16_t)(image[2u * i] | image[2u * i + 1u] << 8);
+    return run(seq, HP_CMD_OMEGA_WRITE_SECTOR, wargs, 1u + SECTOR / 2u);
+}
+
+/* The open save's bytes off .. off + n on the card equal q */
+static bool file_is(uint32_t off, const uint8_t* q, uint32_t n) {
+    for(uint32_t i = 0; i < n; i += 512u) {
+        uint8_t b[512];
+        if(!fake_fat_block(&card, fake_fat_file_lba(&card, save_first, off + i), b)) return false;
+        if(memcmp(b, q + i, 512) != 0) return false;
+    }
+    return true;
+}
+
+static void armed_save(uint8_t spc, uint32_t gap_every) {
+    omega_cart_ex(spc, gap_every);
+    pattern(img, SAV_LEN, 99);
+    open_save();
+    card_digest = fake_fat_digest_except(&card, save_first);
+    ASSERT_EQ(arm_with(4, SAV_LEN, save_first), HP_ST_OK);
+    ASSERT_EQ(resp[1], 0);
+}
+
+TEST(test_cmd_write_ok) {
+    armed_save(8, 0);
+    ASSERT_EQ(write_sector(5, 5, img + 5u * SECTOR), HP_ST_OK);
+    ASSERT_EQ(resp[1], 2);
+    ASSERT_EQ(w32(0), ~hp_crc32_bytes(0xFFFFFFFFu, img + 5u * SECTOR, SECTOR));
+    ASSERT_EQ(gba.omega_writes, 8);
+    ASSERT_TRUE(file_is(5u * SECTOR, img + 5u * SECTOR, SECTOR));
+    /* its neighbours are as they were */
+    ASSERT_TRUE(file_is(4u * SECTOR, data + 4u * SECTOR, SECTOR));
+    ASSERT_TRUE(file_is(6u * SECTOR, data + 6u * SECTOR, SECTOR));
+    ASSERT_EQ(fake_fat_digest_except(&card, save_first), card_digest);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_unarmed) {
+    omega_cart();
+    open_save();
+    ASSERT_EQ(write_sector(4, 5, img), HP_ST_NOT_ARMED);
+    ASSERT_EQ(gba.omega_writes, 0);
+    /* armed, then each of HELLO, CART_INFO, MOUNT and OPEN of slot 0 disarms */
+    for(uint32_t how = 0; how < 4u; how++) {
+        ASSERT_EQ(arm_with(10, SAV_LEN, save_first), HP_ST_OK);
+        if(how == 0) {
+            ASSERT_EQ(run(11, HP_CMD_HELLO, NULL, 0), HP_ST_OK);
+            ASSERT_EQ(run(12, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+            ASSERT_EQ(open_path(13, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+        } else if(how == 1) {
+            ASSERT_EQ(run(11, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+            ASSERT_EQ(run(12, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+            ASSERT_EQ(open_path(13, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+        } else if(how == 2) {
+            ASSERT_EQ(run(11, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+            ASSERT_EQ(open_path(12, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+            ASSERT_EQ(arm_with(13, SAV_LEN, save_first), HP_ST_OK);
+            ASSERT_EQ(run(14, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+        } else {
+            ASSERT_EQ(open_path(11, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+        }
+        ASSERT_EQ(write_sector(20, 5, img), HP_ST_NOT_ARMED);
+        if(how == 2) ASSERT_EQ(open_path(21, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    }
+    ASSERT_EQ(gba.omega_writes, 0);
+    /* OPEN of another slot does not disarm */
+    ASSERT_EQ(arm_with(30, SAV_LEN, save_first), HP_ST_OK);
+    ASSERT_EQ(open_path(31, 2, "/ROMS/game.gba"), HP_ST_OK);
+    ASSERT_EQ(write_sector(32, 5, img), HP_ST_OK);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_arm_wrong_file) {
+    omega_cart();
+    ASSERT_EQ(run(1, HP_CMD_CART_INFO, NULL, 0), HP_ST_OK);
+    /* before MOUNT, and mounted with slot 0 not open */
+    ASSERT_EQ(arm_with(2, SAV_LEN, 5), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    ASSERT_EQ(run(3, HP_CMD_OMEGA_MOUNT, NULL, 0), HP_ST_OK);
+    ASSERT_EQ(arm_with(4, SAV_LEN, 5), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    ASSERT_EQ(open_path(5, 0, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    save_first = w32(2);
+    /* another size or cluster, and a wrong magic */
+    ASSERT_EQ(arm_with(6, SAV_LEN - 512u, save_first), HP_ST_REFUSED);
+    ASSERT_EQ(p[0], HP_REFUSE_OMEGA);
+    ASSERT_EQ(arm_with(7, SAV_LEN, save_first + 1u), HP_ST_REFUSED);
+    ASSERT_EQ(arm_with(8, SAV_LEN + 1u, save_first), HP_ST_REFUSED);
+    const uint16_t magic[5] = {0x5753, (uint16_t)SAV_LEN, (uint16_t)(SAV_LEN >> 16), (uint16_t)save_first, 0};
+    ASSERT_EQ(run(9, HP_CMD_OMEGA_ARM, magic, 5), HP_ST_BAD_ARG);
+    /* a slot 1 file is not the save */
+    ASSERT_EQ(open_path(10, 1, "/SAVER/Pokemon - Unbound.sav"), HP_ST_OK);
+    ASSERT_EQ(write_sector(11, 0, img), HP_ST_NOT_ARMED);
+    /* a good arming, then a refused one, leaves nothing armed */
+    ASSERT_EQ(arm_with(12, SAV_LEN, save_first), HP_ST_OK);
+    ASSERT_EQ(arm_with(13, SAV_LEN, save_first + 1u), HP_ST_REFUSED);
+    ASSERT_EQ(write_sector(14, 0, img), HP_ST_NOT_ARMED);
+    ASSERT_EQ(gba.omega_writes, 0);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_range) {
+    armed_save(8, 0);
+    ASSERT_EQ(write_sector(5, 32, img), HP_ST_BAD_ARG);
+    ASSERT_EQ(write_sector(6, 0xFFFF, img), HP_ST_BAD_ARG);
+    ASSERT_EQ(gba.omega_writes, 0);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_fragmented) {
+    armed_save(1, 1);
+    for(uint16_t s = 0; s < 32u; s++) {
+        ASSERT_EQ(write_sector((uint8_t)(10 + s), s, img + s * SECTOR), HP_ST_OK);
+        ASSERT_EQ(w32(0), ~hp_crc32_bytes(0xFFFFFFFFu, img + s * SECTOR, SECTOR));
+    }
+    ASSERT_EQ(gba.omega_writes, 256);
+    ASSERT_TRUE(file_is(0, img, SAV_LEN));
+    ASSERT_EQ(fake_fat_digest_except(&card, save_first), card_digest);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_bad_chain) {
+    armed_save(8, 0);
+    fake_fat_set_next(&card, save_first, card.clusters + 9u);
+    const uint64_t digest = fake_fat_digest_except(&card, save_first);
+    ASSERT_EQ(write_sector(5, 20, img), HP_ST_UNSUPPORTED);
+    ASSERT_EQ(p[0], HpOmegaSdError);
+    ASSERT_EQ(gba.omega_writes, 0);
+    ASSERT_EQ(fake_fat_digest_except(&card, save_first), digest);
+    /* a chain that breaks in the middle of a sector's own clusters refuses it whole */
+    fake_fat_set_next(&card, save_first, 0); /* a free entry */
+    ASSERT_EQ(write_sector(6, 1, img), HP_ST_UNSUPPORTED);
+    ASSERT_EQ(gba.omega_writes, 0);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_bad_chain_small_clusters) {
+    /* A sector spans 8 clusters; the last is outside the volume. No block of it is written. */
+    armed_save(1, 0);
+    fake_fat_set_next(&card, save_first + 8u * 3u + 6u, card.clusters + 9u);
+    const uint64_t whole = fake_fat_digest_except(&card, 0);
+    ASSERT_EQ(write_sector(5, 3, img + 3u * SECTOR), HP_ST_UNSUPPORTED);
+    ASSERT_EQ(gba.omega_writes, 0);
+    ASSERT_EQ(fake_fat_digest_except(&card, 0), whole);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_flip) {
+    armed_save(8, 0);
+    fake_gba_omega_flip_after(&gba, 0);
+    ASSERT_EQ(write_sector(5, 5, img + 5u * SECTOR), HP_ST_VERIFY_FAIL);
+    ASSERT_EQ(gba.omega_writes, 8);
+    /* a flip in the last block is found too */
+    fake_gba_omega_flip_after(&gba, 7);
+    ASSERT_EQ(write_sector(6, 5, img + 5u * SECTOR), HP_ST_VERIFY_FAIL);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_cut) {
+    armed_save(8, 0);
+    fake_gba_omega_cut_after(&gba, 3);
+    ASSERT_EQ(write_sector(5, 5, img + 5u * SECTOR), HP_ST_UNSUPPORTED);
+    ASSERT_EQ(p[0], HpOmegaSdError);
+    ASSERT_EQ(gba.omega_writes, 3);
+    ASSERT_EQ(fake_fat_digest_except(&card, save_first), card_digest);
+    fake_fat_free(&card);
+}
+
+TEST(test_cmd_write_resend) {
+    armed_save(8, 0);
+    ASSERT_EQ(write_sector(5, 3, img + 3u * SECTOR), HP_ST_OK);
+    const uint32_t crc = w32(0);
+    ASSERT_EQ(gba.omega_writes, 8);
+    /* the same packet again, as when the response went missing: the stored response, no write */
+    ASSERT_EQ(write_sector(5, 3, img + 3u * SECTOR), HP_ST_OK);
+    ASSERT_EQ(w32(0), crc);
+    ASSERT_EQ(gba.omega_writes, 8);
+    /* a new seq is a new request */
+    ASSERT_EQ(write_sector(6, 3, img + 3u * SECTOR), HP_ST_OK);
+    ASSERT_EQ(gba.omega_writes, 16);
+    fake_fat_free(&card);
+}
+
 int main(void) {
     RUN(test_omega_mount_mbr);
     RUN(test_omega_mount_superfloppy);
@@ -503,5 +715,15 @@ int main(void) {
     RUN(test_cmd_omega_flow);
     RUN(test_cmd_sha_continuity);
     RUN(test_cmd_open_notfound);
+    RUN(test_cmd_write_ok);
+    RUN(test_cmd_write_unarmed);
+    RUN(test_cmd_arm_wrong_file);
+    RUN(test_cmd_write_range);
+    RUN(test_cmd_write_fragmented);
+    RUN(test_cmd_write_bad_chain);
+    RUN(test_cmd_write_bad_chain_small_clusters);
+    RUN(test_cmd_write_flip);
+    RUN(test_cmd_write_cut);
+    RUN(test_cmd_write_resend);
     TEST_EXIT();
 }

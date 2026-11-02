@@ -149,6 +149,9 @@ struct FakeGba {
     uint32_t omega_reads; /* hp_hal_omega_sd_read calls */
     bool omega_failing;
     uint32_t omega_fail_after; /* while failing: reads still served before every one fails */
+    uint32_t omega_writes; /* blocks hp_hal_omega_sd_write put on the card */
+    bool omega_cut, omega_flip;
+    uint32_t omega_cut_at, omega_flip_at; /* omega_writes when the cut / the flip happens */
 };
 
 /* The own header gets a test logo at 0x04..0x9F (a fixed 156-byte pattern, not the real logo, but
@@ -203,6 +206,10 @@ void fake_gba_rom_word(FakeGba* g, uint32_t off, uint16_t w);
 /* After `reads` more hp_hal_omega_sd_read calls, every one fails, as a card that stopped
  * answering */
 void fake_gba_omega_fail_after(FakeGba* g, uint32_t reads);
+/* After `blocks` more blocks written, every later write is dropped and fails, as a power cut */
+void fake_gba_omega_cut_after(FakeGba* g, uint32_t blocks);
+/* After `blocks` more blocks written, the next block written lands with one bit flipped */
+void fake_gba_omega_flip_after(FakeGba* g, uint32_t blocks);
 void fake_gba_counts(const FakeGba* g, FakeGbaCounts* out);
 /* Time the GBA spent since the last call, in µs, as the fake models it: 300,000 per erase, 25 per
  * byte program, 1 per flash read (a sector CRC is 4096), and ROM reads at 7,000,000 per 16 MiB

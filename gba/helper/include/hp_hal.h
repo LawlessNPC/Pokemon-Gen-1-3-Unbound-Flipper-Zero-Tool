@@ -45,3 +45,8 @@ void hp_hal_status(HpStatus s);
  * cart's SD window as the Omega's own kernel does (gba/hp_hal_gba.c): count * 256 halfwords into
  * out, little-endian. false if the card never answered. */
 bool hp_hal_omega_sd_read(uint32_t lba, uint8_t count, uint16_t* out);
+/* Blocks lba .. lba + count - 1 (count 1..4) of the Omega's microSD from data (count * 256
+ * halfwords, little-endian), through the same window, as the Omega's own kernel writes them
+ * (gba/hp_hal_gba.c). false if the card never answered; it is switched off again either way. No
+ * retry. */
+bool hp_hal_omega_sd_write(uint32_t lba, uint8_t count, const uint16_t* data);

@@ -28,12 +28,15 @@
 #define HP_CMD_COMMIT_SECTOR 0x1Bu
 #define HP_CMD_ROM_READ 0x20u
 #define HP_CMD_ROM_CRC32 0x22u
-/* The EZ-Flash Omega's microSD, read-only (multiboot-and-save.md §8, hp_omega.h) */
+/* The EZ-Flash Omega's microSD (multiboot-and-save.md §8, hp_omega.h): reads, and the one write,
+ * a sector of the open save file */
 #define HP_CMD_OMEGA_MOUNT 0x30u
 #define HP_CMD_OMEGA_OPEN 0x31u
 #define HP_CMD_OMEGA_READ 0x32u
 #define HP_CMD_OMEGA_CRC32 0x33u
 #define HP_CMD_OMEGA_SHA256 0x34u
+#define HP_CMD_OMEGA_ARM 0x35u
+#define HP_CMD_OMEGA_WRITE_SECTOR 0x36u
 
 /* Status codes (multiboot-and-save.md §6.4). A response with any status but OK carries two words:
  * a fail code and a fail offset. */
@@ -126,6 +129,9 @@ struct Hp {
     uint16_t last_len;
     /* The Omega's card: mounted by OMEGA_MOUNT; HELLO and CART_INFO start afresh */
     HpOmega omega;
+    /* OMEGA_ARM allowed OMEGA_WRITE_SECTOR to the file open in slot 0; HELLO, CART_INFO, OMEGA_MOUNT
+     * and an OMEGA_OPEN of slot 0 end it. Separate from armed, the save chip's. */
+    bool omega_armed;
     /* OMEGA_SHA256's hash in progress: of slot sha_slot, the next byte expected at sha_next */
     HpSha256 sha;
     bool sha_on;
@@ -148,7 +154,7 @@ void hp_init(Hp* hp);
 uint16_t hp_step(Hp* hp, uint16_t in, uint8_t flags);
 bool hp_exec_pending(const Hp* hp);
 /* Runs the pending command and queues its response; returns the response's first word, HP_SOF.
- * A write-class command (ARM_WRITE, ERASE_SECTOR .. COMMIT_SECTOR) with the same seq, code and
+ * A write-class command (ARM_WRITE, ERASE_SECTOR .. COMMIT_SECTOR, OMEGA_ARM, OMEGA_WRITE_SECTOR) with the same seq, code and
  * packet CRC as the last packet executed is not run again: P resent it because the response went
  * missing, and gets that response again. */
 uint16_t hp_execute(Hp* hp);

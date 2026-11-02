@@ -1,6 +1,7 @@
 #include "hp_omega.h"
 
 #include "hp_hal.h"
+#include "hp_link.h"
 
 /* FAT32 as Microsoft's "FAT: General Overview of On-Disk Format" lays it out: the boot sector's
  * BPB, 32-byte directory entries, LFN runs before their 8.3 entry. */
@@ -327,5 +328,59 @@ HpOmegaResult
         }
         b += run;
     }
+    return HpOmegaOk;
+}
+
+#define HP_OMEGA_SECTOR 4096u
+#define HP_OMEGA_SECTOR_BLOCKS (HP_OMEGA_SECTOR / HP_OMEGA_BLOCK)
+
+/* The run of blocks starting at block b of a sector at file block first: its cluster, its first
+ * block's LBA and its length, at most 4 and not across the cluster's end */
+static HpOmegaResult hp_omega_run(
+    HpOmega* o,
+    HpOmegaFile* f,
+    uint32_t first,
+    uint32_t b,
+    uint32_t* lba,
+    uint32_t* run) {
+    const uint32_t idx = first + b;
+    const uint32_t within = idx % o->spc;
+    uint32_t cluster = 0;
+    const HpOmegaResult r = hp_omega_seek(o, f, idx / o->spc, &cluster);
+    if(r != HpOmegaOk) return r;
+    uint32_t n = o->spc - within;
+    if(n > HP_OMEGA_SECTOR_BLOCKS - b) n = HP_OMEGA_SECTOR_BLOCKS - b;
+    if(n > HP_OMEGA_RUN) n = HP_OMEGA_RUN;
+    *lba = hp_omega_lba(o, cluster) + within;
+    *run = n;
+    return HpOmegaOk;
+}
+
+HpOmegaResult hp_omega_write_sector(HpOmega* o, uint32_t sector, const uint16_t* data, uint32_t* crc) {
+    if(!o->mounted || !o->files[0].used) return HpOmegaBadArg;
+    HpOmegaFile* f = &o->files[0];
+    if(sector >= f->size / HP_OMEGA_SECTOR || f->first < 2u) return HpOmegaBadArg;
+    if(!hp_omega_cluster_ok(o, f->first)) return HpOmegaSdError;
+    const uint32_t first = sector * HP_OMEGA_SECTOR_BLOCKS;
+    uint32_t lba = 0, run = 0;
+    /* Every block's address first, so that a bad chain refuses before the first block is written */
+    for(uint32_t b = 0; b < HP_OMEGA_SECTOR_BLOCKS; b += run) {
+        const HpOmegaResult r = hp_omega_run(o, f, first, b, &lba, &run);
+        if(r != HpOmegaOk) return r;
+    }
+    for(uint32_t b = 0; b < HP_OMEGA_SECTOR_BLOCKS; b += run) {
+        const HpOmegaResult r = hp_omega_run(o, f, first, b, &lba, &run);
+        if(r != HpOmegaOk) return r;
+        if(!hp_hal_omega_sd_write(lba, (uint8_t)run, data + b * 256u)) return HpOmegaSdError;
+    }
+    /* Read back, a block at a time through the directory buffer */
+    uint32_t reg = 0xFFFFFFFFu;
+    for(uint32_t b = 0; b < HP_OMEGA_SECTOR_BLOCKS; b++) {
+        const HpOmegaResult r =
+            hp_omega_read(o, 0, (first + b) * HP_OMEGA_BLOCK, 1, o->dir_buf);
+        if(r != HpOmegaOk) return r;
+        for(uint32_t i = 0; i < 256u; i++) reg = hp_crc32_word(reg, o->dir_buf[i]);
+    }
+    *crc = ~reg;
     return HpOmegaOk;
 }

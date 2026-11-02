@@ -1519,8 +1519,8 @@ The Cartridge runner picks the wire (`gen3_mb_wire_next(wire, si_low, phase)`):
 Pokemon Unbound runs from an EZ-Flash Omega Definitive Edition (DE), not a cartridge with a save
 chip. A game started from the Omega's menu keeps its save in a file on the Omega's microSD,
 `/SAVER/<game>.sav`. So for this cart the helper reads that **file**, through the Omega's own SD
-interface on the cartridge bus, as the Omega's kernel does. This version only reads; nothing writes
-to the card.
+interface on the cartridge bus, as the Omega's kernel does. It reads; and it writes, in place, the 4 KB
+sectors of the one open save file and nothing else (§8.2, §8.3).
 
 ## 8.1 What the Omega shows at power-on
 
@@ -1551,6 +1551,21 @@ From `ez-flash/omega-de-kernel`, `source/Ezcard_OP.c` (Apache License 2.0). 16-b
   1; DMA3, 16-bit, from `0x09E00000`; control 0 at the end. The helper does it at WAITCNT 0, the
   kernel's (it never sets one), and puts its own back after.
 
+- **Write** `count` (1-4) blocks at `lba` (the kernel's `Write_SD_sectors`): control 1, control 3; DMA3,
+  16-bit, `count * 256` halfwords from the data into `0x09E00000`; unlock, `lba` low half to
+  `0x09600000`, high half to `0x09620000`, `0x8000 + count` to `0x09640000`, `0x1500` to
+  `0x09FC0000`; poll `0x09E00000` as for a read; after the last run a delay of 3000 loop iterations,
+  then control 0. Two differences from the kernel: no retry, and after a poll timeout the helper
+  stops writing but still switches the card off (control 0) and puts WAITCNT back, where the kernel
+  returns with the SD left on.
+- **A sector of the save** (`hp_omega_write_sector`, slot 0 only, sector 0-31 of 4096 bytes): the
+  address of each of its 8 blocks is resolved through the file's chain, and range-checked, before the
+  first block is written, so a broken chain (a cluster outside the volume, a free or bad entry, a
+  chain that ends early) refuses with nothing written; with small clusters a sector spans several.
+  Then the blocks go out in runs of up to 4 that never cross a cluster, in place; no FAT entry,
+  directory entry or other file is written. The sector is then read back block by block through the
+  reader's 512-byte buffer, and its CRC-32 is computed while streaming.
+
 The helper's FAT32 reader (`hp_omega.c`) mounts the card (an MBR's first partition, or a boot
 sector at block 0), walks directories by long name (an LFN run whose checksum matches its 8.3
 entry, and whose sequence numbers count down by one to 1) or 8.3 name, case-insensitively, and
@@ -1561,7 +1576,9 @@ the card in runs of up to 4 blocks.
 
 ## 8.3 Commands
 
-Request lengths are fixed, in words; 32-bit numbers go low half first. None is write-class.
+Request lengths are fixed, in words; 32-bit numbers go low half first. OMEGA_ARM and
+OMEGA_WRITE_SECTOR are write-class: a packet with the same seq, code and CRC as the last one executed
+gets the stored response again and is not run twice.
 
 | Code | Command | Request | OK response |
 |---|---|---|---|
@@ -1570,6 +1587,8 @@ Request lengths are fixed, in words; 32-bit numbers go low half first. None is w
 | `0x32` | OMEGA_READ | 4: slot, offset (2, a multiple of 512), blocks (1-8) | 256 a block |
 | `0x33` | OMEGA_CRC32 | 5: slot, offset (2), length (2: 512-0x40000, a multiple of 512) | 2: the CRC-32 (as READ_SECTOR's) |
 | `0x34` | OMEGA_SHA256 | 6: slot, flags (INIT 1, FINAL 2), offset (2), length (2: at most 0x100000) | 0, or with FINAL 16: the digest's bytes, two a word |
+| `0x35` | OMEGA_ARM | 5: magic `0x5752`, size (2), first cluster (2) | 0 |
+| `0x36` | OMEGA_WRITE_SECTOR | 2049: sector (0-31), the 4 KB image (2048 words, low byte first) | 2: the CRC-32 of the 4096 bytes read back |
 
 - **OMEGA_MOUNT is REFUSED** (`HP_REFUSE_CART`) unless this session's CART_INFO found no game the
   helper writes and header bytes 0xA0 (the title's first) and 0xAC (the game code's first) both 0,
@@ -1581,6 +1600,20 @@ Request lengths are fixed, in words; 32-bit numbers go low half first. None is w
 - **OMEGA_SHA256** hashes a file in steps: INIT starts at offset 0, and each later call must begin
   where the last ended, on the same slot. Only the step that reaches the file's size may end short of
   a block. 1 MiB a step keeps each command's BUSY time well inside the Flipper's budget.
+
+- **OMEGA_ARM** first ends any arming. A wrong magic is BAD_ARG. It is REFUSED (`HP_REFUSE_OMEGA`)
+  unless the card is mounted and slot 0 is open with exactly that size and first cluster: the
+  Flipper names the one file that may be written, and the helper checks it is the file it has open.
+  `omega_armed` is separate from ARM_WRITE's `armed`. HELLO, CART_INFO, OMEGA_MOUNT and an OMEGA_OPEN
+  of slot 0 end it (an open of another slot doesn't).
+- **OMEGA_WRITE_SECTOR** is NOT_ARMED unless armed, BAD_ARG for a sector over 31, and UNSUPPORTED
+  with the reader's fail code for a card or chain failure (1: the card didn't answer a write or a
+  read, or the chain is broken; nothing is written for a broken chain). Otherwise it answers the
+  CRC-32 of what it read back; if that differs from the CRC-32 of the request's image it is
+  VERIFY_FAIL, with the usual two fail words (fail code 0, fail offset the sector) and no CRC. The
+  helper shows the red backdrop while it writes.
+- The only blocks ever written are those of the armed save's own clusters, in place. Another slot, a
+  sector past 31, a cluster outside the volume or any other file is refused before a write.
 
 # Uncertain
 

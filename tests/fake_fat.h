@@ -55,4 +55,9 @@ void fake_fat_poke(FakeFat* f, uint32_t lba, uint32_t off, const void* p, uint32
 bool fake_fat_block(const FakeFat* f, uint32_t lba, uint8_t out[512]);
 /* The LBA of byte off of the file starting at first_cluster */
 uint32_t fake_fat_file_lba(FakeFat* f, uint32_t first_cluster, uint32_t off);
+/* Overwrites block lba; false past the card's end */
+bool fake_fat_write_block(FakeFat* f, uint32_t lba, const uint8_t data[512]);
+/* A hash of every block outside the clusters of the chain starting at first_cluster (the chain is
+ * followed only while it names clusters of the volume), the FAT and the directories included */
+uint64_t fake_fat_digest_except(const FakeFat* f, uint32_t first_cluster);
 void fake_fat_free(FakeFat* f);

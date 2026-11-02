@@ -298,6 +298,38 @@ uint32_t fake_fat_file_lba(FakeFat* f, uint32_t first_cluster, uint32_t off) {
     return cluster_lba(f, c) + (off % csize) / BLOCK;
 }
 
+bool fake_fat_write_block(FakeFat* f, uint32_t lba, const uint8_t data[512]) {
+    if(lba >= f->blocks) return false;
+    memcpy(blk_w(f, lba), data, BLOCK);
+    return true;
+}
+
+uint64_t fake_fat_digest_except(const FakeFat* f, uint32_t first_cluster) {
+    uint8_t* in_chain = calloc(f->clusters + 2u, 1);
+    for(uint32_t c = first_cluster, n = 0; c >= 2u && c - 2u < f->clusters && !in_chain[c] && n <= f->clusters;
+        n++) {
+        in_chain[c] = 1;
+        const uint8_t* fb = f->blk[f->fat + c / 128u];
+        c = fb ? get32(fb + (c % 128u) * 4u) & 0x0FFFFFFFu : 0;
+    }
+    uint64_t h = 1469598103934665603ull;
+    for(uint32_t lba = 0; lba < f->blocks; lba++) {
+        const uint32_t cl = lba >= f->data ? (lba - f->data) / f->spc + 2u : 0;
+        if(cl >= 2u && cl - 2u < f->clusters && in_chain[cl]) continue;
+        uint8_t b[BLOCK];
+        fake_fat_block(f, lba, b);
+        h = (h ^ lba) * 1099511628211ull;
+        for(uint32_t i = 0; i < BLOCK; i += 8u) {
+            uint64_t w;
+            memcpy(&w, b + i, 8);
+            h = (h ^ w) * 1099511628211ull;
+            h ^= h >> 29;
+        }
+    }
+    free(in_chain);
+    return h;
+}
+
 void fake_fat_free(FakeFat* f) {
     if(f->blk) {
         for(uint32_t i = 0; i < f->blocks; i++) free(f->blk[i]);

@@ -512,6 +512,36 @@ bool hp_hal_omega_sd_read(uint32_t lba, uint8_t count, uint16_t* out) {
     return true;
 }
 
+void fake_gba_omega_cut_after(FakeGba* g, uint32_t blocks) {
+    g->omega_cut = true;
+    g->omega_cut_at = g->omega_writes + blocks;
+}
+
+void fake_gba_omega_flip_after(FakeGba* g, uint32_t blocks) {
+    g->omega_flip = true;
+    g->omega_flip_at = g->omega_writes + blocks;
+}
+
+bool hp_hal_omega_sd_write(uint32_t lba, uint8_t count, const uint16_t* data) {
+    FakeGba* g = fake_gba_now;
+    if(!g->omega || count < 1u || count > 4u) return false;
+    for(uint32_t k = 0; k < count; k++) {
+        if(g->omega_cut && g->omega_writes >= g->omega_cut_at) return false;
+        uint8_t b[512];
+        for(uint32_t i = 0; i < 256u; i++) {
+            b[2u * i] = (uint8_t)data[k * 256u + i];
+            b[2u * i + 1u] = (uint8_t)(data[k * 256u + i] >> 8);
+        }
+        if(g->omega_flip && g->omega_writes == g->omega_flip_at) {
+            b[100] ^= 0x04u;
+            g->omega_flip = false;
+        }
+        if(!fake_fat_write_block(g->omega, lba + k, b)) return false;
+        g->omega_writes++;
+    }
+    return true;
+}
+
 void fake_gba_rom_word(FakeGba* g, uint32_t off, uint16_t w) {
     g->rom_word_on = true;
     g->rom_word_off = off & ~1u;

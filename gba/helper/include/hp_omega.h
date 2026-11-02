@@ -3,8 +3,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-/* Read-only FAT32 over an EZ-Flash Omega's microSD, through hp_hal_omega_sd_read: mount the card,
- * open files by path, and read them by offset. Never writes. Portable C, no heap.
+/* FAT32 over an EZ-Flash Omega's microSD, through hp_hal_omega_sd_read: mount the card, open files
+ * by path, and read them by offset. The one write is hp_omega_write_sector, which puts 4 KB into the
+ * open save file's own blocks and nothing else. Portable C, no heap.
  *
  * The card: an MBR whose first partition holds the file system, or a boot sector at block 0; 512
  * bytes a sector; FAT32 only. Paths are absolute ("/SAVER/Pokemon - Unbound.sav"), ASCII, matched
@@ -57,3 +58,11 @@ HpOmegaResult hp_omega_open(HpOmega* o, uint8_t slot, const char* path);
  * The part of the last block past the size is whatever the card holds. */
 HpOmegaResult
     hp_omega_read(HpOmega* o, uint8_t slot, uint32_t off, uint8_t blocks, uint16_t* out);
+/* Writes the 4 KB image data (2048 halfwords, little-endian) over sector (0 .. size / 4096 - 1) of
+ * the file in slot 0, in place, and reads it back. First every block address of the sector is
+ * resolved through the file's chain, and a cluster outside the volume or a chain that ends early is
+ * SdError with nothing written. Then the 8 blocks go out in runs of up to 4 (never across a
+ * cluster), and *crc is the CRC-32 (as OMEGA_CRC32's) of the 4096 bytes read back, which the caller
+ * compares with the image's. BadArg: not mounted, slot 0 not open, or a sector out of range. Only
+ * slot 0 is ever written; the file's chain is never changed. */
+HpOmegaResult hp_omega_write_sector(HpOmega* o, uint32_t sector, const uint16_t* data, uint32_t* crc);

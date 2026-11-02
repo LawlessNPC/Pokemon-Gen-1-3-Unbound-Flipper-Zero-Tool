@@ -8,8 +8,12 @@
 #define HP_REQ_WRITE_SECTOR 2050u
 #define HP_REQ_UNKNOWN 0x10000u /* never equal to a 16-bit n */
 #define HP_SECTOR_WORDS (HP_FLASH_SECTOR_LEN / 2u)
+/* OMEGA_WRITE_SECTOR's request: sector, then the 4 KB image as 2048 words */
+#define HP_REQ_OMEGA_WRITE (1u + HP_SECTOR_WORDS)
+#define HP_OMEGA_SECTORS 32u /* 4 KB sectors in the save file, 128 KB */
 
 _Static_assert(HP_REQ_WRITE_SECTOR <= HP_MAX_PAYLOAD, "the longest request fits Hp.req");
+_Static_assert(HP_REQ_OMEGA_WRITE <= HP_MAX_PAYLOAD, "OMEGA_WRITE_SECTOR's request fits Hp.req");
 _Static_assert(HP_SECTOR_WORDS <= HP_MAX_PAYLOAD, "READ_SECTOR's response fits Hp.resp");
 
 /* Sectors 0..27 hold the two save slots; 28..31 (Hall of Fame, then e-Reader or Trainer Tower
@@ -53,6 +57,10 @@ static uint32_t hp_req_len(uint8_t code) {
         return 5;
     case HP_CMD_OMEGA_SHA256:
         return 6;
+    case HP_CMD_OMEGA_ARM:
+        return 5;
+    case HP_CMD_OMEGA_WRITE_SECTOR:
+        return HP_REQ_OMEGA_WRITE;
     case HP_CMD_OMEGA_OPEN:
         return 2u + HP_OMEGA_PATH_MAX / 2u;
     case HP_CMD_ROM_CRC32:
@@ -173,6 +181,7 @@ static void hp_disarm(Hp* hp) {
 static uint16_t hp_cart_info(Hp* hp) {
     hp_disarm(hp);
     hp_omega_init(&hp->omega);
+    hp->omega_armed = false;
     hp->sha_on = false;
     hp->probed = false;
     hp_cart_scan(&hp->cart);
@@ -219,6 +228,7 @@ static uint16_t hp_save_probe(Hp* hp) {
 static uint16_t hp_hello(Hp* hp) {
     hp_disarm(hp);
     hp_omega_init(&hp->omega);
+    hp->omega_armed = false;
     hp->sha_on = false;
     hp->flash.erased_ok = 0;
     const uint8_t* own = hp_hal_own_header();
@@ -532,6 +542,7 @@ static uint16_t hp_omega_fail(Hp* hp, HpOmegaResult r) {
  * code, as the Omega's kernel has (first bytes 0xA0 and 0xAC checked), so that no Omega command
  * ever reaches a genuine cart */
 static uint16_t hp_omega_mount_cmd(Hp* hp) {
+    hp->omega_armed = false;
     const HpCart* c = &hp->cart;
     if(!hp->cart_scanned || c->write_game || c->title0 != 0 || c->code[0] != 0) {
         return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_CART, 0);
@@ -555,6 +566,7 @@ static uint16_t hp_omega_mount_cmd(Hp* hp) {
 
 /* OMEGA_OPEN: slot, path length 1..95, the path's bytes, 2 a word, low byte first */
 static uint16_t hp_omega_open_cmd(Hp* hp) {
+    if(hp->req[0] == 0) hp->omega_armed = false;
     if(!hp->omega.mounted) return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_OMEGA, 0);
     const uint16_t slot = hp->req[0], len = hp->req[1];
     if(slot >= HP_OMEGA_SLOTS || len < 1u || len >= HP_OMEGA_PATH_MAX) {
@@ -674,11 +686,51 @@ static uint16_t hp_omega_sha_cmd(Hp* hp) {
     return hp_respond(hp, HP_ST_OK, 16);
 }
 
+/* OMEGA_ARM: magic, the save's size (2 words) and first cluster (2 words). It first ends any
+ * arming. REFUSED unless the card is mounted and slot 0 is open with exactly that size and first
+ * cluster: the Flipper names the one file that may be written, and the helper checks it is the
+ * file it has open. */
+static uint16_t hp_omega_arm_cmd(Hp* hp) {
+    const uint16_t* a = hp->req;
+    hp->omega_armed = false;
+    if(a[0] != HP_ARM_MAGIC) return hp_fail(hp, HP_ST_BAD_ARG, 0, 0);
+    const HpOmegaFile* f = &hp->omega.files[0];
+    if(!hp->omega.mounted || !f->used || f->size != (a[1] | (uint32_t)a[2] << 16) ||
+       f->first != (a[3] | (uint32_t)a[4] << 16)) {
+        return hp_fail(hp, HP_ST_REFUSED, HP_REFUSE_OMEGA, 0);
+    }
+    hp->omega_armed = true;
+    return hp_respond(hp, HP_ST_OK, 0);
+}
+
+/* OMEGA_WRITE_SECTOR: sector 0..31, then the image's 2048 words. Answers the CRC-32 of the 4096
+ * bytes read back from the card, once it equals the image's; VERIFY_FAIL if it doesn't (with the
+ * usual two fail words, no CRC). */
+static uint16_t hp_omega_write_cmd(Hp* hp) {
+    if(!hp->omega_armed) return hp_fail(hp, HP_ST_NOT_ARMED, 0, 0);
+    const uint16_t sector = hp->req[0];
+    if(sector >= HP_OMEGA_SECTORS) return hp_fail(hp, HP_ST_BAD_ARG, 0, 0);
+    const uint16_t* image = &hp->req[1];
+    uint32_t want = 0xFFFFFFFFu;
+    for(uint32_t i = 0; i < HP_SECTOR_WORDS; i++) want = hp_crc32_word(want, image[i]);
+    want = ~want;
+    uint32_t got = 0;
+    hp_hal_status(HpStatusWriting);
+    const HpOmegaResult r = hp_omega_write_sector(&hp->omega, sector, image, &got);
+    hp_hal_status(HpStatusBusy);
+    if(r != HpOmegaOk) return hp_omega_fail(hp, r);
+    if(got != want) return hp_fail(hp, HP_ST_VERIFY_FAIL, 0, sector);
+    hp->resp[3] = (uint16_t)got;
+    hp->resp[4] = (uint16_t)(got >> 16);
+    return hp_respond(hp, HP_ST_OK, 2);
+}
+
 /* ---- Dispatch ---- */
 
 static bool hp_write_class(uint8_t code) {
     return code == HP_CMD_ARM_WRITE ||
-           (code >= HP_CMD_ERASE_SECTOR && code <= HP_CMD_COMMIT_SECTOR);
+           (code >= HP_CMD_ERASE_SECTOR && code <= HP_CMD_COMMIT_SECTOR) ||
+           code == HP_CMD_OMEGA_ARM || code == HP_CMD_OMEGA_WRITE_SECTOR;
 }
 
 static uint16_t hp_run(Hp* hp) {
@@ -721,6 +773,10 @@ static uint16_t hp_run(Hp* hp) {
         return hp_omega_crc32_cmd(hp);
     case HP_CMD_OMEGA_SHA256:
         return hp_omega_sha_cmd(hp);
+    case HP_CMD_OMEGA_ARM:
+        return hp_omega_arm_cmd(hp);
+    case HP_CMD_OMEGA_WRITE_SECTOR:
+        return hp_omega_write_cmd(hp);
     default:
         return hp_fail(hp, HP_ST_UNSUPPORTED, 0, 0);
     }
