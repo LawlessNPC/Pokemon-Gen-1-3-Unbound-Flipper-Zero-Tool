@@ -7,6 +7,7 @@ _Static_assert(GEN3_LEARNSET_COUNT == 3947, "rerun tools/gen3_tables.py");
 _Static_assert(GEN3_LEARNSET_MAX == 17, "rerun tools/gen3_tables.py");
 _Static_assert(GEN3_HOLDABLE_COUNT == 231, "rerun tools/gen3_tables.py");
 
+#ifndef POKEMON_CART_APP /* the Cartridge app reads this from files/gen3_cart_tables.bin */
 const Gen3SpeciesInfo gen3_species_info_tab[GEN3_NATIONAL_COUNT + 1] = {
     {{0, 0, 0, 0, 0, 0}, {0, 0}, 0, 0, {0, 0}, 0, 0}, /* 0 NONE */
     {{45, 49, 49, 45, 65, 65}, {12, 3}, 31, 3, {65, 0}, 70, 1}, /* 1 BULBASAUR */
@@ -396,7 +397,9 @@ const Gen3SpeciesInfo gen3_species_info_tab[GEN3_NATIONAL_COUNT + 1] = {
     {{100, 100, 100, 100, 100, 100}, {8, 14}, 255, 5, {32, 0}, 100, 409}, /* 385 JIRACHI */
     {{50, 150, 50, 150, 150, 50}, {14, 14}, 255, 5, {46, 0}, 0, 410}, /* 386 DEOXYS */
 };
+#endif
 
+#ifndef POKEMON_CART_APP /* the Cartridge app reads this from files/gen3_cart_tables.bin */
 const uint16_t gen3_internal_to_national_tab[GEN3_INTERNAL_COUNT] = {
     0, /* 0 NONE */
     1, /* 1 BULBASAUR */
@@ -811,6 +814,7 @@ const uint16_t gen3_internal_to_national_tab[GEN3_INTERNAL_COUNT] = {
     386, /* 410 DEOXYS */
     358, /* 411 CHIMECHO */
 };
+#endif
 
 const uint8_t gen3_move_pp_tab[GEN3_MOVE_COUNT] = {
     0, /* 0 NONE */
@@ -1221,6 +1225,7 @@ const uint8_t gen3_item_holdable_tab[(GEN3_ITEM_COUNT + 7) / 8] = {
     0x00, /* items 376..383 */
 };
 
+#ifndef POKEMON_CART_APP /* the Cartridge app reads this from files/gen3_cart_tables.bin */
 const char gen3_ability_name_tab[GEN3_ABILITY_COUNT][13] = {
     "-------", /* 0 NONE */
     "STENCH", /* 1 STENCH */
@@ -1301,6 +1306,7 @@ const char gen3_ability_name_tab[GEN3_ABILITY_COUNT][13] = {
     "CACOPHONY", /* 76 CACOPHONY */
     "AIR LOCK", /* 77 AIR_LOCK */
 };
+#endif
 
 const char gen3_nature_name_tab[GEN3_NATURE_COUNT][8] = {
     "HARDY", /* 0 HARDY */

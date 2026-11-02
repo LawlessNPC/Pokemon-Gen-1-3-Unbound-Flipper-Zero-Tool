@@ -88,8 +88,12 @@ void gen3_menu_show_menu(PokemonFap* pokemon_fap) {
 /* The Pokemon being edited lives until the app exits. Its nickname and moves come from the bulk
  * file, so it is created only once the file reads, and Trade, Edit, Load and Save need the file:
  * false if it can't be read. A read that failed since (the SD card pulled) closed it, so it is
- * opened again here first. */
+ * opened again here first. Cartridge also needs its tables file (files/gen3_cart_tables.bin). */
 bool gen3_menu_editor_ready(PokemonFap* pokemon_fap) {
+#ifdef POKEMON_CART_APP
+    /* The Cartridge app reads its species, ability and national tables from the SD card too */
+    if(!gen3_data_tables_load()) return false;
+#endif
     if(!gen3_bulk_ready()) gen3_bulk_furi_open();
     if(!gen3_bulk_ready()) return false;
     if(!pokemon_fap->gen3_editor) {

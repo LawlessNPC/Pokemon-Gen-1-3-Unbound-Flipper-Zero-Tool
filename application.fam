@@ -58,6 +58,7 @@ App(
         "src/gen3/gen3_cart_furi.c",
         "src/gen3/gen3_data.c",
         "src/gen3/gen3_data_gen.c",
+        "src/gen3/gen3_data_tables_furi.c",
         "src/gen3/gen3_edit.c",
         "src/gen3/gen3_letters.c",
         "src/gen3/gen3_pk3.c",

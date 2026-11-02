@@ -103,7 +103,22 @@ uint16_t gen3_move_by_name_get(size_t i);
  * gives 0. */
 uint16_t gen3_holdable_by_name_get(size_t i);
 
-/* Generated arrays (gen3_data_gen.c). Use the functions above. */
+#ifdef POKEMON_CART_APP
+/* The Cartridge app keeps the species, internal-to-national and ability tables in
+ * files/gen3_cart_tables.bin (tests/gen_cart_tables.c), not in its code. Open copies them into one
+ * heap block that lives until gen3_data_tables_free; the source is not used after it returns.
+ * It validates magic, version, counts, the CRC-32 of the payload and the file length. false =
+ * unusable, nothing is kept. Until it succeeds, gen3_species is NULL, gen3_national_from_internal
+ * 0 and gen3_ability_name "???". Open again when already loaded is a no-op that returns true. */
+bool gen3_data_tables_open(Gen3BulkRead read, void* ctx);
+void gen3_data_tables_free(void);
+bool gen3_data_tables_ready(void);
+/* Opens the file from the app's assets (gen3_data_tables_furi.c). */
+bool gen3_data_tables_load(void);
+#endif
+
+/* Generated arrays (gen3_data_gen.c). Use the functions above. The Cartridge app compiles in
+ * neither the species, internal-to-national nor ability name array. */
 extern const Gen3SpeciesInfo gen3_species_info_tab[GEN3_NATIONAL_COUNT + 1];
 extern const uint16_t gen3_internal_to_national_tab[GEN3_INTERNAL_COUNT];
 extern const uint8_t gen3_move_pp_tab[GEN3_MOVE_COUNT];

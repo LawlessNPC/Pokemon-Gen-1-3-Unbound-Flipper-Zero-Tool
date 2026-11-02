@@ -8,6 +8,7 @@
 
 #include <gblink/include/gblink_pinconf.h>
 #include <src/gen3/gen3_bulk_furi.h>
+#include <src/gen3/gen3_data.h>
 #include <src/gen3/gen3_ub_data_furi.h>
 #include <src/gen3/gen3_pins_furi.h>
 #include <src/views/gen3_species_select.h>
@@ -121,6 +122,10 @@ static PokemonFap* pokemon_cart_alloc(void) {
     // names "#<id>" and the levels unknown
     gen3_ub_data_furi_open();
 
+    // The species, internal-to-national and ability tables, which this app reads from the SD
+    // card instead of carrying; a missing file leaves the Gen III editor "data missing"
+    gen3_data_tables_load();
+
     // The instructions; on the first entry they check the Gen III data file
     scene_manager_set_scene_state(pokemon_fap->scene_manager, PokemonSceneGen3CartConnect, 0);
     scene_manager_next_scene(pokemon_fap->scene_manager, PokemonSceneGen3CartConnect);
@@ -155,6 +160,7 @@ static void pokemon_cart_free(PokemonFap* pokemon_fap) {
     // Gen III bulk data file, opened by gen3_menu_editor_ready, and Unbound's
     gen3_bulk_furi_close();
     gen3_ub_data_furi_close();
+    gen3_data_tables_free();
 
     furi_record_close(RECORD_GUI);
 

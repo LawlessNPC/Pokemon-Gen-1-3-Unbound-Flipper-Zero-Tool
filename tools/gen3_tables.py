@@ -770,10 +770,19 @@ def render(d):
     ]
 
     def table(decl, rows):
+        # The Cartridge app reads these three from files/gen3_cart_tables.bin
+        guard = any(
+            n in decl
+            for n in ("gen3_species_info_tab", "gen3_internal_to_national_tab", "gen3_ability_name_tab")
+        )
         out.append("")
+        if guard:
+            out.append(GUARD_OPEN)
         out.append(f"{decl} = {{")
         out.extend(f"    {value}, /* {comment} */" for value, comment in rows)
         out.append("};")
+        if guard:
+            out.append("#endif")
 
     labels = d["national_label"]
     rows = [("{{0, 0, 0, 0, 0, 0}, {0, 0}, 0, 0, {0, 0}, 0, 0}", "0 NONE")]
@@ -823,6 +832,9 @@ def render(d):
         table("const char " + decl, rows)
 
     return "\n".join(out) + "\n"
+
+
+GUARD_OPEN = "#ifndef POKEMON_CART_APP /* the Cartridge app reads this from files/gen3_cart_tables.bin */"
 
 
 def u16_block(values, count, what):

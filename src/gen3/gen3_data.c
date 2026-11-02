@@ -1,14 +1,36 @@
 #include <src/gen3/gen3_data.h>
 
+#include <stdlib.h>
 #include <string.h>
 
 _Static_assert(sizeof(Gen3SpeciesInfo) == 16, "Gen3SpeciesInfo must stay 16 bytes");
 
 static const char gen3_unknown_name[] = "???";
 
+#ifdef POKEMON_CART_APP
+/* The Cartridge app does not compile in the species, internal-to-national and ability tables;
+ * gen3_data_tables_open copies them from files/gen3_cart_tables.bin into one heap block. Until
+ * then every accessor answers as for an unknown id. */
+static struct {
+    void* block; /* NULL: not loaded */
+    const Gen3SpeciesInfo* species;
+    const uint16_t* internal_to_national;
+    const char (*ability_name)[13];
+} cart_tab;
+#define TAB_SPECIES              cart_tab.species
+#define TAB_INTERNAL_TO_NATIONAL cart_tab.internal_to_national
+#define TAB_ABILITY_NAME         cart_tab.ability_name
+#define TAB_LOADED               (cart_tab.block != NULL)
+#else
+#define TAB_SPECIES              gen3_species_info_tab
+#define TAB_INTERNAL_TO_NATIONAL gen3_internal_to_national_tab
+#define TAB_ABILITY_NAME         gen3_ability_name_tab
+#define TAB_LOADED               true
+#endif
+
 const Gen3SpeciesInfo* gen3_species(uint16_t national) {
-    if(national < 1 || national > GEN3_NATIONAL_COUNT) return NULL;
-    return &gen3_species_info_tab[national];
+    if(national < 1 || national > GEN3_NATIONAL_COUNT || !TAB_LOADED) return NULL;
+    return &TAB_SPECIES[national];
 }
 
 bool gen3_species_two_abilities(uint16_t national) {
@@ -24,8 +46,8 @@ bool gen3_species_gender_fixed(uint16_t national) {
 }
 
 uint16_t gen3_national_from_internal(uint16_t internal) {
-    if(internal >= GEN3_INTERNAL_COUNT) return 0;
-    return gen3_internal_to_national_tab[internal];
+    if(internal >= GEN3_INTERNAL_COUNT || !TAB_LOADED) return 0;
+    return TAB_INTERNAL_TO_NATIONAL[internal];
 }
 
 uint16_t gen3_internal_from_national(uint16_t national) {
@@ -43,8 +65,8 @@ bool gen3_item_holdable(uint16_t item) {
 }
 
 const char* gen3_ability_name(uint8_t ability) {
-    if(ability >= GEN3_ABILITY_COUNT) return gen3_unknown_name;
-    return gen3_ability_name_tab[ability];
+    if(ability >= GEN3_ABILITY_COUNT || !TAB_LOADED) return gen3_unknown_name;
+    return TAB_ABILITY_NAME[ability];
 }
 
 const char* gen3_nature_name(uint8_t nature) {
@@ -221,3 +243,66 @@ uint16_t gen3_holdable_by_name_get(size_t i) {
     }
     return item;
 }
+
+#ifdef POKEMON_CART_APP
+/* files/gen3_cart_tables.bin (version 1), written by tests/gen_cart_tables.c. Little-endian: a
+ * 16-byte header, then the payload, which is the three tables in their in-memory layout:
+ * gen3_species_info_tab (387 x Gen3SpeciesInfo), gen3_internal_to_national_tab (412 x u16) and
+ * gen3_ability_name_tab (78 x 13 bytes). */
+#define CT_SPECIES_SIZE (sizeof(Gen3SpeciesInfo) * (GEN3_NATIONAL_COUNT + 1))
+#define CT_INTERNAL_OFF CT_SPECIES_SIZE
+#define CT_ABILITY_OFF  (CT_INTERNAL_OFF + 2 * GEN3_INTERNAL_COUNT)
+#define CT_PAYLOAD_SIZE (CT_ABILITY_OFF + 13 * GEN3_ABILITY_COUNT)
+#define CT_HEADER_SIZE  16
+
+_Static_assert(CT_PAYLOAD_SIZE == 8030, "gen3_cart_tables.bin payload size");
+
+/* The header up to its CRC: magic "G3CT", u16 version 1, u16 species count 387 (index 0 unused),
+ * u16 internal ids 412, u16 abilities 78. The u32 CRC-32 of the payload follows. */
+static const uint8_t cart_header[12] = {
+    'G',
+    '3',
+    'C',
+    'T',
+    1,
+    0,
+    (GEN3_NATIONAL_COUNT + 1) & 0xFF,
+    (GEN3_NATIONAL_COUNT + 1) >> 8,
+    GEN3_INTERNAL_COUNT & 0xFF,
+    GEN3_INTERNAL_COUNT >> 8,
+    GEN3_ABILITY_COUNT,
+    0};
+
+bool gen3_data_tables_open(Gen3BulkRead read, void* ctx) {
+    uint8_t head[CT_HEADER_SIZE];
+    uint8_t extra;
+    if(cart_tab.block) return true;
+    if(!read || !read(ctx, 0, head, sizeof(head)) ||
+       memcmp(head, cart_header, sizeof(cart_header)) != 0)
+        return false;
+    uint32_t want = bulk_le16(head + 12) | bulk_le16(head + 14) << 16;
+    uint8_t* block = malloc(CT_PAYLOAD_SIZE);
+    if(!block) return false;
+    /* The CRC covers to the end of the file, so nothing may follow */
+    if(!read(ctx, CT_HEADER_SIZE, block, CT_PAYLOAD_SIZE) ||
+       ~bulk_crc32(0xFFFFFFFFu, block, CT_PAYLOAD_SIZE) != want ||
+       read(ctx, CT_HEADER_SIZE + CT_PAYLOAD_SIZE, &extra, 1)) {
+        free(block);
+        return false;
+    }
+    cart_tab.block = block;
+    cart_tab.species = (const Gen3SpeciesInfo*)block;
+    cart_tab.internal_to_national = (const uint16_t*)(block + CT_INTERNAL_OFF);
+    cart_tab.ability_name = (const char(*)[13])(block + CT_ABILITY_OFF);
+    return true;
+}
+
+void gen3_data_tables_free(void) {
+    free(cart_tab.block);
+    memset(&cart_tab, 0, sizeof(cart_tab));
+}
+
+bool gen3_data_tables_ready(void) {
+    return cart_tab.block != NULL;
+}
+#endif
