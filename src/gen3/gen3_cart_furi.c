@@ -733,8 +733,14 @@ static Gen3CartResult cart_omega_connect(Gen3CartSession* s) {
     return r;
 }
 
-static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
-    cart_driver_stop(s);
+/* The jobs' sector buffer, where the cart and the Omega find it too */
+static void cart_buf_set(Gen3CartSession* s, uint8_t* buf) {
+    s->buf = buf;
+    s->cart.buf = buf;
+    s->omega.buf = buf;
+}
+
+static Gen3CartResult cart_connect(Gen3CartSession* s) {
     uint32_t len = 0;
     Gen3CartResult r = cart_helper_load(s, &len);
     if(r != Gen3CartOk) return r;
@@ -760,7 +766,11 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
 
     /* The jobs' sector buffer comes out of the image's freed hole, so the peak is the image alone.
      * Nothing above uses cli, cart or omega; the first command is below. */
-    if(!s->cart_ready) cart_setup(s);
+    if(!s->cart_ready) {
+        cart_setup(s);
+    } else {
+        cart_buf_set(s, malloc(GEN3_CART_BUF_SIZE));
+    }
 
     /* The GBA starts the helper a few seconds after the last multiboot word */
     gen3_cart_expect_boot(&s->cart);
@@ -780,6 +790,20 @@ static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     s->status.dropped = dropped;
     s->status.finished = gen3_cart_finished(&s->cart);
     cart_unlock(s);
+    return r;
+}
+
+/* A Connect after the first frees the jobs' buffer while the helper image is loaded and sent: the
+ * image needs one block of its size, and the buffer, taken from the last image's hole, leaves too
+ * little of it. A Connect that ends before taking it again takes it here. */
+static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
+    cart_driver_stop(s);
+    if(s->cart_ready) {
+        free(s->buf);
+        cart_buf_set(s, NULL);
+    }
+    const Gen3CartResult r = cart_connect(s);
+    if(s->cart_ready && !s->buf) cart_buf_set(s, malloc(GEN3_CART_BUF_SIZE));
     return r;
 }
 
