@@ -150,10 +150,16 @@ bool pokemon_scene_gen3_cart_omega_pics_on_event(void* context, SceneManagerEven
     return true;
 }
 
+/* The picture view lives for the visit only (memory is tight), so it goes here. But on_exit runs
+ * before the next scene's on_enter, while it is still the shown view, and removing the shown view
+ * stops the view dispatcher: the app would close to the Flipper's menu on every OK and Back. So
+ * the submenu, which the app keeps for its whole life, is shown first; every scene this one
+ * leaves to shows its own view in on_enter right after. */
 void pokemon_scene_gen3_cart_omega_pics_on_exit(void* context) {
     PokemonFap* pokemon_fap = context;
 
     gen3_cart_pic_drop(&gen3_cart_ui_get(pokemon_fap)->pics);
+    view_dispatcher_switch_to_view(pokemon_fap->view_dispatcher, AppViewSubmenu);
     gen3_ub_pic_select_free(pokemon_fap->view_dispatcher, AppViewGen3UbPic, gen3_cart_pics_view);
     gen3_cart_pics_view = NULL;
 }
