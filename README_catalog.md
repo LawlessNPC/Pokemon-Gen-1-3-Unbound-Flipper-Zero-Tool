@@ -10,7 +10,7 @@ See the project's README on GitHub https://github.com/LawlessNPC/Pokemon-Gen-1-3
 
 ## Connection: Flipper Zero GPIO - Game Boy
 
-See the project's README on GitHub https://github.com/LawlessNPC/Pokemon-Gen-1-3-Unbound-Flipper-Zero-Tool/blob/main/README.md#hardware-interface for Link Cable interface adapters available on Tindie.
+See the project's README on GitHub https://github.com/LawlessNPC/Pokemon-Gen-1-3-Unbound-Flipper-Zero-Tool/blob/main/docs/guide.md#hardware-interface for Link Cable interface adapters available on Tindie.
 
 The Original pinout is as follows:
 
