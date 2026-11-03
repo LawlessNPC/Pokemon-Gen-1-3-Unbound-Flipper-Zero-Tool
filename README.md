@@ -176,7 +176,7 @@ Details on the hardware interface, as well as how to create your own adapter boa
 
 ## Installation Directions
 
-This application can be installed through the [Flipper Application Catalog](https://lab.flipper.net/apps/pokemon), the [Flipper Mobile Application](https://docs.flipper.net/mobile-app), or a pre-compiled application binary can be found on the [Releases](https://github.com/KBEmbedded/Flipper-Zero-Game-Boy-Pokemon-Trading/releases) page of this repo.
+Pre-compiled applications are on the [Releases](https://github.com/LawlessNPC/Pokemon-Gen-1-3-Unbound-Flipper-Zero-Tool/releases) page of this repo. The Flipper Application Catalog and the Flipper Mobile App install the original Pokemon Trade Tool, which has neither Gen III nor Pokemon Cartridge.
 
 The application can also be built from source using [ufbt](https://github.com/flipperdevices/flipperzero-ufbt) or compiling the application against a firmware of choice using [fbt](https://github.com/flipperdevices/flipperzero-firmware/blob/dev/documentation/AppsOnSDCard.md). This will install the application to the `apps/GPIO/` folder on the Flipper's SD card.
 
@@ -185,7 +185,7 @@ From version 3.1 the application is two apps, built together from this source:
 - `pokemon.fap`, Pokemon Trade Tool: Gen I, Gen II and Gen III trading and the editors;
 - `pokemon_cart.fap`, Pokemon Cartridge: the Gen III [cartridge save access](#cartridge-save-access).
 
-Install both, side by side in `apps/GPIO/` on the SD card. `ufbt` builds both into `dist/`; `ufbt launch` needs `APPID=pokemon` or `APPID=pokemon_cart` to say which one to install and start. Whether an install from the Application Catalog or the mobile app brings `pokemon_cart.fap` along is not known yet: if Gen III → `Cartridge` shows `App missing`, copy `pokemon_cart.fap` from the [Releases](https://github.com/KBEmbedded/Flipper-Zero-Game-Boy-Pokemon-Trading/releases) page next to `pokemon.fap`.
+Install both, side by side in `apps/GPIO/` on the SD card. `ufbt` builds both into `dist/`; `ufbt launch` needs `APPID=pokemon` or `APPID=pokemon_cart` to say which one to install and start. If Gen III → `Cartridge` shows `App missing`, copy `pokemon_cart.fap` from the [Releases](https://github.com/LawlessNPC/Pokemon-Gen-1-3-Unbound-Flipper-Zero-Tool/releases) page next to `pokemon.fap`.
 
 Manually built applications (both `.fap` files) can be copied to the SD card using [qFlipper](https://docs.flipper.net/qflipper).
 
@@ -736,7 +736,7 @@ The Gen I/II trade, with a Game Boy or Game Boy Color game running on:
 Gen III, on a Game Boy Advance over a Game Boy Color link cable: Pokemon Cartridge with Ruby and FireRed cartridges and with Pokemon Unbound on an EZ-Flash Omega Definitive Edition. Gen III trading is not yet tested on hardware; see [Games](#games).
 
 ## Contributors
-[![Contributors](https://contrib.rocks/image?repo=KBEmbedded/Flipper-Zero-Game-Boy-Pokemon-Trading)](https://github.com/KBEmbedded/Flipper-Zero-Game-Boy-Pokemon-Trading/graphs/contributors)
+[![Contributors](https://contrib.rocks/image?repo=LawlessNPC/Pokemon-Gen-1-3-Unbound-Flipper-Zero-Tool)](https://github.com/LawlessNPC/Pokemon-Gen-1-3-Unbound-Flipper-Zero-Tool/graphs/contributors)
 
 
 ## Links
