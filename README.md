@@ -1,11 +1,96 @@
-# Pokemon Trade Tool for Flipper
+# Pokemon Trade Tool for Flipper Zero
 
-## Watch it in Action
-The video below trades a Bulbasaur from the Flipper to a Game Boy Color with Pokemon Silver. The Game Boy trades its Cyndaquil. The Flipper is then used to modify the Cyndaquil to infect it with Pokerus, modify its EVs and IVs, and have the Cyndaquil hold an Antidote before it is traded back to the Game Boy.
+Trade Pokemon between a Flipper Zero and a Game Boy, Game Boy Color or Game Boy Advance, change them on the Flipper, and send them back. On the Game Boy Advance, **Pokemon Cartridge** goes one step further: it edits the Pokemon in your save, including **Pokemon Unbound on an EZ-Flash Omega**, over the link cable and with no computer.
 
 [![Watch a Trade in Action](docs/images/yt-vid-preview-frame.png)](http://www.youtube.com/watch?v=zONctHIPgEo "Trade in action")
 
+_The video trades a Bulbasaur from the Flipper to a Game Boy Color with Pokemon Silver, which trades its Cyndaquil back. The Flipper then gives the Cyndaquil Pokerus, new EVs and IVs and an Antidote to hold, and trades it back._
+
+## At a glance
+
+| Game | Trade with the Flipper | Edit the save over the cable |
+| --- | :---: | :---: |
+| Red, Blue, Yellow | ✅ | |
+| Gold, Silver, Crystal | ✅ | |
+| Ruby, Sapphire, FireRed, LeafGreen | ✅ ¹ | ✅ ² |
+| Emerald | untested | read only ³ |
+| **Pokemon Unbound** 2.1.1.1 on an EZ-Flash Omega Definitive Edition | | ✅ |
+
+¹ Needs a GBA link cable and a Game Link module whose SD line is connected (on the KBEmbedded module, the two SD jumper pads bridged). Not yet tested on hardware.<br>
+² Writing for English cartridges. Other Western languages: back up and browse; Japanese: back up only.<br>
+³ Back up, browse and copy the ROM.
+
+Trading is for non-Japanese games only[^JPN].
+
+## Quick start
+
+### What you need
+
+- A **Flipper Zero** with both apps in `apps/GPIO/` on its SD card: **Pokemon Trade Tool** (`pokemon.fap`) and **Pokemon Cartridge** (`pokemon_cart.fap`). See [Installation](#installation-directions).
+- A **Game Link module** for the Flipper's GPIO pins: the [KBEmbedded Flipper GB Link](https://www.tindie.com/products/kbembedded/game-link-gpio-module-for-flipper-zero-game-boy/) or a [MALVEKE](https://www.tindie.com/products/efuentealba/malveke-game-boy-tools-for-flipper-zero/) board.
+- A **link cable**:
+  - a Game Boy Color link cable for Gen I and II trades, and for Pokemon Cartridge on a Game Boy Advance (it works on any module);
+  - a Game Boy Advance link cable for Gen III trades.
+
+### Pokemon Unbound: change and add Pokemon
+
+> [!IMPORTANT]
+> **Let the Omega save first.** After playing, save in the game and switch the GBA off. Then switch it on normally once and let the Omega copy the save to its card (a saving screen, or `Save sav?`), and switch it off again. If you skip this, Cartridge says `Omega hasn't saved to its card`.
+
+1. Plug the Game Boy Color link cable into the Flipper's module and into the GBA (either end). Leave the GBA off.
+2. On the Flipper, open **Apps → GPIO → Pokemon Cartridge** and press `Start`.
+3. On the GBA, hold **START + SELECT** and switch it on. Keep holding until the Nintendo logo is gone. The screen turns green while the Flipper sends it a small helper program.
+4. Wait while the Flipper finds your game and backs up your save: about a minute and a half, longer the very first time while it checks your Unbound file. The menu then says **POKEMON UNBOUND**.
+5. Choose `Party and boxes`, then your party or a box.
+   - **Change a Pokemon:** open it and choose what to change: `Pokemon` (pick a letter, step through the species and their pictures with Left and Right, and press OK), `Level`, `Nickname`, `Held item`, the moves, `Nature`, `Ability`, `Shiny`, `IVs` or `EVs`. Press Back when you are done: the slot shows `*`.
+   - **Add a Pokemon:** open an empty box slot (`-- empty --`), choose `New Pokemon`, pick the species, set it up, press Back and answer `Put`.
+6. Back on the menu, choose `Write changes`, then `Write`, and wait for `Written`.
+7. Switch the GBA off, switch it on normally and start Unbound from the Omega's menu. Your Pokemon are waiting for you.
+
+<details>
+<summary><b>Good to know</b></summary>
+
+- **Your save is backed up first.** Every connect saves a copy to `apps_data/pokemon/gen3/backups/` on the Flipper's SD card, and `Restore backup` puts one back.
+- **Nothing changes until you write.** `Discard changes`, or closing Cartridge, drops your edits.
+- **Pictures.** The original species' pictures are in the app. Newer species show `?` for a moment the first time while the Flipper fetches the picture from your own Unbound file.
+- **`Writing off: Bad cartridge header`** in place of POKEMON UNBOUND means the GBA couldn't read the Omega. Switch the GBA off, wait about 10 seconds, and connect again.
+- **`Not enough memory`**: close Cartridge, restart the Flipper (Settings → Power → Reboot) and open Cartridge again.
+- **Close Cartridge before you plug the Flipper into a computer.** The USB connection takes memory Cartridge needs, and the Flipper can freeze.
+
+</details>
+
+More in [Pokemon Unbound on an EZ-Flash Omega](#pokemon-unbound-on-an-ez-flash-omega).
+
+### Ruby, Sapphire, FireRed or LeafGreen: trade
+
+1. On the Flipper, open **Pokemon Trade Tool**, choose `Gen III  (GBA non-JPN)`, then `Trade`.
+2. Plug the GBA link cable into the Flipper first. If the screen keeps saying `Plug in the cable (or swap its ends)`, use the cable's other plug. Then plug the other end into the GBA.
+3. On the GBA, go upstairs in a Pokemon Center and talk to the Trade Center attendant: in Ruby and Sapphire the middle one, in FireRed and LeafGreen the right-hand one (`TRADE CENTER`). Let the game save.
+4. Sit at the table: the Flipper sits too, and its Pokemon is on the right. Pick one of yours, then `TRADE` and `YES`.
+5. The Pokemon you get is now in `Edit Pokemon` on the Flipper. Change it and trade it back, or `Save .pk3` it to keep it.
+
+More in [Trading](#trading).
+
+### Ruby, Sapphire, FireRed or LeafGreen: edit the cartridge
+
+Put the cartridge in the GBA and follow steps 1 to 6 of the [Unbound guide](#pokemon-unbound-change-and-add-pokemon); there is nothing to save first. The menu is headed with the game's name, and a Pokemon opens in the Gen III [editor](#editor). After `Written`, switch the GBA off and on, and play. More in [Cartridge (save access)](#cartridge-save-access).
+
+### Red to Crystal: trade
+
+1. Open **Pokemon Trade Tool** and choose `Gen I    (R/B/Y non-JPN)` or `Gen II   (G/S/C non-JPN)`.
+2. Pick the Pokemon to offer and change it as you like, then choose `Trade PKMN` and plug the cable into the Game Boy.
+3. On the Game Boy, go upstairs in a Pokemon Center and talk to the Cable Club attendant. The Flipper says `READY`.
+4. Walk to the table, press A and trade. The Pokemon you get stays on the Flipper: change it and trade it back.
+
+More in [Instructions for Use](#instructions-for-use).
+
 ## Contents
+- [At a glance](#at-a-glance)
+- [Quick start](#quick-start)
+  - [Pokemon Unbound: change and add Pokemon](#pokemon-unbound-change-and-add-pokemon)
+  - [Ruby, Sapphire, FireRed or LeafGreen: trade](#ruby-sapphire-firered-or-leafgreen-trade)
+  - [Ruby, Sapphire, FireRed or LeafGreen: edit the cartridge](#ruby-sapphire-firered-or-leafgreen-edit-the-cartridge)
+  - [Red to Crystal: trade](#red-to-crystal-trade)
 - [Introduction](#introduction)
 - [Hardware Interface](#hardware-interface)
 - [Installation Directions](#installation-directions)
@@ -17,6 +102,9 @@ The video below trades a Bulbasaur from the Flipper to a Game Boy Color with Pok
     - [Modifying Traded Pokemon](#modifying-traded-pokemon)
     - [Reset Trade Connection State](#reset-trade-connection-state)
 - [Gen III (Game Boy Advance)](#gen-iii-game-boy-advance)
+  - [Trading](#trading)
+  - [Cartridge (save access)](#cartridge-save-access)
+  - [Pokemon Unbound on an EZ-Flash Omega](#pokemon-unbound-on-an-ez-flash-omega)
 - [How it Works / Build your own Interface](#how-does-it-work)
 
 
@@ -24,7 +112,7 @@ The video below trades a Bulbasaur from the Flipper to a Game Boy Color with Pok
 
 This is a Pokemon exchange application from Flipper Zero to Game Boy supporting Generation I and II games; Red, Blue, Yellow, Gold, Silver, and Crystal (all non-Japanese regions[^JPN]). It allows trading Pokemon to and from a Game Boy; allowing for customization and/or modification of Pokemon.
 
-Version 3.0 adds [Generation III](#gen-iii-game-boy-advance): Ruby, Sapphire, FireRed and LeafGreen (non-Japanese). Version 3.1 adds [Cartridge](#cartridge-save-access), a second app that backs up, edits and writes back the save of a Gen III cartridge over the link cable (experimental).
+Version 3.0 adds [Generation III](#gen-iii-game-boy-advance): Ruby, Sapphire, FireRed and LeafGreen (non-Japanese). Version 3.1 adds [Cartridge](#cartridge-save-access), a second app that backs up, edits and writes back the save of a Gen III cartridge over the link cable, and of [Pokemon Unbound on an EZ-Flash Omega](#pokemon-unbound-on-an-ez-flash-omega).
 
 [^JPN]: Japanese releases of all Generation I and II games use a different data layout, this application implements the data layout used in all other global regions. Attempting to trade between a Japanese cartridge and the Flipper [risks corrupting or erasing save data](https://web.archive.org/web/20221009111851/http://www.nintendo.com/consumer/systems/gameboy/trouble_specificgame.jsp#erasing)
 
@@ -404,7 +492,7 @@ Version 2.0 of the Pokemon Trade tool fixes a bug on MALVEKE boards that are Rev
 The main menu's `Gen III  (GBA non-JPN)` entry is for the Game Boy Advance games. Its menu has `Trade`, `Edit Pokemon`, `Load .pk3`, `Save .pk3`, `National Dex: Off`, `Link Test` and `Cartridge` (while trading, `End trade` in place of the last two).
 
 ### Games
-English Ruby, Sapphire, FireRed and LeafGreen. Not yet tested on hardware: the checklists in `docs/gen3/` (see [Link Test, log and checklists](#link-test-log-and-checklists)) are the test. Emerald is untested.
+English Ruby, Sapphire, FireRed and LeafGreen. Trading is not yet tested on hardware: the checklists in `docs/gen3/` (see [Link Test, log and checklists](#link-test-log-and-checklists)) are the test. Emerald is untested.
 
 The Flipper links as a player of the game it meets: with FireRed or LeafGreen, as a player of that game (a FireRed/LeafGreen avatar and a Kanto-style trainer card); with Ruby or Sapphire, as a Ruby player.
 
@@ -505,7 +593,7 @@ Experimental. `Cartridge` reads the save of the cartridge in the GBA over the li
 
 **Copy ROM.** `Copy ROM` copies the cartridge's ROM to `apps_data/pokemon/gen3/roms/<game code>_v<revision>.gba`, checking each piece against the helper and the SD card. A 16 MB game takes about 2.5 hours; keep both powered. Back offers to stop, and `Copy ROM` later resumes where it stopped.
 
-**Log.** Cartridge logs to `apps_data/pokemon/gen3_cart.log`, which it creates anew at the first `Start` after it opens. After a problem, copy it off the SD card before you open Cartridge again.
+**Log.** Cartridge logs to `apps_data/pokemon/gen3_cart.log`, which it creates anew at the first `Start` after it opens. After a problem, close Cartridge, then copy the log off the SD card before you open Cartridge again.
 
 **The helper.** The program the Flipper sends to the GBA is built from `gba/helper/` with the ufbt toolchain (`make -C gba/helper install`), which writes `files/gen3_helper.mb`; both apps ship that file. Never edit it by hand. `make -C gba/helper check` rebuilds it and checks that the result is byte for byte the committed file. Pokemon Cartridge always sends its own built-in copy of that file, and checks only the helper's protocol version (`HP_PROTO_VERSION`, in the file's header and in the helper's first answer). `HP_BUILD_ID` is for logs and support only: the helper reports it, `gen3_cart.log` records it (`hello proto 1 build 1`), and nothing checks it. Releasing: if `files/gen3_helper.mb` differs from the one in the last release, bump `HP_BUILD_ID` in `gba/helper/include/hp_version.h`, so that logs tell the two apart (the tests in `tests/test_hp_link.c` that pin build 1 change with it), then run `make -C gba/helper install`. Development builds keep build 1, which version 3.1 ships.
 
@@ -524,7 +612,11 @@ Pictures: the species picker shows each species' picture. The original ones (up 
 
 **Save first.** While you play, the Definitive Edition keeps the save in the cart and copies it to its card at the next normal power-on. So after playing, switch the GBA on normally once and let the Omega save, then switch it off, and only then connect. Cartridge checks this, and says so if the save hasn't reached the card yet.
 
-The checklist is [`docs/gen3/hardware-test-unbound.md`](docs/gen3/hardware-test-unbound.md).
+Tested on hardware over a Game Boy Color link cable: connect, backup, browse, changing a party Pokemon's species, adding a new Pokemon to a box, and writing, with the game loading the result. Restore is not tested yet. The checklist is [`docs/gen3/hardware-test-unbound.md`](docs/gen3/hardware-test-unbound.md).
+
+**Memory.** Cartridge runs with little memory to spare. If Connect says `Not enough memory`, close Cartridge, restart the Flipper (Settings → Power → Reboot) and open it again. Close Cartridge before you plug the Flipper into a computer (qFlipper or the CLI): the USB connection takes memory Cartridge needs, and the Flipper can freeze.
+
+**`Bad cartridge header`.** If the menu shows `Writing off: Bad cartridge header` with an Omega in the GBA, the GBA read nothing from the cart. Switch the GBA off, wait about 10 seconds, and connect again.
 
 Credits: Unbound's save layout, species data, record rules and Pokemon identity solver come from [PUSE](https://github.com/Zannael/PUSE) (MIT License), through `tools/unbound_tables.py`. The Omega's SD card read and write sequences follow EZ-Flash's own [Omega Definitive Edition kernel](https://github.com/ez-flash/omega-de-kernel) (Apache License 2.0). Where Unbound keeps its picture tables comes from the [Dynamic Pokemon Expansion](https://github.com/Skeli789/Dynamic-Pokemon-Expansion) (WTFPL), and the picture style is the one `tools/gen3_sprites.py` makes.
 
@@ -641,7 +733,7 @@ The Gen I/II trade, with a Game Boy or Game Boy Color game running on:
 - Game Boy Advance SP (GBA SP)
 - Analogue Pocket
 
-The Gen III features (the Game Boy Advance games) are not yet tested on hardware; see [Games](#games).
+Gen III, on a Game Boy Advance over a Game Boy Color link cable: Pokemon Cartridge with Ruby and FireRed cartridges and with Pokemon Unbound on an EZ-Flash Omega Definitive Edition. Gen III trading is not yet tested on hardware; see [Games](#games).
 
 ## Contributors
 [![Contributors](https://contrib.rocks/image?repo=KBEmbedded/Flipper-Zero-Game-Boy-Pokemon-Trading)](https://github.com/KBEmbedded/Flipper-Zero-Game-Boy-Pokemon-Trading/graphs/contributors)

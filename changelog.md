@@ -7,6 +7,13 @@
 - The picture tables' place in the game file comes from the Dynamic Pokemon Expansion (github.com/Skeli789/Dynamic-Pokemon-Expansion, WTFPL); the picture style is `tools/gen3_sprites.py`'s
 - The checklist has a new part P for pictures: `docs/gen3/hardware-test-unbound.md`
 
+**Bug Fixes**
+- Connect no longer fails with `Not enough memory` when the Flipper has little to spare (Bluetooth on, for example): the helper program goes to the GBA from its file on the SD card through a 4 KB buffer, instead of being held whole (14 KB)
+- A second Connect in the same session no longer fails with `Not enough memory`
+- Leaving the species picture browser (OK on a species, or Back) no longer closes Cartridge
+- Cartridge reads the Gen III species, ability and National Dex tables from the SD card (`gen3_cart_tables.bin`, an app asset), to fit in memory
+- Tested on hardware with Pokemon Unbound on an EZ-Flash Omega Definitive Edition: connect, backup, browse, changing a party Pokemon's species, adding a new Pokemon to a box, and writing
+
 ## Version 3.3
 **New Features**
 - Cartridge edits Pokemon Unbound on an EZ-Flash Omega Definitive Edition and writes the changes back to the save on the Omega's microSD card: species, level, nickname, held item, moves, nature, ability, shiny, IVs and EVs of party and box Pokemon, and new Pokemon in empty box slots
