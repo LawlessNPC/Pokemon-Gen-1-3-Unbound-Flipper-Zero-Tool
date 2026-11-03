@@ -76,8 +76,10 @@ static void pokemon_cart_copy_pins(void) {
 }
 
 /* Diagnostic: the scene table wrapped, so every scene's enter, exit and Back leave a line in the
- * Cartridge log ("ui enter|exit|back <scene id>", PokemonScene order). The scene manager makes the
- * scene being entered or left the current one while it calls the handler. */
+ * Cartridge log ("ui enter|exit|back <scene id>", PokemonScene order). An on_enter or an event
+ * goes to the current scene. An on_exit doesn't: the scene manager calls it after changing the
+ * stack (a previous or searched scene), so the scene leaving is the one entered last. */
+static uint32_t pokemon_cart_trace_scene;
 static AppSceneOnEnterCallback pokemon_cart_trace_enter[PokemonSceneNum];
 static AppSceneOnEventCallback pokemon_cart_trace_event[PokemonSceneNum];
 static AppSceneOnExitCallback pokemon_cart_trace_exit[PokemonSceneNum];
@@ -97,7 +99,8 @@ static uint32_t pokemon_cart_trace(void* context, const char* what) {
 }
 
 static void pokemon_cart_trace_on_enter(void* context) {
-    pokemon_scene_handlers.on_enter_handlers[pokemon_cart_trace(context, "enter")](context);
+    pokemon_cart_trace_scene = pokemon_cart_trace(context, "enter");
+    pokemon_scene_handlers.on_enter_handlers[pokemon_cart_trace_scene](context);
 }
 
 static bool pokemon_cart_trace_on_event(void* context, SceneManagerEvent event) {
@@ -110,7 +113,10 @@ static bool pokemon_cart_trace_on_event(void* context, SceneManagerEvent event) 
 }
 
 static void pokemon_cart_trace_on_exit(void* context) {
-    pokemon_scene_handlers.on_exit_handlers[pokemon_cart_trace(context, "exit")](context);
+    const uint32_t id = pokemon_cart_trace_scene;
+
+    gen3_cart_ui_trace(context, "exit %lu", id);
+    pokemon_scene_handlers.on_exit_handlers[id](context);
 }
 
 static PokemonFap* pokemon_cart_alloc(void) {
