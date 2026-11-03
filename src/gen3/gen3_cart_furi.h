@@ -47,8 +47,9 @@ void gen3_cart_session_status(Gen3CartSession* s, Gen3CartSessionStatus* out);
  * ids. All zero, with no cart, no backup and no change, until the first Connect loads the helper
  * file. */
 Gen3Cart* gen3_cart_session_cart(Gen3CartSession* s);
-/* App thread (not the ISR; gen3_cart_ui_trace is the printf-style caller): one synced log line "<tick> ui <text>", safe beside the worker's own
- * log lines (a log mutex). Does nothing without a log. Diagnostic. */
+/* App thread (not the ISR; gen3_cart_ui_trace is the printf-style caller): one synced log line
+ * "<tick> ui <text>", safe beside the worker's own log lines (a log mutex). Does nothing without a
+ * log. */
 void gen3_cart_session_vtrace(Gen3CartSession* s, const char* fmt, va_list args);
 /* An EZ-Flash Omega's state (status.omega), under the same rules as gen3_cart_session_cart: all
  * zero, not connected and with no backup, until a Connect finds one */

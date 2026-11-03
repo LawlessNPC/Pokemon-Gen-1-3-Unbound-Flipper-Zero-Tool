@@ -47,6 +47,8 @@ static void gen3_cart_back_callback(void* context) {
     view_dispatcher_send_custom_event(pokemon_fap->view_dispatcher, GEN3_CART_EVENT_BACK);
 }
 
+/* The free memory as the session starts and ends, the log's comparable numbers: the Cartridge app
+ * has little to spare, and what the firmware leaves it varies (Bluetooth, the desktop animation) */
 static void gen3_cart_ui_heap(PokemonFap* pokemon_fap, const char* when) {
     gen3_cart_ui_trace(
         pokemon_fap,
@@ -103,7 +105,6 @@ void gen3_cart_ui_trace(PokemonFap* pokemon_fap, const char* fmt, ...) {
 }
 
 void gen3_cart_ui_leave(PokemonFap* pokemon_fap) {
-    gen3_cart_ui_trace(pokemon_fap, "leave");
     if(pokemon_fap->gen3_cart_ui) gen3_cart_session_cancel(pokemon_fap->gen3_cart_ui->session);
     scene_manager_stop(pokemon_fap->scene_manager);
     view_dispatcher_stop(pokemon_fap->view_dispatcher);
@@ -601,16 +602,12 @@ bool pokemon_scene_gen3_cart_on_event(void* context, SceneManagerEvent event) {
     } else if(event.type == SceneManagerEventTypeBack) {
         if(gen3_menu_dialog_up()) {
             /* Back on the "Data missing" dialog returns to the hub */
-            gen3_cart_ui_trace(pokemon_fap, "back hub dialog");
             gen3_menu_show_menu(pokemon_fap);
         } else if(!gen3_cart_idle(pokemon_fap)) {
             /* A job runs, whose changes can't be counted now: leaving waits until it has ended */
-            gen3_cart_ui_trace(pokemon_fap, "back hub busy");
         } else if(gen3_cart_ui_changes(pokemon_fap) > 0) {
-            gen3_cart_ui_trace(pokemon_fap, "back hub ask");
             gen3_cart_ui_confirm(pokemon_fap, PokemonSceneGen3CartLeave);
         } else {
-            gen3_cart_ui_trace(pokemon_fap, "back hub leave");
             gen3_cart_ui_leave(pokemon_fap);
         }
         consumed = true;

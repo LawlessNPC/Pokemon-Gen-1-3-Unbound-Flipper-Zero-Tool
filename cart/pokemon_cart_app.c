@@ -35,9 +35,7 @@ static bool pokemon_cart_back_event_callback(void* context) {
     furi_assert(context);
     PokemonFap* pokemon_fap = context;
 
-    const bool handled = scene_manager_handle_back_event(pokemon_fap->scene_manager);
-    if(!handled) gen3_cart_ui_trace(pokemon_fap, "back unhandled -> exit");
-    return handled;
+    return scene_manager_handle_back_event(pokemon_fap->scene_manager);
 }
 
 /* Every 100 ms, on the app thread: a Tick to the current scene, which the picture browser
@@ -73,50 +71,6 @@ static void pokemon_cart_copy_pins(void) {
     furi_string_free(from);
     furi_string_free(dir);
     furi_record_close(RECORD_STORAGE);
-}
-
-/* Diagnostic: the scene table wrapped, so every scene's enter, exit and Back leave a line in the
- * Cartridge log ("ui enter|exit|back <scene id>", PokemonScene order). An on_enter or an event
- * goes to the current scene. An on_exit doesn't: the scene manager calls it after changing the
- * stack (a previous or searched scene), so the scene leaving is the one entered last. */
-static uint32_t pokemon_cart_trace_scene;
-static AppSceneOnEnterCallback pokemon_cart_trace_enter[PokemonSceneNum];
-static AppSceneOnEventCallback pokemon_cart_trace_event[PokemonSceneNum];
-static AppSceneOnExitCallback pokemon_cart_trace_exit[PokemonSceneNum];
-static const SceneManagerHandlers pokemon_cart_trace_handlers = {
-    pokemon_cart_trace_enter,
-    pokemon_cart_trace_event,
-    pokemon_cart_trace_exit,
-    PokemonSceneNum,
-};
-
-static uint32_t pokemon_cart_trace(void* context, const char* what) {
-    PokemonFap* pokemon_fap = context;
-    const uint32_t id = scene_manager_get_current_scene(pokemon_fap->scene_manager);
-
-    gen3_cart_ui_trace(pokemon_fap, "%s %lu", what, id);
-    return id;
-}
-
-static void pokemon_cart_trace_on_enter(void* context) {
-    pokemon_cart_trace_scene = pokemon_cart_trace(context, "enter");
-    pokemon_scene_handlers.on_enter_handlers[pokemon_cart_trace_scene](context);
-}
-
-static bool pokemon_cart_trace_on_event(void* context, SceneManagerEvent event) {
-    PokemonFap* pokemon_fap = context;
-
-    if(event.type == SceneManagerEventTypeBack) pokemon_cart_trace(context, "back");
-    return pokemon_scene_handlers
-        .on_event_handlers[scene_manager_get_current_scene(pokemon_fap->scene_manager)](
-            context, event);
-}
-
-static void pokemon_cart_trace_on_exit(void* context) {
-    const uint32_t id = pokemon_cart_trace_scene;
-
-    gen3_cart_ui_trace(context, "exit %lu", id);
-    pokemon_scene_handlers.on_exit_handlers[id](context);
 }
 
 static PokemonFap* pokemon_cart_alloc(void) {
@@ -156,12 +110,7 @@ static PokemonFap* pokemon_cart_alloc(void) {
         gen3_species_select_alloc(view_dispatcher, AppViewGen3SpeciesSelect);
 
     // Scene manager, with this app's scene table
-    pokemon_fap->scene_manager = scene_manager_alloc(&pokemon_cart_trace_handlers, pokemon_fap);
-    for(size_t i = 0; i < PokemonSceneNum; i++) {
-        pokemon_cart_trace_enter[i] = pokemon_cart_trace_on_enter;
-        pokemon_cart_trace_event[i] = pokemon_cart_trace_on_event;
-        pokemon_cart_trace_exit[i] = pokemon_cart_trace_on_exit;
-    }
+    pokemon_fap->scene_manager = scene_manager_alloc(&pokemon_scene_handlers, pokemon_fap);
 
     // gblink, with the pokemon app's pins
     pokemon_fap->gblink_handle = gblink_alloc();
