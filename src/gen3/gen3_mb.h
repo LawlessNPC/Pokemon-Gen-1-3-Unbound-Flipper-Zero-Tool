@@ -17,21 +17,33 @@
  *   key constants.
  * Pure C, no heap, no file-scope state.
  *
+ * The image is not held in RAM: the sender reads it through a Gen3MbSource, a copy of the header
+ * and a small ring window of the payload that a thread fills from the image's file while the
+ * sender runs (gen3_mb_source_room, gen3_mb_source_filled). The sender never reads a byte the
+ * thread hasn't published and the thread never overwrites one the sender may still read; when the
+ * bytes the next data word needs aren't there yet the sender sends fewer words, an idle tick when
+ * none (counted in Gen3MbStatus.stalls), never wrong ones.
+ *
  * ISR-safe: gen3_mb_frame runs in the driver's frame callback (stream mode). It and everything it
  * calls (gen3_mb_crypt_init, gen3_mb_crypt_word, gen3_mb_crypt_final, gen3_mb_crc_step,
  * gen3_mb_hh, gen3_rng_next) only compute: no allocation, logging, blocking or furi call, at most
  * MLINK_BURST_LEN words per frame and one CRC step per 32-bit payload word, no loop over the
- * image. gen3_mb_image_check and gen3_mb_init are app-context calls. */
+ * image. gen3_mb_image_check, gen3_mb_source_init and gen3_mb_init are app-context calls;
+ * gen3_mb_source_room and gen3_mb_source_filled are the filling thread's, safe beside the ISR. */
 
 #define GEN3_MB_CLIENT_BIT 0x02u /* child 1 */
 #define GEN3_MB_PALETTE 0x93u /* logo palette: color 1, direction 0, speed 1 */
 #define GEN3_MB_HEADER_LEN 0xC0u
 #define GEN3_MB_MIN_LEN 0x1C0u
 /* our helper cap (the helper is about 12.6 KB with the Omega commands; one resend of a 14 KB image
- * still fits GEN3_MB_ATTEMPT_US); the BIOS allows 0x40000. The
- * session holds the whole image in RAM while it sends it. The helper's build has its own copy,
- * MAX_LEN in gba/helper/Makefile; tests/test_helper_image.c checks they agree. */
+ * still fits GEN3_MB_ATTEMPT_US); the BIOS allows 0x40000. The cap is the attempt budget's, not
+ * RAM's: the session streams the image through a Gen3MbSource window while it sends it. The
+ * helper's build has its own copy, MAX_LEN in gba/helper/Makefile; tests/test_helper_image.c
+ * checks they agree. */
 #define GEN3_MB_MAX_LEN 0x3800u
+/* The smallest window a Gen3MbSource takes: a frame's data words, so a full window always lets a
+ * whole frame go out. A window must be a multiple of 4 (the sender reads 32-bit words). */
+#define GEN3_MB_WINDOW_MIN (4u * MLINK_BURST_LEN)
 /* Counted failures allowed; one more and the sender gives up, to ask for a power cycle with
  * Start+Select (multiboot-and-save.md §2.6). How the BIOS recovers is not documented:
  * multiboot-and-save.md M4. */
@@ -99,9 +111,53 @@ typedef enum {
 } Gen3MbImageCheck;
 
 /* In this order: len in [GEN3_MB_MIN_LEN, GEN3_MB_MAX_LEN] and a multiple of 16; the header (the
- * logo's first word le32(img + 4) == 0x51AEFF24, img[0xB2] == 0x96, img[0xBD] the complement of
- * 0xA0..0xBC, multiboot-and-save.md §2.1); img[0xBC] == version. */
-Gen3MbImageCheck gen3_mb_image_check(const uint8_t* img, uint32_t len, uint8_t version);
+ * logo's first word le32(header + 4) == 0x51AEFF24, header[0xB2] == 0x96, header[0xBD] the
+ * complement of 0xA0..0xBC, multiboot-and-save.md §2.1); header[0xBC] == version. Only the
+ * header's GEN3_MB_HEADER_LEN bytes are read: len is the whole image's length as the file gives
+ * it. */
+Gen3MbImageCheck gen3_mb_image_check(const uint8_t* header, uint32_t len, uint8_t version);
+
+/* The sender's view of the image: the header, whole, and the payload (bytes GEN3_MB_HEADER_LEN
+ * .. len - 1) through a ring window of size bytes, image byte ptr at
+ * window[(ptr - GEN3_MB_HEADER_LEN) % size]. Three offsets into the image share it between the
+ * filling thread and the sender's ISR, each written by one side only, each one aligned 32-bit
+ * word:
+ * - head (the thread's): payload bytes below it have been written; the window holds [base, head).
+ * - base (the thread's): the oldest byte the window still holds.
+ * - need (the sender's): the next byte it will read. Bytes below it are consumed, and the thread
+ *   may overwrite them; the thread never writes at or past need + size.
+ * The sender reads [ptr, ptr + 4) only while base <= ptr and ptr + 4 <= head. A restart (the
+ * sender goes back to GEN3_MB_HEADER_LEN) shows as need < base once the window has moved past
+ * the payload's start: gen3_mb_source_room then rewinds the window (head, then base, back to
+ * the start; every state in between offers the sender nothing) and asks for the payload's first
+ * bytes again. The other fields are fixed from gen3_mb_source_init. */
+typedef struct {
+    const uint8_t* header; /* GEN3_MB_HEADER_LEN bytes, valid until the sender is Done or Failed */
+    uint8_t* window; /* size bytes */
+    uint32_t size; /* a multiple of 4, at least GEN3_MB_WINDOW_MIN */
+    uint32_t len; /* the image's length */
+    volatile uint32_t head;
+    volatile uint32_t base;
+    volatile uint32_t need;
+} Gen3MbSource;
+
+/* An empty source over header, window and len: head, base and need at GEN3_MB_HEADER_LEN. header
+ * must pass gen3_mb_image_check with len. App context, before gen3_mb_init. */
+void gen3_mb_source_init(
+    Gen3MbSource* src,
+    const uint8_t* header,
+    uint8_t* window,
+    uint32_t size,
+    uint32_t len);
+/* The filling thread's: where the next payload bytes go. Returns how many contiguous bytes to
+ * read from the image at offset *offset into *dst: 0 when the window is full or the payload is
+ * all in (then *offset and *dst are unset). After a restart that needs the payload's start again
+ * it rewinds first, so *offset can go back. Never more than the window's free room, its end, or
+ * the payload's end. */
+uint32_t gen3_mb_source_room(Gen3MbSource* src, uint32_t* offset, uint8_t** dst);
+/* The filling thread's, once n bytes (at most what gen3_mb_source_room returned last) are in *dst:
+ * publishes them to the sender (a fence, then head). */
+void gen3_mb_source_filled(Gen3MbSource* src, uint32_t n);
 
 typedef enum {
     Gen3MbPhaseWait, /* idle ticks: the restart wait */
@@ -171,12 +227,15 @@ typedef struct {
      * out, framing-errored nor not ready), MLINK_NO_DATA until one */
     uint16_t notready;
     uint16_t last_reply;
+    /* Data frames cut short, or idle, because the window didn't hold the next word's bytes yet,
+     * since gen3_mb_init, up to UINT16_MAX: how well the filling thread kept up */
+    uint16_t stalls;
 } Gen3MbStatus;
 
-/* Holds a pointer to the caller's image; no heap. Fields are private to gen3_mb.c. */
+/* Holds a pointer to the caller's source; no heap. Fields are private to gen3_mb.c. */
 typedef struct Gen3Mb {
     MlinkWire wire;
-    const uint8_t* img;
+    Gen3MbSource* src;
     uint32_t len;
     Gen3Rng rng; /* restart waits */
     Gen3MbCrypt crypt;
@@ -206,13 +265,15 @@ typedef struct Gen3Mb {
     uint32_t waiting_us;
     uint16_t notready; /* not-ready slots since init */
     uint16_t last_reply; /* the latest delivered reply */
+    uint16_t stalls; /* Data frames short of words for want of loaded bytes */
 } Gen3Mb;
 
 /* Starts in Detect on wire, which the driver must clock; the first gen3_mb_frame call (rx NULL)
- * polls at once. img must pass gen3_mb_image_check and stay valid until Done or Failed. A len
- * outside GEN3_MB_MIN_LEN..GEN3_MB_MAX_LEN or not a multiple of 16 starts Failed, and nothing past
- * len is ever read. */
-void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, const uint8_t* img, uint32_t len, uint32_t seed);
+ * polls at once. src, its header and window must stay valid until Done or Failed; its need goes
+ * back to the payload's start. A src->len outside GEN3_MB_MIN_LEN..GEN3_MB_MAX_LEN or not a
+ * multiple of 16, or a window smaller than GEN3_MB_WINDOW_MIN or not a multiple of 4, starts
+ * Failed, and nothing past len is ever read. */
+void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, Gen3MbSource* src, uint32_t seed);
 
 /* One call per driver frame (ISR context). rx is the result of the previous tx (NULL on the first
  * call); elapsed_us is that frame's time (rx->ticks * MLINK_TICK_US; 0 on the first call). Fills

@@ -1,4 +1,5 @@
 #include <src/gen3/gen3_mb.h>
+#include <stdatomic.h>
 #include <string.h>
 
 /* Constants of GBATEK "BIOS Multi Boot (Single Game Pak)": MultiPlay (multiboot-and-save.md
@@ -65,14 +66,68 @@ static bool mb_len_ok(uint32_t len) {
     return len >= GEN3_MB_MIN_LEN && len <= GEN3_MB_MAX_LEN && (len % 16u) == 0;
 }
 
-Gen3MbImageCheck gen3_mb_image_check(const uint8_t* img, uint32_t len, uint8_t version) {
+Gen3MbImageCheck gen3_mb_image_check(const uint8_t* header, uint32_t len, uint8_t version) {
     if(!mb_len_ok(len)) return Gen3MbImageBadLen;
-    if(mb_le32(img + 4) != MB_LOGO_WORD || img[0xB2] != 0x96) return Gen3MbImageBadHeader;
+    if(mb_le32(header + 4) != MB_LOGO_WORD || header[0xB2] != 0x96) return Gen3MbImageBadHeader;
     uint8_t chk = 0;
-    for(uint32_t i = 0xA0; i <= 0xBC; i++) chk -= img[i];
-    if(img[0xBD] != (uint8_t)(chk - 0x19u)) return Gen3MbImageBadHeader;
-    if(img[0xBC] != version) return Gen3MbImageBadVersion;
+    for(uint32_t i = 0xA0; i <= 0xBC; i++) chk -= header[i];
+    if(header[0xBD] != (uint8_t)(chk - 0x19u)) return Gen3MbImageBadHeader;
+    if(header[0xBC] != version) return Gen3MbImageBadVersion;
     return Gen3MbImageOk;
+}
+
+/* ---- The source: the thread's side ---- */
+
+static bool mb_window_ok(uint32_t size) {
+    return size >= GEN3_MB_WINDOW_MIN && (size % 4u) == 0;
+}
+
+void gen3_mb_source_init(
+    Gen3MbSource* src,
+    const uint8_t* header,
+    uint8_t* window,
+    uint32_t size,
+    uint32_t len) {
+    src->header = header;
+    src->window = window;
+    src->size = size;
+    src->len = len;
+    src->head = GEN3_MB_HEADER_LEN;
+    src->base = GEN3_MB_HEADER_LEN;
+    src->need = GEN3_MB_HEADER_LEN;
+}
+
+uint32_t gen3_mb_source_room(Gen3MbSource* src, uint32_t* offset, uint8_t** dst) {
+    const uint32_t need = src->need; /* the sender's: read once */
+    if(need < src->base) {
+        /* A restart needs the payload's start, which the window has dropped: back to it. head
+         * first, so that no state in between offers the sender a byte (base > head: nothing
+         * lies in [base, head)); then base. */
+        src->head = GEN3_MB_HEADER_LEN;
+        src->base = GEN3_MB_HEADER_LEN;
+    }
+    const uint32_t head = src->head;
+    if(head >= src->len) return 0;
+    uint32_t n = need + src->size - head; /* free: never at or past need + size */
+    const uint32_t at = (head - GEN3_MB_HEADER_LEN) % src->size;
+    if(n > src->size - at) n = src->size - at; /* to the window's end */
+    if(n > src->len - head) n = src->len - head; /* to the payload's end */
+    if(n == 0) return 0;
+    *offset = head;
+    *dst = src->window + at;
+    return n;
+}
+
+void gen3_mb_source_filled(Gen3MbSource* src, uint32_t n) {
+    /* The bytes before the offset that publishes them: the ISR is a signal handler's case (one
+     * core, the frame callback preempts the thread), so a signal fence orders the compiler's
+     * stores; the hardware keeps one core's stores in order */
+    atomic_signal_fence(memory_order_release);
+    const uint32_t head = src->head + n;
+    src->head = head;
+    /* base after head: between the two the sender sees a base too low, which admits nothing it
+     * could read anyway (it reads from need on, and head never passes need + size) */
+    if(head - src->base > src->size) src->base = head - src->size;
 }
 
 static uint32_t mb_add(uint32_t a, uint32_t b) {
@@ -99,6 +154,7 @@ static void mb_wait(Gen3Mb* mb) {
     mb->wait_us =
         GEN3_MB_RESTART_MIN_US + gen3_rng_next(&mb->rng) % (GEN3_MB_RESTART_RAND_US + 1u);
     mb->sent = 0;
+    mb->src->need = GEN3_MB_HEADER_LEN; /* the next attempt reads the payload from its start */
     mb_count(&mb->all_restarts);
     mb_enter(mb, Gen3MbPhaseWait);
 }
@@ -147,7 +203,14 @@ static void mb_fail_word(Gen3Mb* mb, Gen3MbFail why, const MlinkRx* rx, uint8_t 
 static uint16_t mb_header_word(const Gen3Mb* mb, uint16_t step) {
     if(step == MB_HEADER_HALFWORDS) return 0x6200u;
     if(step > MB_HEADER_HALFWORDS) return 0x6200u | GEN3_MB_CLIENT_BIT;
-    return (uint16_t)(mb->img[2 * step] | mb->img[2 * step + 1] << 8);
+    const uint8_t* h = mb->src->header;
+    return (uint16_t)(h[2 * step] | h[2 * step + 1] << 8);
+}
+
+/* The payload word at byte offset ptr, from the window; the caller has checked it is loaded. */
+static uint32_t mb_window_word(const Gen3Mb* mb, uint32_t ptr) {
+    const Gen3MbSource* src = mb->src;
+    return mb_le32(src->window + (ptr - GEN3_MB_HEADER_LEN) % src->size);
 }
 
 /* The slave counts the header halfwords down (0x60xx .. 0x01xx), 0x00xx after the last one;
@@ -327,25 +390,45 @@ static void mb_send(Gen3Mb* mb, MlinkTx* tx) {
     case Gen3MbPhaseLength:
         mb_one(tx, (uint16_t)((mb->len - 0x190u) / 4u));
         break;
-    case Gen3MbPhaseData:
+    case Gen3MbPhaseData: {
+        /* What the window holds as this frame is made up, read once: the thread may publish more
+         * before the next frame, never less. The fence keeps the bytes' loads after these. */
+        const uint32_t head = mb->src->head;
+        const uint32_t base = mb->src->base;
+        atomic_signal_fence(memory_order_acquire);
+        bool stalled = false;
         while(tx->count < MLINK_BURST_LEN && mb->pos + tx->count < mb_data_units(mb)) {
             const uint32_t unit = mb->pos + tx->count;
             const uint32_t ptr = GEN3_MB_HEADER_LEN + mb_data_unit(mb) * unit;
+            /* A new word's bytes: only those the window holds. The thread may overwrite the bytes
+             * below need once it is past them, so need moves after the read. */
+            const bool reads = mb->wire == MlinkWireNormal || !(unit & 1u);
+            if(reads && (ptr < base || ptr + 4u > head)) {
+                stalled = true;
+                break;
+            }
             if(mb->wire == MlinkWireNormal) {
                 /* one transfer per word; every other word's upper half stays as the driver
                  * zeroed it */
-                const uint32_t e = gen3_mb_crypt_word(&mb->crypt, ptr, mb_le32(mb->img + ptr));
+                const uint32_t e = gen3_mb_crypt_word(&mb->crypt, ptr, mb_window_word(mb, ptr));
+                mb->src->need = ptr + 4u;
                 tx->word[tx->count] = (uint16_t)e;
                 tx->hi[tx->count] = (uint16_t)(e >> 16);
-            } else if(!(unit & 1u)) {
-                mb->e = gen3_mb_crypt_word(&mb->crypt, ptr, mb_le32(mb->img + ptr));
+            } else if(reads) {
+                mb->e = gen3_mb_crypt_word(&mb->crypt, ptr, mb_window_word(mb, ptr));
+                mb->src->need = ptr + 4u;
                 tx->word[tx->count] = (uint16_t)mb->e;
             } else {
                 tx->word[tx->count] = (uint16_t)(mb->e >> 16);
             }
             tx->count++;
         }
+        /* Fewer words than the frame could take, an idle tick when none: the slave waits for the
+         * next (the parent clocks the link; no data-phase timeout is documented,
+         * multiboot-and-save.md M3), and the reply check covers only the words sent */
+        if(stalled) mb_count(&mb->stalls);
         break;
+    }
     case Gen3MbPhaseFinal:
         mb_poll(mb, tx, 0x0065u);
         break;
@@ -364,14 +447,16 @@ static void mb_send(Gen3Mb* mb, MlinkTx* tx) {
     mb->tx_count = tx->count;
 }
 
-void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, const uint8_t* img, uint32_t len, uint32_t seed) {
+void gen3_mb_init(Gen3Mb* mb, MlinkWire wire, Gen3MbSource* src, uint32_t seed) {
     memset(mb, 0, sizeof(*mb));
     mb->wire = wire;
-    mb->img = img;
-    mb->len = len;
+    mb->src = src;
+    mb->len = src->len;
     mb->last_reply = MLINK_NO_DATA;
+    src->need = GEN3_MB_HEADER_LEN;
     gen3_rng_seed(&mb->rng, seed);
-    mb_enter(mb, mb_len_ok(len) ? Gen3MbPhaseDetect : Gen3MbPhaseFailed);
+    const bool ok = mb_len_ok(src->len) && mb_window_ok(src->size);
+    mb_enter(mb, ok ? Gen3MbPhaseDetect : Gen3MbPhaseFailed);
 }
 
 void gen3_mb_frame(Gen3Mb* mb, const MlinkRx* rx, MlinkTx* tx, uint32_t elapsed_us) {
@@ -410,4 +495,5 @@ void gen3_mb_status(const Gen3Mb* mb, Gen3MbStatus* out) {
     out->waiting_us = mb->waiting_us;
     out->notready = mb->notready;
     out->last_reply = mb->last_reply;
+    out->stalls = mb->stalls;
 }

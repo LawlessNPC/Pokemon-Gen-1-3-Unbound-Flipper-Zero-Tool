@@ -6,10 +6,14 @@
 
 /* The BIOS slave (fake_bios, child 1) and the sender (gen3_mb) on one simulated stream-mode
  * link, on one wire: each driver frame is fake_bios_frame then gen3_mb_frame, timed by the
- * frame's rx.ticks, as the driver reports it. */
+ * frame's rx.ticks, as the driver reports it. The sender reads the image through a Gen3MbSource
+ * whose window the bench fills from image, as the worker thread fills it from the file: whole at
+ * init, then every bench_fill_every frames. By default the window holds the whole payload. */
 
 #define BENCH_LOG_MAX 100000u
 #define BENCH_SEED 0x2468ACE1u
+#define BENCH_WINDOW_FULL GEN3_MB_MAX_LEN /* a window that holds any payload whole */
+#define BENCH_POISON 0xA5u /* what the window holds before the fill: never an image byte */
 
 typedef struct {
     MlinkTx tx; /* what the sender asked for */
@@ -27,6 +31,13 @@ static bool bench_started;
 static Gen3Mb mb;
 static FakeBios bios;
 static uint8_t image[GEN3_MB_MAX_LEN + 0x10];
+static Gen3MbSource src;
+static uint8_t window[BENCH_WINDOW_FULL];
+static uint32_t bench_fill_every; /* frames between refills; 0: none after the first */
+static uint32_t bench_since_fill;
+static uint32_t bench_rewinds; /* refills that went back to an earlier offset */
+static uint32_t bench_fill_end; /* the offset the last refill reached */
+static uint32_t bench_bad_reads; /* frames whose data words came from bytes not loaded */
 
 /* A valid image: the logo's first word, the rest of 0x04..0x9F zero, 0x96, version 1 and the
  * complement; payload bytes from an LCG. */
@@ -48,13 +59,50 @@ static void make_image(uint8_t* buf, uint32_t len) {
     }
 }
 
-static void bench_init_on(MlinkWire wire, uint32_t len, uint8_t cc, uint8_t rr) {
+/* The filling thread: copies what the window has room for from image, as gen3_cart_furi.c reads
+ * it from the file, and counts the refills that went back (a rewind after a restart). */
+static void bench_fill(void) {
+    uint32_t off;
+    uint8_t* dst;
+    uint32_t n;
+    while((n = gen3_mb_source_room(&src, &off, &dst)) != 0) {
+        if(off < bench_fill_end) bench_rewinds++;
+        memcpy(dst, image + off, n);
+        bench_fill_end = off + n;
+        gen3_mb_source_filled(&src, n);
+    }
+}
+
+/* A fresh image of len bytes and a source over it with a window of size bytes, filled once. */
+static void bench_source(uint32_t len, uint32_t size) {
     make_image(image, len);
-    gen3_mb_init(&mb, wire, image, len, BENCH_SEED);
+    memset(window, BENCH_POISON, sizeof(window));
+    gen3_mb_source_init(&src, image, window, size, len);
+    bench_rewinds = 0;
+    bench_fill_end = 0;
+    bench_since_fill = 0;
+    bench_bad_reads = 0;
+    bench_fill();
+}
+
+static void bench_init_window(
+    MlinkWire wire,
+    uint32_t len,
+    uint8_t cc,
+    uint8_t rr,
+    uint32_t size,
+    uint32_t fill_every) {
+    bench_source(len, size);
+    bench_fill_every = fill_every;
+    gen3_mb_init(&mb, wire, &src, BENCH_SEED);
     fake_bios_init(&bios, cc, rr);
     fake_bios_set_wire(&bios, wire);
     bench_n = 0;
     bench_started = false;
+}
+
+static void bench_init_on(MlinkWire wire, uint32_t len, uint8_t cc, uint8_t rr) {
+    bench_init_window(wire, len, cc, rr, BENCH_WINDOW_FULL, 1);
 }
 
 static void bench_init(uint32_t len, uint8_t cc, uint8_t rr) {
@@ -89,7 +137,29 @@ static void run(Gen3Mb* m, FakeBios* b, uint32_t max_frames) {
         const MlinkTx sent = bench_pending;
         fake_bios_frame(b, &sent, &rx);
         const uint32_t us = (uint32_t)rx.ticks * MLINK_TICK_US;
+        /* What the window held as the frame began; the bytes the frame read must lie in it */
+        const uint32_t head = src.head;
+        const uint32_t base = src.base;
+        const uint32_t need = src.need;
         bench_frame(m, &rx, us);
+        if(src.need > need && (need < base || src.need > head)) {
+            if(!bench_bad_reads) {
+                printf(
+                    "%s:%d: data words from bytes not loaded: read %lx..%lx, window %lx..%lx\n",
+                    __FILE__,
+                    __LINE__,
+                    (unsigned long)need,
+                    (unsigned long)src.need,
+                    (unsigned long)base,
+                    (unsigned long)head);
+                test_failures++;
+            }
+            bench_bad_reads++;
+        }
+        if(bench_fill_every && ++bench_since_fill >= bench_fill_every) {
+            bench_since_fill = 0;
+            bench_fill();
+        }
         gen3_mb_status(m, &st);
         if(bench_n < BENCH_LOG_MAX) {
             bench_log[bench_n++] = (BenchFrame){
@@ -686,8 +756,8 @@ TEST(test_mb_bad_crc_gives_up) {
 /* A word the driver marks (timeout or framing) is ignored while polling, and fails any other
  * phase. */
 TEST(test_mb_masked_word) {
-    make_image(image, 0x1C0);
-    gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
+    bench_source(0x1C0, BENCH_WINDOW_FULL);
+    gen3_mb_init(&mb, MlinkWireMulti, &src, BENCH_SEED);
     MlinkTx tx;
     gen3_mb_frame(&mb, NULL, &tx, 0);
     ASSERT_EQ(tx.count, 1);
@@ -738,8 +808,8 @@ static void reply_with(MlinkTx* tx, uint16_t word) {
  * Detect answers a word sent before Detect began: after gen3_mb_init, and after every wait. It is
  * ignored even when it reads 0x7202; the next one is the slave's answer to 0x6200. */
 TEST(test_mb_stale_detect_reply) {
-    make_image(image, 0x1C0);
-    gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
+    bench_source(0x1C0, BENCH_WINDOW_FULL);
+    gen3_mb_init(&mb, MlinkWireMulti, &src, BENCH_SEED);
     MlinkTx tx;
     gen3_mb_frame(&mb, NULL, &tx, 0);
     for(int round = 0; round < 2; round++) {
@@ -762,8 +832,8 @@ TEST(test_mb_stale_detect_reply) {
  * still holds the stale word, so the next unmarked reply is the stale one. */
 TEST(test_mb_stale_after_marked_reply) {
     for(int framing = 0; framing < 2; framing++) {
-        make_image(image, 0x1C0);
-        gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
+        bench_source(0x1C0, BENCH_WINDOW_FULL);
+        gen3_mb_init(&mb, MlinkWireMulti, &src, BENCH_SEED);
         MlinkTx tx;
         gen3_mb_frame(&mb, NULL, &tx, 0);
         ASSERT_EQ(status().phase, Gen3MbPhaseDetect);
@@ -786,12 +856,15 @@ TEST(test_mb_stale_after_marked_reply) {
     }
 }
 
-/* A length gen3_mb_image_check refuses starts Failed: idle ticks only, and the image is never
- * read. */
+/* A length gen3_mb_image_check refuses, or a window too small or not a multiple of 4, starts
+ * Failed: idle ticks only, and the image is never read. */
 TEST(test_mb_bad_len) {
-    static const uint32_t lens[] = {0, 0x100, 0x1B0, 0x1C8, GEN3_MB_MAX_LEN + 0x10u};
+    static const uint32_t lens[] = {0, 0x100, 0x1B0, 0x1C8, GEN3_MB_MAX_LEN + 0x10u, 0x1C0, 0x1C0};
+    static const uint32_t sizes[] = {
+        256, 256, 256, 256, 256, GEN3_MB_WINDOW_MIN - 4u, GEN3_MB_WINDOW_MIN + 2u};
     for(size_t i = 0; i < sizeof(lens) / sizeof(lens[0]); i++) {
-        gen3_mb_init(&mb, MlinkWireMulti, NULL, lens[i], BENCH_SEED);
+        gen3_mb_source_init(&src, NULL, window, sizes[i], lens[i]);
+        gen3_mb_init(&mb, MlinkWireMulti, &src, BENCH_SEED);
         Gen3MbStatus st = status();
         ASSERT_EQ(st.phase, Gen3MbPhaseFailed);
         ASSERT_EQ(st.restarts, 0);
@@ -851,8 +924,8 @@ TEST(test_mb_wrong_length_reply) {
  * waiting_us counts the waits too, and no attempt budget runs before a header word. */
 TEST(test_mb_junk_wait) {
     static const uint16_t replies[3] = {0x0000, 0xFFFF, 0x1234};
-    make_image(image, 0x1C0);
-    gen3_mb_init(&mb, MlinkWireMulti, image, 0x1C0, BENCH_SEED);
+    bench_source(0x1C0, BENCH_WINDOW_FULL);
+    gen3_mb_init(&mb, MlinkWireMulti, &src, BENCH_SEED);
     MlinkTx tx;
     MlinkRx rx;
     gen3_mb_frame(&mb, NULL, &tx, 0);
@@ -1179,6 +1252,212 @@ TEST(test_mb_wire_next) {
     ASSERT_EQ(gen3_mb_wire_next(MlinkWireNormal, false, Gen3MbPhaseData), MlinkWireNormal);
 }
 
+/* The filling thread's side of the source, on a 64-byte window over a 0x100-byte payload: room is
+ * contiguous, bounded by the window's free room (never at or past need + size), its end and the
+ * payload's end; filled moves head, and base once the window wraps; a restart whose start the
+ * window has dropped (need below base) rewinds it, head first. */
+TEST(test_mb_source_room) {
+    uint8_t hdr[GEN3_MB_HEADER_LEN];
+    uint8_t win[64];
+    Gen3MbSource s;
+    uint32_t off = 0;
+    uint8_t* dst = NULL;
+    memset(hdr, 0, sizeof(hdr));
+    gen3_mb_source_init(&s, hdr, win, sizeof(win), 0x1C0);
+    ASSERT_EQ(s.head, 0xC0);
+    ASSERT_EQ(s.base, 0xC0);
+    ASSERT_EQ(s.need, 0xC0);
+    ASSERT_EQ(s.len, 0x1C0);
+    ASSERT_EQ(s.size, 64);
+    ASSERT_TRUE(s.header == hdr && s.window == win);
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 64);
+    ASSERT_EQ(off, 0xC0);
+    ASSERT_TRUE(dst == win);
+    gen3_mb_source_filled(&s, 20); /* a short read: the rest of the window is still free */
+    ASSERT_EQ(s.head, 0xC0 + 20);
+    ASSERT_EQ(s.base, 0xC0);
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 44);
+    ASSERT_EQ(off, 0xC0 + 20);
+    ASSERT_TRUE(dst == win + 20);
+    gen3_mb_source_filled(&s, 44);
+    ASSERT_EQ(s.head, 0xC0 + 64);
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 0); /* full: nothing consumed yet */
+    s.need = 0xC0 + 8; /* the sender read two words */
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 8); /* their room, at the window's start */
+    ASSERT_EQ(off, 0xC0 + 64);
+    ASSERT_TRUE(dst == win);
+    gen3_mb_source_filled(&s, 8);
+    ASSERT_EQ(s.head, 0xC0 + 72);
+    ASSERT_EQ(s.base, 0xC0 + 8);
+    s.need = 0xC0 + 72; /* all consumed: a whole window free, but contiguous to its end only */
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 56);
+    ASSERT_EQ(off, 0xC0 + 72);
+    ASSERT_TRUE(dst == win + 8);
+    gen3_mb_source_filled(&s, 56);
+    ASSERT_EQ(s.head, 0xC0 + 128);
+    ASSERT_EQ(s.base, 0xC0 + 64);
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 8); /* up to need + size */
+    ASSERT_EQ(off, 0xC0 + 128);
+    ASSERT_TRUE(dst == win);
+    s.need = 0xC0 + 128;
+    gen3_mb_source_filled(&s, 64);
+    s.need = 0xC0 + 192;
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 64); /* the payload's last 64 bytes */
+    ASSERT_EQ(off, 0xC0 + 192);
+    gen3_mb_source_filled(&s, 64);
+    ASSERT_EQ(s.head, 0x1C0);
+    ASSERT_EQ(s.base, 0x1C0 - 64);
+    s.need = 0x1C0;
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 0); /* the payload is all in */
+    /* A restart: the sender needs 0xC0, which the window dropped long ago */
+    s.need = 0xC0;
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 64);
+    ASSERT_EQ(off, 0xC0);
+    ASSERT_TRUE(dst == win);
+    ASSERT_EQ(s.head, 0xC0);
+    ASSERT_EQ(s.base, 0xC0);
+    /* A window that holds the whole payload never drops its start: a restart needs no rewind */
+    uint8_t big[0x100];
+    gen3_mb_source_init(&s, hdr, big, sizeof(big), 0x1C0);
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 0x100);
+    gen3_mb_source_filled(&s, 0x100);
+    s.need = 0x1C0;
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 0);
+    s.need = 0xC0;
+    ASSERT_EQ(gen3_mb_source_room(&s, &off, &dst), 0);
+    ASSERT_EQ(s.head, 0x1C0);
+    ASSERT_EQ(s.base, 0xC0);
+}
+
+/* The Data frames of the run: how many sent no word, and how many fewer than a full frame while
+ * more payload was left. */
+static void data_frames(uint32_t* idle, uint32_t* partial, uint32_t* full) {
+    *idle = *partial = *full = 0;
+    for(uint32_t i = 1; i < bench_n; i++) {
+        if(bench_log[i - 1].phase != Gen3MbPhaseData) continue;
+        if(bench_log[i].tx.count == 0) {
+            (*idle)++;
+        } else if(bench_log[i].tx.count < MLINK_BURST_LEN && bench_log[i].phase == Gen3MbPhaseData) {
+            (*partial)++;
+        } else {
+            (*full)++;
+        }
+    }
+}
+
+/* A window far smaller than the image (128 bytes against a 3904-byte payload), refilled only every
+ * 16 frames, as the worker refills it between its polls: a full frame takes 18 bytes, so the
+ * window runs dry after 7 frames and the sender idles until the refill. It sends the words it has,
+ * idles when it has none, counts those frames as stalls, and the BIOS still gets the image byte
+ * for byte, with the CRC to match, without a restart. No frame's words come from bytes not
+ * loaded. */
+TEST(test_mb_window_multi) {
+    bench_init_window(MlinkWireMulti, 0x1000, 0x5A, 0xC3, 128, 16);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_EQ(st.last_fail, Gen3MbFailNone);
+    ASSERT_EQ(st.sent, st.total);
+    ASSERT_TRUE(st.stalls > 0);
+    ASSERT_EQ(bench_bad_reads, 0);
+    ASSERT_EQ(bench_rewinds, 0);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(image_received(0x1000));
+    uint32_t idle, partial, full;
+    data_frames(&idle, &partial, &full);
+    ASSERT_TRUE(idle > 0);
+    ASSERT_TRUE(full > 0);
+    ASSERT_EQ(st.stalls, idle + partial);
+    ASSERT_TRUE(idles_forever());
+}
+
+/* The same on the Normal wire, where a frame takes 36 bytes: refilled every 8 frames, the window
+ * runs dry after 3. */
+TEST(test_mb_window_normal) {
+    bench_init_window(MlinkWireNormal, 0x1000, 0x5A, 0xC3, 128, 8);
+    fake_bios_power_on(&bios);
+    run(&mb, &bios, 100000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_EQ(st.sent, st.total);
+    ASSERT_TRUE(st.stalls > 0);
+    ASSERT_EQ(bench_bad_reads, 0);
+    ASSERT_EQ(bench_rewinds, 0);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(image_received(0x1000));
+    uint32_t idle, partial, full;
+    data_frames(&idle, &partial, &full);
+    ASSERT_TRUE(idle > 0);
+    ASSERT_TRUE(full > 0);
+    ASSERT_EQ(st.stalls, idle + partial);
+    ASSERT_TRUE(idles_forever());
+}
+
+/* A window the thread never refills: once its bytes are sent the sender idles in Data, tick after
+ * tick, sending nothing (never a wrong word) and failing nothing, while the BIOS waits; the
+ * refills, once they come, let it finish. A whole window goes out before the first idle tick. */
+TEST(test_mb_window_waits) {
+    bench_init_window(MlinkWireMulti, 0x1000, 0x5A, 0xC3, 64, 0);
+    fake_bios_power_on(&bios);
+    ASSERT_TRUE(run_until(Gen3MbPhaseData, 1000));
+    run(&mb, &bios, 2000);
+    Gen3MbStatus st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseData);
+    ASSERT_EQ(st.sent, 64);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.all_restarts, 0);
+    ASSERT_TRUE(st.stalls >= 1990);
+    ASSERT_EQ(bench_bad_reads, 0);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_EQ(bench_log[bench_n - 1].tx.count, 0);
+    ASSERT_EQ(src.need, 0xC0 + 64);
+    bench_fill_every = 1;
+    run(&mb, &bios, 100000);
+    st = status();
+    ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+    ASSERT_EQ(st.restarts, 0);
+    ASSERT_EQ(st.sent, st.total);
+    ASSERT_EQ(bench_bad_reads, 0);
+    ASSERT_EQ(fake_bios_boots(&bios), 1);
+    ASSERT_TRUE(fake_bios_error(&bios) == NULL);
+    ASSERT_TRUE(image_received(0x1000));
+}
+
+/* A data glitch deep in the payload with a small window: the restart goes back to 0xC0, which the
+ * window dropped long ago, so the thread rewinds it and reads the payload from its start again,
+ * and the image still arrives whole with the CRC to match. On both wires. */
+TEST(test_mb_window_restart) {
+    for(int normal = 0; normal < 2; normal++) {
+        const MlinkWire wire = normal ? MlinkWireNormal : MlinkWireMulti;
+        bench_init_window(wire, 0x1000, 0x5A, 0xC3, 256, 4);
+        /* MultiPlay: transfer 1000 is data halfword ~890 (byte ~0x760); Normal: transfer 500 is
+         * data word ~393 (byte ~0x6E0): both well past a 256-byte window */
+        fake_bios_corrupt_reply(&bios, normal ? 500 : 1000);
+        fake_bios_power_on(&bios);
+        run(&mb, &bios, 100000);
+        Gen3MbStatus st = status();
+        ASSERT_EQ(st.phase, Gen3MbPhaseDone);
+        ASSERT_EQ(st.restarts, 1);
+        ASSERT_EQ(st.last_fail, Gen3MbFailData);
+        ASSERT_TRUE(st.fail_want >= 0x6E0);
+        ASSERT_EQ(st.sent, st.total);
+        ASSERT_EQ(bench_rewinds, 1);
+        ASSERT_EQ(bench_bad_reads, 0);
+        ASSERT_EQ(fake_bios_boots(&bios), 1);
+        /* The fake keeps the drain's refusal (the slave, left mid-transfer, takes the detection
+         * polls as data and then refuses one in its final step), as after any data glitch
+         * (test_mb_data_glitch); the boot and the image are what the restart must get right */
+        ASSERT_TRUE(image_received(0x1000));
+    }
+}
+
 /* The fake on its own, driven word by word with multiboot-and-save.md §2.2's replies and the
  * payload of the multiboot-and-save.md §2.3 test vector. */
 static uint16_t xfer(FakeBios* b, uint16_t word, bool* timed_out) {
@@ -1502,6 +1781,11 @@ int main(void) {
     RUN(test_mb_status_notready_last_reply);
     RUN(test_mb_normal_palette_notready_is_busy);
     RUN(test_mb_wire_next);
+    RUN(test_mb_source_room);
+    RUN(test_mb_window_multi);
+    RUN(test_mb_window_normal);
+    RUN(test_mb_window_waits);
+    RUN(test_mb_window_restart);
     RUN(test_fake_bios_doc_vector);
     RUN(test_fake_bios_checks);
     RUN(test_fake_bios_normal_vector);

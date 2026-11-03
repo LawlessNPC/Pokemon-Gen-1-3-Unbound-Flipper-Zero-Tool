@@ -22,20 +22,20 @@
 
 #define GEN3_CART_LOG_PATH EXT_PATH("apps_data/pokemon/gen3_cart.log")
 #define GEN3_CART_LOG_HEADER "# gen3 cart log v1\n"
-/* The longest line is cart_log_mb's, at most 162 characters with its newline: 11 for the tick
+/* The longest line is cart_log_mb's, at most 175 characters with its newline: 11 for the tick
  * ("%08lu " of 4294967295), 10 "mb restart", 9 " nr 65535", 10 " last ffff", 19
  * " want ffff got ffff", 13 " restarts 255", 10 " all 65535", 12 " last_fail 9", 6 " cc ff",
- * 6 " rr ff", 19 " palette_busy 65535", 20 " final_us 4294967295", 16 " sent 4294967295" and 1 for
- * the newline. With its NUL it fits, so no line is ever cut. */
-#define GEN3_CART_LOG_LINE 168u
+ * 6 " rr ff", 19 " palette_busy 65535", 20 " final_us 4294967295", 16 " sent 4294967295", 13
+ * " stalls 65535" and 1 for the newline. With its NUL it fits, so no line is ever cut. */
+#define GEN3_CART_LOG_LINE 184u
 
 #define GEN3_CART_THREAD_NAME "Gen3Cart"
 #define GEN3_CART_THREAD_STACK 2048
 #define GEN3_CART_FLAG_JOB (1u << 0)
 #define GEN3_CART_FLAG_EXIT (1u << 1)
 
-/* The heap's largest free block must hold the helper image and this much more */
-#define GEN3_CART_IMG_MARGIN 512u
+/* The heap's largest free block must hold the jobs' sector buffer and this much more */
+#define GEN3_CART_BUF_MARGIN 512u
 
 /* Connect: how often the worker reads the multiboot sender's progress */
 #define GEN3_CART_MB_POLL_MS 20u
@@ -90,8 +90,16 @@ struct Gen3CartSession {
 
     /* The worker's (and the GUI thread's, through gen3_cart_session_cart, while no job runs) */
     bool pump_on; /* the driver runs the pump: the transport may use it */
-    uint8_t* buf; /* the jobs' sector buffer: GEN3_CART_BUF_SIZE bytes, kept once set up */
-    uint8_t* img; /* the helper image: only from its load until the multiboot send has ended */
+    /* GEN3_CART_BUF_SIZE bytes, taken at the first Connect and kept: the multiboot sender's window
+     * while a helper is sent (the only buffer the image passes through), the jobs' sector buffer
+     * after. A job's content never outlives the job. */
+    uint8_t* buf;
+    /* The helper image's file and header: open and read at each Connect, closed once the send has
+     * ended. The worker refills the window from the file between its polls of the sender. */
+    File* helper;
+    uint32_t helper_pos; /* the file's position: the window's next bytes come from here */
+    uint8_t header[GEN3_MB_HEADER_LEN];
+    Gen3MbSource src; /* the sender's view of the image: header and buf */
     Gen3CartStep log_step; /* the step the log last named */
     uint32_t log_part; /* its eighth the log last named */
     char stamp[16]; /* YYYYMMDD-HHMMSS */
@@ -448,10 +456,22 @@ static void cart_driver_stop(Gen3CartSession* s) {
     cart_unlock(s);
 }
 
-/* The first Connect, once its helper is sent: the jobs' sector buffer, kept to the end; then the client and the jobs'
- * state, which later Connects keep. The helper image has a buffer of its own while it is sent. */
-static void cart_setup(Gen3CartSession* s) {
+/* The first Connect, before its helper is sent: the jobs' sector buffer, kept to the end, which the
+ * sender has as its window first. NoMemory if the heap's largest free block can't hold it with
+ * GEN3_CART_BUF_MARGIN to spare (a failed malloc would crash the Flipper). Nothing bigger is
+ * ever allocated for a Connect: the image passes through this buffer from its file. */
+static Gen3CartResult cart_buf_alloc(Gen3CartSession* s) {
+    if(s->buf) return Gen3CartOk;
+    if(memmgr_heap_get_max_free_block() < GEN3_CART_BUF_SIZE + GEN3_CART_BUF_MARGIN) {
+        return Gen3CartNoMemory;
+    }
     s->buf = malloc(GEN3_CART_BUF_SIZE);
+    return Gen3CartOk;
+}
+
+/* The first Connect, once its helper is sent: the client and the jobs' state on the buffer, which
+ * later Connects keep. */
+static void cart_setup(Gen3CartSession* s) {
     const Gen3HTransport t = {
         .ctx = s,
         .exchange = cart_exchange,
@@ -468,48 +488,66 @@ static void cart_setup(Gen3CartSession* s) {
     s->cart_ready = true;
 }
 
-/* Only once the sender can't read the image: the driver stopped, or the pump running (the frame
- * callback calls the sender only while core is Gen3CartCoreMb, and an ISR can't run between the
- * worker's writes of core and this) */
-static void cart_image_free(Gen3CartSession* s) {
-    free(s->img);
-    s->img = NULL;
+/* Closes and frees the helper's file. Only once the sender can't read the window: the driver
+ * stopped, or the pump running (the frame callback calls the sender only while core is
+ * Gen3CartCoreMb, and an ISR can't run between the worker's writes of core and this). */
+static void cart_helper_close(Gen3CartSession* s) {
+    if(!s->helper) return;
+    storage_file_close(s->helper); /* required even after a failed open */
+    storage_file_free(s->helper);
+    s->helper = NULL;
 }
 
-/* The helper image into its own buffer, checked. NoHelper if the file is missing or bad, NoMemory
- * if the heap's largest free block can't hold it (a failed malloc would crash the Flipper). The
- * asset folder is this app's: threads an app starts share its appid. */
-static Gen3CartResult cart_helper_load(Gen3CartSession* s, uint32_t* len) {
-    File* f = storage_file_alloc(s->storage);
-    bool ok =
-        storage_file_open(f, APP_ASSETS_PATH(GEN3_HELPER_ASSET), FSAM_READ, FSOM_OPEN_EXISTING);
-    const uint64_t size = ok ? storage_file_size(f) : 0;
+/* Opens the helper image's file for this Connect and reads and checks its header; the file stays
+ * open, for the window's refills, until cart_helper_close. NoHelper if the file is missing or
+ * bad. The asset folder is this app's: threads an app starts share its appid. The heap line shows
+ * what the open file left. */
+static Gen3CartResult cart_helper_open(Gen3CartSession* s, uint32_t* len) {
+    s->helper = storage_file_alloc(s->storage);
+    s->helper_pos = 0;
+    bool ok = storage_file_open(
+        s->helper, APP_ASSETS_PATH(GEN3_HELPER_ASSET), FSAM_READ, FSOM_OPEN_EXISTING);
+    const uint64_t size = ok ? storage_file_size(s->helper) : 0;
     ok = ok && size >= GEN3_MB_MIN_LEN && size <= GEN3_MB_MAX_LEN;
-    bool mem = true;
     if(ok) {
-        const size_t block = memmgr_heap_get_max_free_block();
         CART_LOG(
             s,
             "helper heap %lu block %lu",
             (unsigned long)memmgr_get_free_heap(),
-            (unsigned long)block);
-        mem = block >= (size_t)size + GEN3_CART_IMG_MARGIN;
-        ok = mem;
+            (unsigned long)memmgr_heap_get_max_free_block());
+        ok = storage_file_read(s->helper, s->header, GEN3_MB_HEADER_LEN) == GEN3_MB_HEADER_LEN;
+        s->helper_pos = GEN3_MB_HEADER_LEN;
     }
-    if(ok) {
-        s->img = malloc((size_t)size);
-        ok = storage_file_read(f, s->img, (size_t)size) == size;
-    }
-    storage_file_close(f); /* required even after a failed open */
-    storage_file_free(f);
     *len = ok ? (uint32_t)size : 0;
-    const Gen3MbImageCheck check = ok ? gen3_mb_image_check(s->img, *len, GEN3_HELPER_PROTO) :
+    const Gen3MbImageCheck check = ok ? gen3_mb_image_check(s->header, *len, GEN3_HELPER_PROTO) :
                                         Gen3MbImageBadLen;
     CART_LOG(
         s, "helper len %lu read %u check %u", (unsigned long)size, (unsigned)ok, (unsigned)check);
     if(check == Gen3MbImageOk) return Gen3CartOk;
-    cart_image_free(s);
-    return mem ? Gen3CartNoHelper : Gen3CartNoMemory;
+    cart_helper_close(s);
+    return Gen3CartNoHelper;
+}
+
+/* The worker's: tops the window up from the file, as far as the sender has made room, so that the
+ * sender finds its next words loaded. A read seeks only when the window went back (a restart's
+ * rewind, gen3_mb.h). The barrier puts the bytes before the offset that publishes them to the
+ * ISR. False on a read error or a short file: the Connect must end (the sender idles in Data,
+ * sending nothing, until the driver stops). */
+static bool cart_helper_fill(Gen3CartSession* s) {
+    uint32_t off;
+    uint8_t* dst;
+    uint32_t n;
+    while((n = gen3_mb_source_room(&s->src, &off, &dst)) != 0) {
+        if(off != s->helper_pos) {
+            if(!storage_file_seek(s->helper, off, true)) return false;
+            s->helper_pos = off;
+        }
+        if(storage_file_read(s->helper, dst, n) != n) return false;
+        s->helper_pos += n;
+        __DMB();
+        gen3_mb_source_filled(&s->src, n);
+    }
+    return true;
 }
 
 /* The wire as the log names it: the Normal wire's BIOS phase is ungated unless
@@ -519,13 +557,15 @@ static const char* cart_wire_name(MlinkWire wire) {
     return GEN3_CART_MB_GATED ? "normal gated" : "normal ungated";
 }
 
-/* Inits the sender for wire and starts the driver in stream mode with its first frame. False if
- * the start fails: TIM2 is held, or, on the MultiPlay wire, SI reads high. On the Normal wire the
- * BIOS phase runs ungated unless GEN3_CART_MB_GATED (multiboot-and-save.md §7.3). */
-static bool cart_mb_start(Gen3CartSession* s, MlinkWire wire, uint32_t len) {
+/* Inits the sender for wire, on the source cart_connect set up, and starts the driver in stream
+ * mode with its first frame. False if the start fails: TIM2 is held, or, on the MultiPlay wire, SI
+ * reads high. On the Normal wire the BIOS phase runs ungated unless GEN3_CART_MB_GATED
+ * (multiboot-and-save.md §7.3). The driver is stopped here, so the sender's reset of the source's
+ * need races with nothing; the next refill rewinds the window if it has to. */
+static bool cart_mb_start(Gen3CartSession* s, MlinkWire wire) {
     MlinkTx first = {0};
     if(wire == MlinkWireNormal) mlink_hw_set_normal_gate(s->hw, GEN3_CART_MB_GATED);
-    gen3_mb_init(&s->mb, wire, s->img, len, furi_hal_random_get());
+    gen3_mb_init(&s->mb, wire, &s->src, furi_hal_random_get());
     gen3_mb_frame(&s->mb, NULL, &first, 0);
     s->wire = wire;
     s->core = Gen3CartCoreMb;
@@ -536,7 +576,7 @@ static bool cart_mb_start(Gen3CartSession* s, MlinkWire wire, uint32_t len) {
 
 /* Starts the driver on the wire the cable calls for: MultiPlay while SI reads low,
  * Normal otherwise (always with GEN3_CART_FORCE_NORMAL), with the sender's first frame */
-static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
+static Gen3CartResult cart_driver_start(Gen3CartSession* s) {
     cart_progress(s, Gen3CartStepMbWait, 0, 0);
     cart_set_cable(s, true); /* the Normal wire has no cable to check */
     if(s->cancel) return Gen3CartCancelled;
@@ -546,14 +586,14 @@ static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
                              MlinkWireMulti,
                              mlink_hw_check_cable(s->hw) == MlinkCableOk,
                              Gen3MbPhaseDetect);
-    if(!cart_mb_start(s, wire, len)) {
+    if(!cart_mb_start(s, wire)) {
         /* A MultiPlay start reads SI again: one now high goes Normal; else another link holds
          * TIM2 */
         if(wire != MlinkWireMulti || mlink_hw_check_cable(s->hw) == MlinkCableOk) {
             return Gen3CartLinkBusy;
         }
         wire = MlinkWireNormal;
-        if(!cart_mb_start(s, wire, len)) return Gen3CartLinkBusy;
+        if(!cart_mb_start(s, wire)) return Gen3CartLinkBusy;
     }
     CART_LOG(s, "wire %s", cart_wire_name(wire));
     cart_lock(s);
@@ -566,8 +606,9 @@ static Gen3CartResult cart_driver_start(Gen3CartSession* s, uint32_t len) {
 /* The sender's status, for the hardware check of its budgets and of the Normal wire: the
  * not-ready slots and the latest reply (the GBA's last word; FFFF with nothing at the other end),
  * the words of the latest word failure, restarts counted and all, the slave's bytes, the latest
- * palette wait's busy replies (GEN3_MB_PALETTE_US), and the time from the first 0x0065 to the
- * 0x0075 (GEN3_MB_FINAL_US). The short fields come first. */
+ * palette wait's busy replies (GEN3_MB_PALETTE_US), the time from the first 0x0065 to the
+ * 0x0075 (GEN3_MB_FINAL_US), and the data frames the sender spent waiting for the window's next
+ * bytes (0 when the worker's refills kept up). The short fields come first. */
 static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus* st) {
     /* The expected and received words belong to the latest failure of these kinds only */
     char want[24] = "";
@@ -586,7 +627,7 @@ static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus
     CART_LOG(
         s,
         "mb %s nr %u last %04x%s restarts %u all %u last_fail %u cc %02x rr %02x palette_busy %u "
-        "final_us %lu sent %lu",
+        "final_us %lu sent %lu stalls %u",
         what,
         (unsigned)st->notready,
         (unsigned)st->last_reply,
@@ -598,13 +639,16 @@ static void cart_log_mb(Gen3CartSession* s, const char* what, const Gen3MbStatus
         (unsigned)st->rr,
         (unsigned)st->palette_busy,
         (unsigned long)st->final_us,
-        (unsigned long)st->sent);
+        (unsigned long)st->sent,
+        (unsigned)st->stalls);
 }
 
-/* Runs the sender to Done or Failed, MbWait while it looks for the GBA and MbSend after. Each
- * restart is logged, counted or not; those between two polls in one line. While it waits for the
- * GBA, an `mb wait` line every GEN3_CART_MB_WAIT_LOG_MS; a cancel logs `mb cancel`. */
-static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
+/* Runs the sender to Done or Failed, MbWait while it looks for the GBA and MbSend after, refilling
+ * its window from the helper's file at every poll. Each restart is logged, counted or not; those
+ * between two polls in one line. While it waits for the GBA, an `mb wait` line every
+ * GEN3_CART_MB_WAIT_LOG_MS; a cancel logs `mb cancel`; a file that fails mid-send logs
+ * `helper read fail` and ends NoHelper. */
+static Gen3CartResult cart_multiboot(Gen3CartSession* s) {
     Gen3MbStatus st;
     uint16_t all_restarts = 0;
     uint8_t si_high = 0; /* polls in a row that called for the Normal wire */
@@ -634,6 +678,11 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
             cart_log_mb(s, "cancel", &st);
             return Gen3CartCancelled;
         }
+        if(!cart_helper_fill(s)) {
+            CART_LOG(s, "helper read fail at %lu", (unsigned long)s->helper_pos);
+            cart_log_mb(s, "nohelper", &st);
+            return Gen3CartNoHelper;
+        }
         if(waiting && furi_get_tick() - wait_log >= furi_ms_to_ticks(GEN3_CART_MB_WAIT_LOG_MS)) {
             wait_log = furi_get_tick();
             cart_log_mb(s, "wait", &st);
@@ -644,7 +693,7 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
             si_high = 0;
         } else if(++si_high >= GEN3_CART_WIRE_POLLS) {
             cart_driver_stop(s);
-            if(!cart_mb_start(s, MlinkWireNormal, len)) return Gen3CartLinkBusy;
+            if(!cart_mb_start(s, MlinkWireNormal)) return Gen3CartLinkBusy;
             cart_lock(s);
             s->driver_on = true;
             s->status.cable_ok = true;
@@ -657,7 +706,6 @@ static Gen3CartResult cart_multiboot(Gen3CartSession* s, uint32_t len) {
     }
 }
 
-/* Sends the helper (again), then connects to it and attaches the cart */
 /* ---- An EZ-Flash Omega (gen3_omega.h) ---- */
 
 static void cart_hex(const uint8_t* p, uint32_t n, char* out) {
@@ -733,22 +781,28 @@ static Gen3CartResult cart_omega_connect(Gen3CartSession* s) {
     return r;
 }
 
-/* The jobs' sector buffer, where the cart and the Omega find it too */
-static void cart_buf_set(Gen3CartSession* s, uint8_t* buf) {
-    s->buf = buf;
-    s->cart.buf = buf;
-    s->omega.buf = buf;
-}
-
+/* Sends the helper (again), then connects to it and attaches the cart. The image streams from its
+ * file through buf, the sender's window, so a Connect's peak is the open file and the buffer, not
+ * the image (gen3_mb.h). */
 static Gen3CartResult cart_connect(Gen3CartSession* s) {
     uint32_t len = 0;
-    Gen3CartResult r = cart_helper_load(s, &len);
+    Gen3CartResult r = cart_helper_open(s, &len);
     if(r != Gen3CartOk) return r;
-    r = cart_driver_start(s, len);
-    if(r == Gen3CartOk) r = cart_multiboot(s, len);
+    r = cart_buf_alloc(s);
+    if(r == Gen3CartOk) {
+        /* The window, full before the first frame: the data phase starts with a frame's words
+         * loaded whatever the worker's timing */
+        gen3_mb_source_init(&s->src, s->header, s->buf, GEN3_CART_BUF_SIZE, len);
+        if(!cart_helper_fill(s)) {
+            CART_LOG(s, "helper read fail at %lu", (unsigned long)s->helper_pos);
+            r = Gen3CartNoHelper;
+        }
+    }
+    if(r == Gen3CartOk) r = cart_driver_start(s);
+    if(r == Gen3CartOk) r = cart_multiboot(s);
     if(r != Gen3CartOk) {
-        cart_driver_stop(s); /* the sender is stopped: nothing reads the image */
-        cart_image_free(s);
+        cart_driver_stop(s); /* the sender is stopped: nothing reads the window */
+        cart_helper_close(s);
         return r;
     }
 
@@ -762,15 +816,11 @@ static Gen3CartResult cart_connect(Gen3CartSession* s) {
     __DMB();
     s->core = Gen3CartCoreHlink;
     s->pump_on = true;
-    cart_image_free(s); /* the frame callback calls the hlink now, never the sender */
+    cart_helper_close(s); /* the frame callback calls the hlink now, never the sender */
 
-    /* The jobs' sector buffer comes out of the image's freed hole, so the peak is the image alone.
-     * Nothing above uses cli, cart or omega; the first command is below. */
-    if(!s->cart_ready) {
-        cart_setup(s);
-    } else {
-        cart_buf_set(s, malloc(GEN3_CART_BUF_SIZE));
-    }
+    /* buf is the jobs' sector buffer from here. Nothing above uses cli, cart or omega; the first
+     * command is below. */
+    if(!s->cart_ready) cart_setup(s);
 
     /* The GBA starts the helper a few seconds after the last multiboot word */
     gen3_cart_expect_boot(&s->cart);
@@ -793,18 +843,11 @@ static Gen3CartResult cart_connect(Gen3CartSession* s) {
     return r;
 }
 
-/* A Connect after the first frees the jobs' buffer while the helper image is loaded and sent: the
- * image needs one block of its size, and the buffer, taken from the last image's hole, leaves too
- * little of it. A Connect that ends before taking it again takes it here. */
+/* A Connect after the first sends the helper through the same buffer: nothing is freed or taken
+ * again, so a later Connect needs no more memory than the first. */
 static Gen3CartResult cart_job_connect(Gen3CartSession* s) {
     cart_driver_stop(s);
-    if(s->cart_ready) {
-        free(s->buf);
-        cart_buf_set(s, NULL);
-    }
-    const Gen3CartResult r = cart_connect(s);
-    if(s->cart_ready && !s->buf) cart_buf_set(s, malloc(GEN3_CART_BUF_SIZE));
-    return r;
+    return cart_connect(s);
 }
 
 /* ---- The other jobs ---- */
@@ -1089,7 +1132,7 @@ void gen3_cart_session_free(Gen3CartSession* s) {
     storage_file_free(s->log);
     furi_record_close(RECORD_STORAGE);
     gen3_store_furi_free(s->store);
-    free(s->img);
+    cart_helper_close(s); /* every Connect closes it; the worker has ended */
     free(s->buf);
     furi_mutex_free(s->lock);
     furi_mutex_free(s->log_lock);
